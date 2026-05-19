@@ -1,4 +1,6 @@
 import { getPermissionModesForFlavor, isPermissionModeAllowedForFlavor, supportsModelChange, toSessionSummary } from '@hapi/protocol'
+import { existsSync, readFileSync, readdirSync } from 'fs'
+import { join } from 'path'
 import { CodexCollaborationModeSchema, PermissionModeSchema } from '@hapi/protocol/schemas'
 import { Hono } from 'hono'
 import { z } from 'zod'
@@ -86,6 +88,146 @@ function estimateBase64Bytes(base64: string): number {
     return Math.floor((len * 3) / 4) - padding
 }
 
+function isPidAlive(pid: number): boolean {
+    try { process.kill(pid, 0); return true } catch { return false }
+}
+
+function isNativeLoopActive(sessionPath: string, hapiSessionId?: string): boolean {
+    // Check active lock first
+    const lockPath = join(sessionPath, '.hapi', 'loop-lock')
+    if (existsSync(lockPath)) {
+        try {
+            const data = JSON.parse(readFileSync(lockPath, 'utf-8'))
+            const pid: number = data.pid
+            if (hapiSessionId && data.hapiSessionId && data.hapiSessionId !== hapiSessionId) {
+                // lock belongs to a different session
+            } else if (isPidAlive(pid)) return true
+        } catch {}
+    }
+    // Check completed marker — badge persists after loop finishes
+    const completedPath = join(sessionPath, '.hapi', 'loop-completed')
+    if (existsSync(completedPath)) {
+        try {
+            const data = JSON.parse(readFileSync(completedPath, 'utf-8'))
+            if (!hapiSessionId || !data.hapiSessionId || data.hapiSessionId === hapiSessionId) return true
+        } catch {}
+    }
+    return false
+}
+
+function readDispatcherSessionId(sessionPath: string): string | null {
+    const sidPath = join(sessionPath, '.loop-logs', 'hapi-session-id')
+    if (!existsSync(sidPath)) return null
+    try {
+        return readFileSync(sidPath, 'utf-8').trim() || null
+    } catch {
+        return null
+    }
+}
+
+function isDispatcherLoopAlive(sessionPath: string): boolean {
+    const pidPath = join(sessionPath, '.loop-logs', 'pid')
+    if (!existsSync(pidPath)) return false
+    try {
+        const pid = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10)
+        return !isNaN(pid) && isPidAlive(pid)
+    } catch {
+        return false
+    }
+}
+
+/**
+ * /hapi-loop runs the loop in a dedicated worktree under <repo>/.claude/worktrees/loop-*.
+ * The owning session's reported path is the repo root, so without this scan the badge
+ * would never be found. Returns the session IDs claimed by any worktree loop under basePath.
+ */
+function collectWorktreeLoopOwners(basePath: string): string[] {
+    const owners: string[] = []
+    const worktreesDir = join(basePath, '.claude', 'worktrees')
+    if (!existsSync(worktreesDir)) return owners
+    let entries: string[]
+    try {
+        entries = readdirSync(worktreesDir)
+    } catch {
+        return owners
+    }
+    for (const name of entries) {
+        if (!name.startsWith('loop-')) continue
+        const wt = join(worktreesDir, name)
+        // Dispatcher claim (persists after loop ends)
+        const claimed = readDispatcherSessionId(wt)
+        if (claimed) {
+            owners.push(claimed)
+            continue
+        }
+        // HAPI-native lock/completed marker carrying a session id
+        for (const marker of ['loop-lock', 'loop-completed']) {
+            const mp = join(wt, '.hapi', marker)
+            if (!existsSync(mp)) continue
+            try {
+                const data = JSON.parse(readFileSync(mp, 'utf-8'))
+                if (data.hapiSessionId) {
+                    if (marker === 'loop-completed' || isPidAlive(data.pid)) owners.push(data.hapiSessionId)
+                }
+            } catch {}
+        }
+    }
+    return owners
+}
+
+/**
+ * Compute loopActive for each session. For the dispatcher pattern (.loop-logs/pid),
+ * we have no session ID in the pid file, so we only mark the most-recently-updated
+ * session per directory to avoid tagging every session in the project.
+ */
+function computeLoopActiveIds(sessions: Session[]): Set<string> {
+    const result = new Set<string>()
+    const knownIds = new Set(sessions.map(s => s.id))
+
+    // HAPI-native lock: per-session match via hapiSessionId
+    for (const s of sessions) {
+        if (s.metadata?.path && isNativeLoopActive(s.metadata.path, s.id)) {
+            result.add(s.id)
+        }
+    }
+
+    // Dispatcher pattern: group by path, tag only the session that called claim_loop.
+    // The claim file persists after the loop ends so the badge stays visible.
+    // Falls back to most-recently-updated only when no claim file exists AND loop is still running.
+    const byPath = new Map<string, Session[]>()
+    for (const s of sessions) {
+        const p = s.metadata?.path
+        if (!p) continue
+        if (!byPath.has(p)) byPath.set(p, [])
+        byPath.get(p)!.push(s)
+    }
+    for (const [path, group] of byPath) {
+        const claimedSessionId = readDispatcherSessionId(path)
+        if (claimedSessionId) {
+            // Claim file exists — show badge regardless of whether loop is still running
+            const owner = group.find(s => s.id === claimedSessionId)
+            if (owner) result.add(owner.id)
+        } else if (isDispatcherLoopAlive(path)) {
+            // No claim file but loop is running — fall back to most recently updated
+            const mostRecent = group.reduce((a, b) => a.updatedAt >= b.updatedAt ? a : b)
+            result.add(mostRecent.id)
+        }
+    }
+
+    // Worktree loops (/hapi-loop): claim lives in the worktree, but the owning
+    // session's path is the repo root — scan worktrees under each unique base path.
+    const scannedBases = new Set<string>()
+    for (const p of byPath.keys()) {
+        if (scannedBases.has(p)) continue
+        scannedBases.add(p)
+        for (const ownerId of collectWorktreeLoopOwners(p)) {
+            if (knownIds.has(ownerId)) result.add(ownerId)
+        }
+    }
+
+    return result
+}
+
 export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -98,7 +240,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const getPendingCount = (s: Session) => s.agentState?.requests ? Object.keys(s.agentState.requests).length : 0
 
         const namespace = c.get('namespace')
-        const sessions = engine.getSessionsByNamespace(namespace)
+        const allSessions = engine.getSessionsByNamespace(namespace)
+        const loopActiveIds = computeLoopActiveIds(allSessions)
+        const sessions = allSessions
             .sort((a, b) => {
                 // Active sessions first
                 if (a.active !== b.active) {
@@ -113,7 +257,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 // Then by updatedAt
                 return b.updatedAt - a.updatedAt
             })
-            .map(toSessionSummary)
+            .map(s => ({ ...toSessionSummary(s), loopActive: loopActiveIds.has(s.id) }))
 
         return c.json({ sessions })
     })
@@ -642,6 +786,32 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 error: error instanceof Error ? error.message : 'Failed to list OpenCode models'
             }, 500)
         }
+    })
+
+    app.get('/sessions/:id/blobs/:blobId', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const blobId = c.req.param('blobId')
+        const blob = engine.getSessionBlob(sessionResult.sessionId, blobId)
+        if (!blob) {
+            return c.json({ error: 'Not found' }, 404)
+        }
+
+        const buffer = Buffer.from(blob.data, 'base64')
+        return new Response(buffer, {
+            headers: {
+                'Content-Type': blob.mimeType,
+                'Cache-Control': 'public, max-age=31536000, immutable'
+            }
+        })
     })
 
     return app
