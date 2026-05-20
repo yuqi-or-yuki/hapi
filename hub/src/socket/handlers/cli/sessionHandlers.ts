@@ -95,7 +95,8 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
         const session = sessionAccess.value
 
-        const msg = store.messages.addMessage(sid, content, localId)
+        const processedContent = extractAndStoreImages(content, sid, store)
+        const msg = store.messages.addMessage(sid, processedContent, localId)
         if (shouldRecordSessionActivity(content)) {
             onSessionActivity?.(sid, msg.createdAt)
         }
@@ -289,6 +290,31 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
     })
 
+    socket.on('store-blob', (data: unknown, ack?: (response: { blobId: string } | { error: string }) => void) => {
+        if (typeof ack !== 'function') return
+        if (
+            !data || typeof data !== 'object' ||
+            typeof (data as Record<string, unknown>).sid !== 'string' ||
+            typeof (data as Record<string, unknown>).mimeType !== 'string' ||
+            typeof (data as Record<string, unknown>).data !== 'string'
+        ) {
+            ack({ error: 'Invalid payload' })
+            return
+        }
+        const { sid, mimeType, data: blobData } = data as { sid: string; mimeType: string; data: string }
+        const sessionAccess = resolveSessionAccess(sid)
+        if (!sessionAccess.ok) {
+            ack({ error: 'Access denied' })
+            return
+        }
+        try {
+            const blobId = store.blobs.storeBlob(sid, mimeType, blobData)
+            ack({ blobId })
+        } catch {
+            ack({ error: 'Failed to store blob' })
+        }
+    })
+
     socket.on('session-end', (data: SessionEndPayload) => {
         if (!data || typeof data.sid !== 'string' || typeof data.time !== 'number') {
             return
@@ -324,4 +350,88 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
 
         onSessionEnd?.(data)
     })
+}
+
+function extractAndStoreImages(content: unknown, sid: string, store: Store): unknown {
+    if (!content || typeof content !== 'object') return content
+    const contentType = (content as Record<string, unknown>).type
+    const msg = (content as Record<string, unknown>).message
+    if (!msg || typeof msg !== 'object') return content
+    const msgContent = (msg as Record<string, unknown>).content
+    if (!Array.isArray(msgContent)) return content
+
+    // Handle user messages: images inside tool_result blocks
+    if (contentType === 'user') {
+        let hasImages = false
+        for (const block of msgContent) {
+            if (block?.type === 'tool_result' && Array.isArray(block.content)) {
+                for (const inner of block.content) {
+                    if (inner?.type === 'image' && inner?.source?.type === 'base64') {
+                        hasImages = true
+                        break
+                    }
+                }
+            }
+            if (hasImages) break
+        }
+        if (!hasImages) return content
+
+        const transformed = JSON.parse(JSON.stringify(content)) as Record<string, unknown>
+        const transformedMsg = transformed.message as Record<string, unknown>
+        const blocks = transformedMsg.content as Array<Record<string, unknown>>
+        for (const block of blocks) {
+            if (block.type !== 'tool_result' || !Array.isArray(block.content)) continue
+            const innerBlocks = block.content as Array<Record<string, unknown>>
+            for (let i = 0; i < innerBlocks.length; i++) {
+                const inner = innerBlocks[i]
+                if (inner.type !== 'image') continue
+                const source = inner.source as Record<string, unknown> | undefined
+                if (!source || source.type !== 'base64') continue
+                const mimeType = typeof source.media_type === 'string' ? source.media_type : 'image/png'
+                const data = typeof source.data === 'string' ? source.data : null
+                if (!data) continue
+                try {
+                    const blobId = store.blobs.storeBlob(sid, mimeType, data)
+                    innerBlocks[i] = { type: 'hapi_image', blobId, mimeType }
+                } catch {
+                    innerBlocks[i] = { type: 'text', text: `[image: ${mimeType}]` }
+                }
+            }
+        }
+        return transformed
+    }
+
+    // Handle assistant messages: images directly in content array
+    if (contentType === 'assistant') {
+        let hasImages = false
+        for (const block of msgContent) {
+            if (block?.type === 'image' && block?.source?.type === 'base64') {
+                hasImages = true
+                break
+            }
+        }
+        if (!hasImages) return content
+
+        const transformed = JSON.parse(JSON.stringify(content)) as Record<string, unknown>
+        const transformedMsg = transformed.message as Record<string, unknown>
+        const blocks = transformedMsg.content as Array<Record<string, unknown>>
+        for (let i = 0; i < blocks.length; i++) {
+            const block = blocks[i]
+            if (block.type !== 'image') continue
+            const source = block.source as Record<string, unknown> | undefined
+            if (!source || source.type !== 'base64') continue
+            const mimeType = typeof source.media_type === 'string' ? source.media_type : 'image/png'
+            const data = typeof source.data === 'string' ? source.data : null
+            if (!data) continue
+            try {
+                const blobId = store.blobs.storeBlob(sid, mimeType, data)
+                blocks[i] = { type: 'hapi_image', blobId, mimeType }
+            } catch {
+                blocks[i] = { type: 'text', text: `[image: ${mimeType}]` }
+            }
+        }
+        return transformed
+    }
+
+    return content
 }
