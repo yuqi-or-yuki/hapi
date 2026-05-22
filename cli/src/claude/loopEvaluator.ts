@@ -100,20 +100,13 @@ export class LoopEvaluator {
         }
     }
 
-    /** Release the lock if this process owns it. Writes a completed marker so the badge persists. */
+    /** Release the lock if this process owns it. Removing the lock clears the UI badge. */
     static releaseLock(cwd: string): void {
         const lockPath = join(cwd, '.hapi', 'loop-lock')
         if (!existsSync(lockPath)) return
         try {
             const data = JSON.parse(readFileSync(lockPath, 'utf-8'))
             if (data.pid === process.pid) {
-                // Write completed marker before deleting the lock so the badge persists
-                try {
-                    writeFileSync(
-                        join(cwd, '.hapi', 'loop-completed'),
-                        JSON.stringify({ hapiSessionId: data.hapiSessionId, completedAt: new Date().toISOString() })
-                    )
-                } catch {}
                 unlinkSync(lockPath)
                 logger.debug('[loop] lock released')
             }

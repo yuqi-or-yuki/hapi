@@ -93,26 +93,17 @@ function isPidAlive(pid: number): boolean {
 }
 
 function isNativeLoopActive(sessionPath: string, hapiSessionId?: string): boolean {
-    // Check active lock first
+    // Badge shows only while the loop is actively running (lock held + PID alive).
+    // When the loop finishes, releaseLock removes the lock and the badge clears.
     const lockPath = join(sessionPath, '.hapi', 'loop-lock')
-    if (existsSync(lockPath)) {
-        try {
-            const data = JSON.parse(readFileSync(lockPath, 'utf-8'))
-            const pid: number = data.pid
-            if (hapiSessionId && data.hapiSessionId && data.hapiSessionId !== hapiSessionId) {
-                // lock belongs to a different session
-            } else if (isPidAlive(pid)) return true
-        } catch {}
+    if (!existsSync(lockPath)) return false
+    try {
+        const data = JSON.parse(readFileSync(lockPath, 'utf-8'))
+        if (hapiSessionId && data.hapiSessionId && data.hapiSessionId !== hapiSessionId) return false
+        return isPidAlive(data.pid)
+    } catch {
+        return false
     }
-    // Check completed marker — badge persists after loop finishes
-    const completedPath = join(sessionPath, '.hapi', 'loop-completed')
-    if (existsSync(completedPath)) {
-        try {
-            const data = JSON.parse(readFileSync(completedPath, 'utf-8'))
-            if (!hapiSessionId || !data.hapiSessionId || data.hapiSessionId === hapiSessionId) return true
-        } catch {}
-    }
-    return false
 }
 
 function readDispatcherSessionId(sessionPath: string): string | null {
@@ -139,7 +130,8 @@ function isDispatcherLoopAlive(sessionPath: string): boolean {
 /**
  * /hapi-loop runs the loop in a dedicated worktree under <repo>/.claude/worktrees/loop-*.
  * The owning session's reported path is the repo root, so without this scan the badge
- * would never be found. Returns the session IDs claimed by any worktree loop under basePath.
+ * would never be found. Returns session IDs of worktree loops that are still RUNNING
+ * (badge clears once the loop finishes).
  */
 function collectWorktreeLoopOwners(basePath: string): string[] {
     const owners: string[] = []
@@ -154,21 +146,17 @@ function collectWorktreeLoopOwners(basePath: string): string[] {
     for (const name of entries) {
         if (!name.startsWith('loop-')) continue
         const wt = join(worktreesDir, name)
-        // Dispatcher claim (persists after loop ends)
-        const claimed = readDispatcherSessionId(wt)
-        if (claimed) {
-            owners.push(claimed)
-            continue
+        // Dispatcher claim — only counts while the loop is still alive
+        if (isDispatcherLoopAlive(wt)) {
+            const claimed = readDispatcherSessionId(wt)
+            if (claimed) owners.push(claimed)
         }
-        // HAPI-native lock/completed marker carrying a session id
-        for (const marker of ['loop-lock', 'loop-completed']) {
-            const mp = join(wt, '.hapi', marker)
-            if (!existsSync(mp)) continue
+        // HAPI-native lock carrying a session id — only while alive
+        const lock = join(wt, '.hapi', 'loop-lock')
+        if (existsSync(lock)) {
             try {
-                const data = JSON.parse(readFileSync(mp, 'utf-8'))
-                if (data.hapiSessionId) {
-                    if (marker === 'loop-completed' || isPidAlive(data.pid)) owners.push(data.hapiSessionId)
-                }
+                const data = JSON.parse(readFileSync(lock, 'utf-8'))
+                if (data.hapiSessionId && isPidAlive(data.pid)) owners.push(data.hapiSessionId)
             } catch {}
         }
     }
@@ -191,9 +179,8 @@ function computeLoopActiveIds(sessions: Session[]): Set<string> {
         }
     }
 
-    // Dispatcher pattern: group by path, tag only the session that called claim_loop.
-    // The claim file persists after the loop ends so the badge stays visible.
-    // Falls back to most-recently-updated only when no claim file exists AND loop is still running.
+    // Dispatcher pattern: group by path. Badge shows only while the loop is still
+    // running; it clears once the dispatcher process exits.
     const byPath = new Map<string, Session[]>()
     for (const s of sessions) {
         const p = s.metadata?.path
@@ -202,13 +189,14 @@ function computeLoopActiveIds(sessions: Session[]): Set<string> {
         byPath.get(p)!.push(s)
     }
     for (const [path, group] of byPath) {
+        if (!isDispatcherLoopAlive(path)) continue
         const claimedSessionId = readDispatcherSessionId(path)
         if (claimedSessionId) {
-            // Claim file exists — show badge regardless of whether loop is still running
+            // Tag the session that called claim_loop
             const owner = group.find(s => s.id === claimedSessionId)
             if (owner) result.add(owner.id)
-        } else if (isDispatcherLoopAlive(path)) {
-            // No claim file but loop is running — fall back to most recently updated
+        } else {
+            // No claim file — fall back to most recently updated
             const mostRecent = group.reduce((a, b) => a.updatedAt >= b.updatedAt ? a : b)
             result.add(mostRecent.id)
         }
