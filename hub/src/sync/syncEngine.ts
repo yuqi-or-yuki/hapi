@@ -292,6 +292,10 @@ export class SyncEngine {
         return this.machineCache.getOrCreateMachine(id, metadata, runnerState, namespace)
     }
 
+    cloneSession(sessionId: string, namespace: string, modelOverride?: string): Session {
+        return this.sessionCache.cloneSession(sessionId, namespace, modelOverride)
+    }
+
     async sendMessage(
         sessionId: string,
         payload: {
@@ -353,6 +357,10 @@ export class SyncEngine {
 
     async renameSession(sessionId: string, name: string): Promise<void> {
         await this.sessionCache.renameSession(sessionId, name)
+    }
+
+    async setSessionReadyForReview(sessionId: string, readyForReview: boolean): Promise<void> {
+        await this.sessionCache.setSessionReadyForReview(sessionId, readyForReview)
     }
 
     async deleteSession(sessionId: string): Promise<void> {
@@ -481,13 +489,11 @@ export class SyncEngine {
             return null
         })()
 
-        if (!targetMachine) {
-            return { type: 'error', message: 'No machine online', code: 'no_machine_online' }
-        }
+        const machine = targetMachine ?? onlineMachines[0]
 
         const effectivePermissionMode = opts?.permissionMode ?? session.permissionMode ?? undefined
         const spawnResult = await this.rpcGateway.spawnSession(
-            targetMachine.id,
+            machine.id,
             metadata.path,
             flavor,
             session.model ?? undefined,
@@ -665,6 +671,14 @@ export class SyncEngine {
 
     async deleteUploadFile(sessionId: string, path: string): Promise<RpcDeleteUploadResponse> {
         return await this.rpcGateway.deleteUploadFile(sessionId, path)
+    }
+
+    storeSessionBlob(sessionId: string, mimeType: string, data: string): string {
+        return this.store.blobs.storeBlob(sessionId, mimeType, data)
+    }
+
+    getSessionBlob(sessionId: string, blobId: string): { mimeType: string; data: string } | null {
+        return this.store.blobs.getBlob(sessionId, blobId)
     }
 
     async runRipgrep(sessionId: string, args: string[], cwd?: string): Promise<RpcCommandResponse> {

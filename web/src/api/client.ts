@@ -73,6 +73,12 @@ export class ApiClient {
         this.onUnauthorized = options?.onUnauthorized ?? null
     }
 
+    getBlobUrl(sessionId: string, blobId: string): string {
+        const token = this.getToken ? (this.getToken() ?? this.token) : this.token
+        const path = `/api/sessions/${sessionId}/blobs/${blobId}?token=${encodeURIComponent(token)}`
+        return this.buildUrl(path)
+    }
+
     private buildUrl(path: string): string {
         if (!this.baseUrl) {
             return path
@@ -494,10 +500,24 @@ export class ApiClient {
         })
     }
 
+    async setSessionReadyForReview(sessionId: string, readyForReview: boolean): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/review`, {
+            method: 'PATCH',
+            body: JSON.stringify({ readyForReview })
+        })
+    }
+
     async deleteSession(sessionId: string): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
             method: 'DELETE'
         })
+    }
+
+    async cloneSession(sessionId: string, model?: string | null): Promise<SessionResponse> {
+        return await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/clone`, {
+            method: 'POST',
+            body: JSON.stringify(model != null ? { model } : {})
+        }) as SessionResponse
     }
 
     async fetchVoiceToken(options?: { customAgentId?: string; customApiKey?: string }): Promise<{

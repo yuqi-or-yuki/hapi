@@ -22,6 +22,7 @@ export function useSessionActions(
     setEffort: (effort: string | null) => Promise<void>
     renameSession: (name: string) => Promise<void>
     deleteSession: () => Promise<void>
+    cloneSession: (model?: string | null) => Promise<string>
     isPending: boolean
 } {
     const queryClient = useQueryClient()
@@ -152,6 +153,17 @@ export function useSessionActions(
         },
     })
 
+    const cloneMutation = useMutation({
+        mutationFn: async (model?: string | null): Promise<string> => {
+            if (!api || !sessionId) {
+                throw new Error('Session unavailable')
+            }
+            const response = await api.cloneSession(sessionId, model)
+            return response.session.id
+        },
+        onSuccess: () => void queryClient.invalidateQueries({ queryKey: queryKeys.sessions }),
+    })
+
     return {
         abortSession: abortMutation.mutateAsync,
         archiveSession: archiveMutation.mutateAsync,
@@ -163,6 +175,7 @@ export function useSessionActions(
         setEffort: effortMutation.mutateAsync,
         renameSession: renameMutation.mutateAsync,
         deleteSession: deleteMutation.mutateAsync,
+        cloneSession: cloneMutation.mutateAsync,
         isPending: abortMutation.isPending
             || archiveMutation.isPending
             || switchMutation.isPending
@@ -172,6 +185,7 @@ export function useSessionActions(
             || modelReasoningEffortMutation.isPending
             || effortMutation.isPending
             || renameMutation.isPending
-            || deleteMutation.isPending,
+            || deleteMutation.isPending
+            || cloneMutation.isPending,
     }
 }

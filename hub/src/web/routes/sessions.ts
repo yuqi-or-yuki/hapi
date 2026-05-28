@@ -36,6 +36,10 @@ const renameSessionSchema = z.object({
     name: z.string().min(1).max(255)
 })
 
+const reviewSchema = z.object({
+    readyForReview: z.boolean()
+})
+
 const uploadSchema = z.object({
     filename: z.string().min(1).max(255),
     content: z.string().min(1),
@@ -163,6 +167,78 @@ function collectWorktreeLoopOwners(basePath: string): string[] {
     return owners
 }
 
+
+function readSessionIdFile(path: string): string | null {
+    if (!existsSync(path)) return null
+    try {
+        return readFileSync(path, 'utf-8').trim() || null
+    } catch {
+        return null
+    }
+}
+
+function readDebateSessionId(runDir: string): string | null {
+    return readSessionIdFile(join(runDir, 'hapi-session-id'))
+}
+
+function isDebateRunActive(runDir: string): boolean {
+    const statePath = join(runDir, 'state.json')
+    if (!existsSync(statePath)) return false
+    try {
+        const data = JSON.parse(readFileSync(statePath, 'utf-8')) as {
+            status?: string
+            orchestratorPid?: number
+            blue?: { pid?: number; status?: string }
+            red?: { pid?: number; status?: string }
+            synthesis?: { pid?: number; status?: string }
+        }
+        if (data.status !== 'running') return false
+        const pids = [
+            data.orchestratorPid,
+            data.blue?.pid,
+            data.red?.pid,
+            data.synthesis?.pid,
+        ].filter((pid): pid is number => typeof pid === 'number' && Number.isFinite(pid))
+        return pids.some(isPidAlive)
+    } catch {
+        return false
+    }
+}
+
+function collectDebateOwners(basePath: string): string[] {
+    const owners: string[] = []
+    const debatesDir = join(basePath, '.hapi-debates')
+    if (!existsSync(debatesDir)) return owners
+    let entries: string[]
+    try {
+        entries = readdirSync(debatesDir)
+    } catch {
+        return owners
+    }
+    for (const name of entries) {
+        const runDir = join(debatesDir, name)
+        if (!isDebateRunActive(runDir)) continue
+        const ownerId = readDebateSessionId(runDir)
+        if (ownerId) owners.push(ownerId)
+    }
+    return owners
+}
+
+function computeDebateActiveIds(sessions: Session[]): Set<string> {
+    const result = new Set<string>()
+    const knownIds = new Set(sessions.map(s => s.id))
+    const scannedBases = new Set<string>()
+    for (const s of sessions) {
+        const p = s.metadata?.path
+        if (!p || scannedBases.has(p)) continue
+        scannedBases.add(p)
+        for (const ownerId of collectDebateOwners(p)) {
+            if (knownIds.has(ownerId)) result.add(ownerId)
+        }
+    }
+    return result
+}
+
 /**
  * Compute loopActive for each session. For the dispatcher pattern (.loop-logs/pid),
  * we have no session ID in the pid file, so we only mark the most-recently-updated
@@ -230,6 +306,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const namespace = c.get('namespace')
         const allSessions = engine.getSessionsByNamespace(namespace)
         const loopActiveIds = computeLoopActiveIds(allSessions)
+        const debateActiveIds = computeDebateActiveIds(allSessions)
         const sessions = allSessions
             .sort((a, b) => {
                 // Active sessions first
@@ -245,7 +322,11 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 // Then by updatedAt
                 return b.updatedAt - a.updatedAt
             })
-            .map(s => ({ ...toSessionSummary(s), loopActive: loopActiveIds.has(s.id) }))
+            .map(s => ({
+                ...toSessionSummary(s),
+                loopActive: loopActiveIds.has(s.id),
+                debateActive: debateActiveIds.has(s.id)
+            }))
 
         return c.json({ sessions })
     })
@@ -369,6 +450,27 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to delete upload'
             }, 500)
+        }
+    })
+
+    app.post('/sessions/:id/clone', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const body = await c.req.json().catch(() => ({})) as { model?: string | null }
+        try {
+            const namespace = c.get('namespace')
+            const cloned = engine.cloneSession(sessionResult.sessionId, namespace, body.model ?? undefined)
+            return c.json({ session: cloned })
+        } catch (error) {
+            return c.json({ error: error instanceof Error ? error.message : 'Clone failed' }, 500)
         }
     })
 
@@ -616,6 +718,32 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             if (message.includes('concurrently') || message.includes('version')) {
                 return c.json({ error: message }, 409)
             }
+            return c.json({ error: message }, 500)
+        }
+    })
+
+    app.patch('/sessions/:id/review', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = reviewSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body: readyForReview boolean is required' }, 400)
+        }
+
+        try {
+            await engine.setSessionReadyForReview(sessionResult.sessionId, parsed.data.readyForReview)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update review state'
             return c.json({ error: message }, 500)
         }
     })

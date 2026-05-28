@@ -220,6 +220,10 @@ function SessionsPage() {
                         renderHeader={false}
                         api={api}
                         machineLabelsById={machineLabelsById}
+                        onCloned={(newSessionId) => navigate({
+                            to: '/sessions/$sessionId',
+                            params: { sessionId: newSessionId },
+                        })}
                     />
                 </div>
             </div>
@@ -386,6 +390,10 @@ function SessionPage() {
             onRetryMessage={retryMessage}
             autocompleteSuggestions={getAutocompleteSuggestions}
             availableSlashCommands={slashCommands}
+            onCloned={(newSessionId) => navigate({
+                to: '/sessions/$sessionId',
+                params: { sessionId: newSessionId },
+            })}
         />
     )
 }
@@ -665,7 +673,7 @@ export function createAppRouter(history?: RouterHistory) {
     return createRouter({
         routeTree,
         history,
-        scrollRestoration: true,
+        scrollRestoration: false,
     })
 }
 

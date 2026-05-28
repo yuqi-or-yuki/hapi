@@ -1,7 +1,7 @@
 import type { Database } from 'bun:sqlite'
 
 import type { StoredMessage } from './types'
-import { addMessage, cancelQueuedMessage, deleteQueuedMessageById, lookupQueuedMessage, getMessages, getMessagesAfter, getMessagesByPosition, getUninvokedLocalMessages, markMessagesInvoked, mergeSessionMessages, type CancelQueuedMessageResult, type LookupQueuedMessageResult } from './messages'
+import { addMessage, cancelQueuedMessage, copySessionMessages, deleteQueuedMessageById, lookupQueuedMessage, getMessages, getMessagesAfter, getMessagesByPosition, getUninvokedLocalMessages, markMessagesInvoked, mergeSessionMessages, type CancelQueuedMessageResult, type LookupQueuedMessageResult } from './messages'
 
 export class MessageStore {
     private readonly db: Database
@@ -48,5 +48,9 @@ export class MessageStore {
 
     mergeSessionMessages(fromSessionId: string, toSessionId: string): { moved: number; oldMaxSeq: number; newMaxSeq: number } {
         return mergeSessionMessages(this.db, fromSessionId, toSessionId)
+    }
+
+    copySessionMessages(fromSessionId: string, toSessionId: string): { copied: number } {
+        return copySessionMessages(this.db, fromSessionId, toSessionId)
     }
 }

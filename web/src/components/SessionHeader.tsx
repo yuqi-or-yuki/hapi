@@ -6,6 +6,7 @@ import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
+import { CloneSessionDialog } from '@/components/CloneSessionDialog'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -91,6 +92,8 @@ export function SessionHeader(props: {
     onOpenOutline?: () => void
     api: ApiClient | null
     onSessionDeleted?: () => void
+    onCloned?: (newSessionId: string) => void
+    lastPrompt?: string | null
 }) {
     const { t } = useTranslation()
     const { session, api, onSessionDeleted } = props
@@ -98,6 +101,7 @@ export function SessionHeader(props: {
     const worktreeBranch = session.metadata?.worktree?.branch
     const modelLabel = getSessionModelLabel(session)
 
+    const [promptOpen, setPromptOpen] = useState(false)
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
     const menuId = useId()
@@ -105,8 +109,9 @@ export function SessionHeader(props: {
     const [renameOpen, setRenameOpen] = useState(false)
     const [archiveOpen, setArchiveOpen] = useState(false)
     const [deleteOpen, setDeleteOpen] = useState(false)
+    const [cloneOpen, setCloneOpen] = useState(false)
 
-    const { archiveSession, renameSession, deleteSession, isPending } = useSessionActions(
+    const { archiveSession, renameSession, deleteSession, cloneSession, isPending } = useSessionActions(
         api,
         session.id,
         session.metadata?.flavor ?? null
@@ -115,6 +120,11 @@ export function SessionHeader(props: {
     const handleDelete = async () => {
         await deleteSession()
         onSessionDeleted?.()
+    }
+
+    const handleClone = async (model: string | null) => {
+        const newId = await cloneSession(model)
+        props.onCloned?.(newId)
     }
 
     const handleMenuToggle = () => {
@@ -213,6 +223,26 @@ export function SessionHeader(props: {
                         <MoreVerticalIcon />
                     </button>
                 </div>
+
+            {props.lastPrompt ? (
+                <div className="border-t border-[var(--app-border)]">
+                    <button
+                        type="button"
+                        onClick={() => setPromptOpen((o) => !o)}
+                        className="mx-auto w-full max-w-content flex items-center gap-2 px-3 py-1.5 text-left"
+                    >
+                        <svg
+                            className={`h-3 w-3 shrink-0 text-[var(--app-hint)] transition-transform ${promptOpen ? 'rotate-90' : ''}`}
+                            viewBox="0 0 12 12" fill="none"
+                        >
+                            <path d="M4 2l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
+                        <span className={`min-w-0 text-xs text-[var(--app-hint)] ${promptOpen ? '' : 'truncate'}`}>
+                            {props.lastPrompt}
+                        </span>
+                    </button>
+                </div>
+            ) : null}
             </div>
 
             <SessionActionMenu
@@ -222,6 +252,7 @@ export function SessionHeader(props: {
                 onRename={() => setRenameOpen(true)}
                 onArchive={() => setArchiveOpen(true)}
                 onDelete={() => setDeleteOpen(true)}
+                onClone={() => setCloneOpen(true)}
                 anchorPoint={menuAnchorPoint}
                 menuId={menuId}
             />
@@ -256,6 +287,14 @@ export function SessionHeader(props: {
                 onConfirm={handleDelete}
                 isPending={isPending}
                 destructive
+            />
+
+            <CloneSessionDialog
+                isOpen={cloneOpen}
+                onClose={() => setCloneOpen(false)}
+                sessionName={title}
+                onClone={handleClone}
+                isPending={isPending}
             />
         </>
     )

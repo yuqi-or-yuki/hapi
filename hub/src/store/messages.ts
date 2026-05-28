@@ -347,3 +347,45 @@ export function mergeSessionMessages(
         throw error
     }
 }
+
+export function copySessionMessages(
+    db: Database,
+    fromSessionId: string,
+    toSessionId: string
+): { copied: number } {
+    if (fromSessionId === toSessionId) {
+        return { copied: 0 }
+    }
+
+    const rows = db.prepare(
+        'SELECT content, created_at, seq, invoked_at FROM messages WHERE session_id = ? ORDER BY seq ASC'
+    ).all(fromSessionId) as Array<{ content: string; created_at: number; seq: number; invoked_at: number | null }>
+
+    if (rows.length === 0) {
+        return { copied: 0 }
+    }
+
+    const insert = db.prepare(`
+        INSERT INTO messages (id, session_id, content, created_at, seq, local_id, invoked_at)
+        VALUES (@id, @session_id, @content, @created_at, @seq, NULL, @invoked_at)
+    `)
+
+    try {
+        db.exec('BEGIN')
+        for (const row of rows) {
+            insert.run({
+                id: randomUUID(),
+                session_id: toSessionId,
+                content: row.content,
+                created_at: row.created_at,
+                seq: row.seq,
+                invoked_at: row.invoked_at ?? row.created_at
+            })
+        }
+        db.exec('COMMIT')
+        return { copied: rows.length }
+    } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+    }
+}

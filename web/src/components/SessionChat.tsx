@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
-import { AssistantRuntimeProvider } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, useAssistantApi } from '@assistant-ui/react'
 import type { ApiClient } from '@/api/client'
 import type {
     AttachmentMetadata,
@@ -64,6 +64,68 @@ function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
     return false
 }
 
+function ChatDropZone({ children, enabled }: { children: React.ReactNode; enabled: boolean }) {
+    const api = useAssistantApi()
+    const [isDragOver, setIsDragOver] = useState(false)
+    const dragCounterRef = useRef(0)
+
+    const handleDragEnter = useCallback((e: React.DragEvent) => {
+        e.preventDefault()
+        if (!enabled) return
+        dragCounterRef.current++
+        if (e.dataTransfer.types.includes('Files')) {
+            setIsDragOver(true)
+        }
+    }, [enabled])
+
+    const handleDragOver = useCallback((e: React.DragEvent) => {
+        e.preventDefault()
+        if (!enabled) return
+        e.dataTransfer.dropEffect = 'copy'
+    }, [enabled])
+
+    const handleDragLeave = useCallback((e: React.DragEvent) => {
+        e.preventDefault()
+        dragCounterRef.current--
+        if (dragCounterRef.current <= 0) {
+            dragCounterRef.current = 0
+            setIsDragOver(false)
+        }
+    }, [])
+
+    const handleDrop = useCallback(async (e: React.DragEvent) => {
+        e.preventDefault()
+        dragCounterRef.current = 0
+        setIsDragOver(false)
+        if (!enabled) return
+        const files = Array.from(e.dataTransfer.files)
+        for (const file of files) {
+            try {
+                await api.composer().addAttachment(file)
+            } catch (error) {
+                console.error('Error adding dropped file:', error)
+            }
+        }
+    }, [enabled, api])
+
+    return (
+        <div
+            className="relative flex min-h-0 flex-1 flex-col"
+            onDragEnter={handleDragEnter}
+            onDragOver={handleDragOver}
+            onDragLeave={handleDragLeave}
+            onDrop={handleDrop}
+        >
+            {children}
+            {isDragOver && (
+                <div className="pointer-events-none absolute inset-0 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-[var(--app-accent)] bg-[var(--app-accent)]/10">
+                    <p className="text-base font-medium text-[var(--app-accent)]">Drop files to attach</p>
+                </div>
+            )}
+        </div>
+    )
+}
+
 export function SessionChat(props: {
     api: ApiClient
     session: Session
@@ -84,6 +146,7 @@ export function SessionChat(props: {
     onRetryMessage?: (localId: string) => void
     autocompleteSuggestions?: (query: string) => Promise<Suggestion[]>
     availableSlashCommands?: readonly SlashCommand[]
+    onCloned?: (newSessionId: string) => void
 }) {
     const { haptic } = usePlatform()
     const { t } = useTranslation()
@@ -326,6 +389,25 @@ export function SessionChat(props: {
         [props.session]
     )
 
+    const lastPrompt = useMemo(() => {
+        for (let i = props.messages.length - 1; i >= 0; i--) {
+            const msg = props.messages[i]
+            // Web-sent messages carry originalText directly
+            if (msg.originalText?.trim()) return msg.originalText.trim()
+            // CLI-sent messages: parse envelope and accept only plain-text content
+            // (tool results have array content — skip those)
+            const normalized = normalizeDecryptedMessage(msg)
+            if (normalized?.role === 'user') {
+                const text = normalized.content.text.trim()
+                // Skip if the text looks like a JSON serialization of tool results
+                if (text && !text.startsWith('[{') && !text.startsWith('{')) {
+                    return text
+                }
+            }
+        }
+        return null
+    }, [props.messages])
+
     // Permission mode change handler
     const handlePermissionModeChange = useCallback(async (mode: PermissionMode) => {
         try {
@@ -441,6 +523,8 @@ export function SessionChat(props: {
                 onOpenOutline={() => setOutlineOpen(true)}
                 api={props.api}
                 onSessionDeleted={props.onBack}
+                onCloned={props.onCloned}
+                lastPrompt={lastPrompt}
             />
 
             {props.session.teamState && (
@@ -456,7 +540,7 @@ export function SessionChat(props: {
             ) : null}
 
             <AssistantRuntimeProvider runtime={runtime}>
-                <div className="relative flex min-h-0 flex-1 flex-col">
+                <ChatDropZone enabled={!!attachmentAdapter}>
                     <HappyThread
                         key={props.session.id}
                         api={props.api}
@@ -548,7 +632,7 @@ export function SessionChat(props: {
                         onVoiceToggle={voice ? handleVoiceToggle : undefined}
                         onVoiceMicToggle={voice ? handleVoiceMicToggle : undefined}
                     />
-                </div>
+                </ChatDropZone>
             </AssistantRuntimeProvider>
 
             {/* Voice session component - renders nothing but initializes ElevenLabs */}
