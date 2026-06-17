@@ -19,6 +19,7 @@ import { getTerminalFontSizeOptions, useTerminalFontSize, type TerminalFontSize 
 import { getComposerEnterBehaviorOptions, useComposerEnterBehavior, type ComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
 import { getTerminalToolDisplayModeOptions, useTerminalToolDisplayMode, type TerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import { getSessionListStatusModeOptions, useSessionListStatusMode, type SessionListStatusMode } from '@/hooks/useSessionListStatusMode'
+import { useHideArchivedSessions } from '@/hooks/useHideArchivedSessions'
 import {
     MAX_SESSION_PREVIEW_LIMIT,
     MIN_SESSION_PREVIEW_LIMIT,
@@ -335,6 +336,7 @@ export default function SettingsPage() {
     const { fontScale, setFontScale } = useFontScale()
     const { terminalFontSize, setTerminalFontSize } = useTerminalFontSize()
     const { sessionPreviewLimit, setSessionPreviewLimit } = useSessionPreviewLimit()
+    const { hideArchivedSessions, setHideArchivedSessions } = useHideArchivedSessions()
     const { composerEnterBehavior, setComposerEnterBehavior } = useComposerEnterBehavior()
     const { terminalToolDisplayMode, setTerminalToolDisplayMode } = useTerminalToolDisplayMode()
     const { sessionListStatusMode, setSessionListStatusMode } = useSessionListStatusMode()
@@ -836,6 +838,19 @@ export default function SettingsPage() {
                             decreaseLabel={t('settings.display.sessionPreviewLimit.decrease')}
                             increaseLabel={t('settings.display.sessionPreviewLimit.increase')}
                         />
+                        <button
+                            type="button"
+                            onClick={() => setHideArchivedSessions(!hideArchivedSessions)}
+                            className="flex w-full items-center justify-between px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
+                        >
+                            <div>
+                                <span className="text-[var(--app-fg)]">{t('settings.sessions.hideArchived')}</span>
+                                <p className="text-xs text-[var(--app-hint)] mt-0.5">{t('settings.sessions.hideArchived.hint')}</p>
+                            </div>
+                            <div className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors ${hideArchivedSessions ? 'bg-[var(--app-accent)]' : 'bg-[var(--app-subtle-bg)]'}`}>
+                                <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-lg transition-transform ${hideArchivedSessions ? 'translate-x-4' : 'translate-x-0'}`} />
+                            </div>
+                        </button>
                         <div ref={sessionListStatusContainerRef} className="relative">
                             <button
                                 type="button"
