@@ -251,6 +251,10 @@ function normalizeAssistantOutput(
                 const input = 'input' in block ? (block as Record<string, unknown>).input : undefined
                 const description = isObject(input) && typeof input.description === 'string' ? input.description : null
                 blocks.push({ type: 'tool-call', id: block.id, name, input, description, uuid, parentUUID })
+                continue
+            }
+            if (block.type === 'hapi_image' && typeof block.blobId === 'string') {
+                blocks.push({ type: 'text', text: `![image](hapi-blob://${block.blobId})`, uuid, parentUUID })
             }
         }
     }

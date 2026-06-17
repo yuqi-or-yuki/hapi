@@ -16,11 +16,17 @@ import {
     UploadFileRequestSchema
 } from '@hapi/protocol'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
+import { existsSync, readFileSync, readdirSync } from 'fs'
+import { join } from 'path'
+import { z } from 'zod'
 import { Hono } from 'hono'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 import { requireSessionFromParam, requireSyncEngine } from './guards'
 
+const reviewSchema = z.object({
+    readyForReview: z.boolean()
+})
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 
 function commandsFromMetadataSlashCommands(names: readonly string[] | undefined): SlashCommand[] {
@@ -54,6 +60,206 @@ function estimateBase64Bytes(base64: string): number {
     return Math.floor((len * 3) / 4) - padding
 }
 
+function isPidAlive(pid: number): boolean {
+    try { process.kill(pid, 0); return true } catch { return false }
+}
+
+function isNativeLoopActive(sessionPath: string, hapiSessionId?: string): boolean {
+    // Badge shows only while the loop is actively running (lock held + PID alive).
+    // When the loop finishes, releaseLock removes the lock and the badge clears.
+    const lockPath = join(sessionPath, '.hapi', 'loop-lock')
+    if (!existsSync(lockPath)) return false
+    try {
+        const data = JSON.parse(readFileSync(lockPath, 'utf-8'))
+        if (hapiSessionId && data.hapiSessionId && data.hapiSessionId !== hapiSessionId) return false
+        return isPidAlive(data.pid)
+    } catch {
+        return false
+    }
+}
+
+function readDispatcherSessionId(sessionPath: string): string | null {
+    const sidPath = join(sessionPath, '.loop-logs', 'hapi-session-id')
+    if (!existsSync(sidPath)) return null
+    try {
+        return readFileSync(sidPath, 'utf-8').trim() || null
+    } catch {
+        return null
+    }
+}
+
+function isDispatcherLoopAlive(sessionPath: string): boolean {
+    const pidPath = join(sessionPath, '.loop-logs', 'pid')
+    if (!existsSync(pidPath)) return false
+    try {
+        const pid = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10)
+        return !isNaN(pid) && isPidAlive(pid)
+    } catch {
+        return false
+    }
+}
+
+/**
+ * /hapi-loop runs the loop in a dedicated worktree under <repo>/.claude/worktrees/loop-*.
+ * The owning session's reported path is the repo root, so without this scan the badge
+ * would never be found. Returns session IDs of worktree loops that are still RUNNING
+ * (badge clears once the loop finishes).
+ */
+function collectWorktreeLoopOwners(basePath: string): string[] {
+    const owners: string[] = []
+    const worktreesDir = join(basePath, '.claude', 'worktrees')
+    if (!existsSync(worktreesDir)) return owners
+    let entries: string[]
+    try {
+        entries = readdirSync(worktreesDir)
+    } catch {
+        return owners
+    }
+    for (const name of entries) {
+        if (!name.startsWith('loop-')) continue
+        const wt = join(worktreesDir, name)
+        // Dispatcher claim — only counts while the loop is still alive
+        if (isDispatcherLoopAlive(wt)) {
+            const claimed = readDispatcherSessionId(wt)
+            if (claimed) owners.push(claimed)
+        }
+        // HAPI-native lock carrying a session id — only while alive
+        const lock = join(wt, '.hapi', 'loop-lock')
+        if (existsSync(lock)) {
+            try {
+                const data = JSON.parse(readFileSync(lock, 'utf-8'))
+                if (data.hapiSessionId && isPidAlive(data.pid)) owners.push(data.hapiSessionId)
+            } catch {}
+        }
+    }
+    return owners
+}
+
+
+function readSessionIdFile(path: string): string | null {
+    if (!existsSync(path)) return null
+    try {
+        return readFileSync(path, 'utf-8').trim() || null
+    } catch {
+        return null
+    }
+}
+
+function readDebateSessionId(runDir: string): string | null {
+    return readSessionIdFile(join(runDir, 'hapi-session-id'))
+}
+
+function isDebateRunActive(runDir: string): boolean {
+    const statePath = join(runDir, 'state.json')
+    if (!existsSync(statePath)) return false
+    try {
+        const data = JSON.parse(readFileSync(statePath, 'utf-8')) as {
+            status?: string
+            orchestratorPid?: number
+            blue?: { pid?: number; status?: string }
+            red?: { pid?: number; status?: string }
+            synthesis?: { pid?: number; status?: string }
+        }
+        if (data.status !== 'running') return false
+        const pids = [
+            data.orchestratorPid,
+            data.blue?.pid,
+            data.red?.pid,
+            data.synthesis?.pid,
+        ].filter((pid): pid is number => typeof pid === 'number' && Number.isFinite(pid))
+        return pids.some(isPidAlive)
+    } catch {
+        return false
+    }
+}
+
+function collectDebateOwners(basePath: string): string[] {
+    const owners: string[] = []
+    const debatesDir = join(basePath, '.hapi-debates')
+    if (!existsSync(debatesDir)) return owners
+    let entries: string[]
+    try {
+        entries = readdirSync(debatesDir)
+    } catch {
+        return owners
+    }
+    for (const name of entries) {
+        const runDir = join(debatesDir, name)
+        if (!isDebateRunActive(runDir)) continue
+        const ownerId = readDebateSessionId(runDir)
+        if (ownerId) owners.push(ownerId)
+    }
+    return owners
+}
+
+function computeDebateActiveIds(sessions: Session[]): Set<string> {
+    const result = new Set<string>()
+    const knownIds = new Set(sessions.map(s => s.id))
+    const scannedBases = new Set<string>()
+    for (const s of sessions) {
+        const p = s.metadata?.path
+        if (!p || scannedBases.has(p)) continue
+        scannedBases.add(p)
+        for (const ownerId of collectDebateOwners(p)) {
+            if (knownIds.has(ownerId)) result.add(ownerId)
+        }
+    }
+    return result
+}
+
+/**
+ * Compute loopActive for each session. For the dispatcher pattern (.loop-logs/pid),
+ * we have no session ID in the pid file, so we only mark the most-recently-updated
+ * session per directory to avoid tagging every session in the project.
+ */
+function computeLoopActiveIds(sessions: Session[]): Set<string> {
+    const result = new Set<string>()
+    const knownIds = new Set(sessions.map(s => s.id))
+
+    // HAPI-native lock: per-session match via hapiSessionId
+    for (const s of sessions) {
+        if (s.metadata?.path && isNativeLoopActive(s.metadata.path, s.id)) {
+            result.add(s.id)
+        }
+    }
+
+    // Dispatcher pattern: group by path. Badge shows only while the loop is still
+    // running; it clears once the dispatcher process exits.
+    const byPath = new Map<string, Session[]>()
+    for (const s of sessions) {
+        const p = s.metadata?.path
+        if (!p) continue
+        if (!byPath.has(p)) byPath.set(p, [])
+        byPath.get(p)!.push(s)
+    }
+    for (const [path, group] of byPath) {
+        if (!isDispatcherLoopAlive(path)) continue
+        const claimedSessionId = readDispatcherSessionId(path)
+        if (claimedSessionId) {
+            // Tag the session that called claim_loop
+            const owner = group.find(s => s.id === claimedSessionId)
+            if (owner) result.add(owner.id)
+        } else {
+            // No claim file — fall back to most recently updated
+            const mostRecent = group.reduce((a, b) => a.updatedAt >= b.updatedAt ? a : b)
+            result.add(mostRecent.id)
+        }
+    }
+
+    // Worktree loops (/hapi-loop): claim lives in the worktree, but the owning
+    // session's path is the repo root — scan worktrees under each unique base path.
+    const scannedBases = new Set<string>()
+    for (const p of byPath.keys()) {
+        if (scannedBases.has(p)) continue
+        scannedBases.add(p)
+        for (const ownerId of collectWorktreeLoopOwners(p)) {
+            if (knownIds.has(ownerId)) result.add(ownerId)
+        }
+    }
+
+    return result
+}
+
 export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -66,7 +272,10 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const getPendingCount = (s: Session) => s.agentState?.requests ? Object.keys(s.agentState.requests).length : 0
 
         const namespace = c.get('namespace')
-        const sessionRecords = engine.getSessionsByNamespace(namespace)
+        const allSessions = engine.getSessionsByNamespace(namespace)
+        const loopActiveIds = computeLoopActiveIds(allSessions)
+        const debateActiveIds = computeDebateActiveIds(allSessions)
+        const sessionRecords = allSessions
             .sort((a, b) => {
                 // Active sessions first
                 if (a.active !== b.active) {
@@ -86,7 +295,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             const summary = toSessionSummary(session)
             return {
                 ...summary,
-                futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0
+                futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0,
+                loopActive: loopActiveIds.has(session.id),
+                debateActive: debateActiveIds.has(session.id)
             }
         })
 
@@ -272,6 +483,27 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to delete upload'
             }, 500)
+        }
+    })
+
+    app.post('/sessions/:id/clone', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const body = await c.req.json().catch(() => ({})) as { model?: string | null }
+        try {
+            const namespace = c.get('namespace')
+            const cloned = engine.cloneSession(sessionResult.sessionId, namespace, body.model ?? undefined)
+            return c.json({ session: cloned })
+        } catch (error) {
+            return c.json({ error: error instanceof Error ? error.message : 'Clone failed' }, 500)
         }
     })
 
@@ -615,6 +847,32 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         }
     })
 
+    app.patch('/sessions/:id/review', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = reviewSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body: readyForReview boolean is required' }, 400)
+        }
+
+        try {
+            await engine.setSessionReadyForReview(sessionResult.sessionId, parsed.data.readyForReview)
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update review state'
+            return c.json({ error: message }, 500)
+        }
+    })
+
     app.delete('/sessions/:id', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
@@ -832,6 +1090,32 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 error: error instanceof Error ? error.message : 'Failed to list Cursor models'
             }, 500)
         }
+    })
+
+    app.get('/sessions/:id/blobs/:blobId', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const blobId = c.req.param('blobId')
+        const blob = engine.getSessionBlob(sessionResult.sessionId, blobId)
+        if (!blob) {
+            return c.json({ error: 'Not found' }, 404)
+        }
+
+        const buffer = Buffer.from(blob.data, 'base64')
+        return new Response(buffer, {
+            headers: {
+                'Content-Type': blob.mimeType,
+                'Cache-Control': 'public, max-age=31536000, immutable'
+            }
+        })
     })
 
     return app

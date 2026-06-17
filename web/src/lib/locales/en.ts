@@ -144,6 +144,7 @@ export default {
   'session.action.reopen': 'Reopen',
   'session.action.delete': 'Delete',
   'session.action.copy': 'Copy',
+  'session.action.clone': 'Clone',
 
   // Dialogs
   'dialog.uri.title': 'Open this link?',
@@ -165,6 +166,13 @@ export default {
   'dialog.delete.description': 'Are you sure you want to delete "{name}"? This action cannot be undone.',
   'dialog.delete.confirm': 'Delete',
   'dialog.delete.confirming': 'Deleting…',
+
+  'dialog.clone.title': 'Clone Session',
+  'dialog.clone.description': 'Clone "{name}" — copies all chat history to a new session.',
+  'dialog.clone.model': 'Continue with model',
+  'dialog.clone.confirm': 'Clone',
+  'dialog.clone.cloning': 'Cloning…',
+  'dialog.clone.error': 'Clone failed. Please try again.',
   'dialog.error.default': 'Operation failed. Please try again.',
 
   // Session export
@@ -503,6 +511,9 @@ export default {
   'settings.display.sessionListStatus.standard': 'Standard',
   'settings.display.sessionListStatus.detailed': 'Detailed',
   'settings.display.sessionListStatus.detailedDescription': 'Shows why a session stopped: permission, input, background work, new activity, or a scheduled message (clock icon).',
+  'settings.sessions.title': 'Sessions',
+  'settings.sessions.hideArchived': 'Hide archived sessions',
+  'settings.sessions.hideArchived.hint': 'Only show active sessions in the sidebar',
   'settings.chat.title': 'Chat',
   'settings.chat.enterBehavior': 'Enter Key',
   'settings.chat.enterBehavior.send': 'Send message',
@@ -517,6 +528,12 @@ export default {
   'settings.chat.surfaceColor.softGreen': 'Soft green',
   'settings.chat.surfaceColor.softYellow': 'Soft yellow',
   'settings.chat.surfaceColor.custom': 'Custom color',
+  'settings.notifications.title': 'Notifications',
+  'settings.notifications.push': 'Push Notifications',
+  'settings.notifications.push.hint': 'Notify when a task finishes (works on home screen)',
+  'settings.notifications.push.blocked': 'Blocked — allow in browser settings',
+  'settings.notifications.push.unsupported': 'Not supported in this browser',
+  'settings.notifications.push.insecure': 'Requires HTTPS — use the relay URL',
   'settings.voice.title': 'Voice Assistant',
   'settings.voice.sounds.title': 'How It Sounds',
   'settings.voice.responds.title': 'How It Responds',

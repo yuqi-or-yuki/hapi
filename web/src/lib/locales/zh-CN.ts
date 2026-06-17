@@ -144,6 +144,7 @@ export default {
   'session.action.reopen': '重新打开',
   'session.action.delete': '删除',
   'session.action.copy': '复制',
+  'session.action.clone': '克隆',
 
   // Dialogs
   'dialog.uri.title': '打开此链接？',
@@ -169,6 +170,12 @@ export default {
   'dialog.delete.confirm': '删除',
   'dialog.delete.confirming': '删除中…',
 
+  'dialog.clone.title': '克隆会话',
+  'dialog.clone.description': '克隆 "{name}" — 将所有聊天记录复制到新会话。',
+  'dialog.clone.model': '继续使用模型',
+  'dialog.clone.confirm': '克隆',
+  'dialog.clone.cloning': '克隆中…',
+  'dialog.clone.error': '克隆失败，请重试。',
   'dialog.error.default': '操作失败，请重试。',
 
   // Session export
@@ -507,6 +514,9 @@ export default {
   'settings.display.sessionListStatus.standard': '标准',
   'settings.display.sessionListStatus.detailed': '详细',
   'settings.display.sessionListStatus.detailedDescription': '显示会话停止的原因：权限、输入、后台任务、新活动或定时消息（时钟图标）。',
+  'settings.sessions.title': '会话',
+  'settings.sessions.hideArchived': '隐藏已归档会话',
+  'settings.sessions.hideArchived.hint': '侧边栏只显示活跃会话',
   'settings.chat.title': '聊天',
   'settings.chat.enterBehavior': '回车键行为',
   'settings.chat.enterBehavior.send': '发送消息',
@@ -521,6 +531,12 @@ export default {
   'settings.chat.surfaceColor.softGreen': '柔和绿',
   'settings.chat.surfaceColor.softYellow': '柔和黄',
   'settings.chat.surfaceColor.custom': '自定义颜色',
+  'settings.notifications.title': '通知',
+  'settings.notifications.push': '推送通知',
+  'settings.notifications.push.hint': '任务完成时通知（需从主屏幕打开）',
+  'settings.notifications.push.blocked': '已被屏蔽，请在浏览器设置中允许',
+  'settings.notifications.push.unsupported': '当前浏览器不支持推送通知',
+  'settings.notifications.push.insecure': '需要 HTTPS 连接，请使用中继 URL',
   'settings.voice.title': '语音助手',
   'settings.voice.sounds.title': '声音效果',
   'settings.voice.responds.title': '对话风格',

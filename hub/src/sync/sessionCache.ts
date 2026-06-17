@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { AgentStateSchema, MetadataSchema, TeamStateSchema } from '@hapi/protocol/schemas'
 import type { CodexCollaborationMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store } from '../store'
@@ -538,6 +539,34 @@ export class SessionCache {
         this.refreshSession(sessionId)
     }
 
+    async setSessionReadyForReview(sessionId: string, readyForReview: boolean): Promise<void> {
+        const session = this.sessions.get(sessionId)
+        if (!session) {
+            throw new Error('Session not found')
+        }
+
+        const currentMetadata = session.metadata ?? { path: '', host: '' }
+        const newMetadata = { ...currentMetadata, readyForReview: readyForReview || undefined }
+
+        const result = this.store.sessions.updateSessionMetadata(
+            sessionId,
+            newMetadata,
+            session.metadataVersion,
+            session.namespace,
+            { touchUpdatedAt: false }
+        )
+
+        if (result.result === 'error') {
+            throw new Error('Failed to update session metadata')
+        }
+
+        if (result.result === 'version-mismatch') {
+            throw new Error('Session was modified concurrently. Please try again.')
+        }
+
+        this.refreshSession(sessionId)
+    }
+
     /**
      * Clear archive-related metadata on an archived session so it can be resumed.
      * - Removes `lifecycleState`, `archivedBy`, `archiveReason`, and stamps
@@ -703,6 +732,61 @@ export class SessionCache {
             deleteOldSession: false,
             mergeAgentState: options.mergeAgentState ?? true
         })
+    }
+
+    cloneSession(sourceSessionId: string, namespace: string, modelOverride?: string): Session {
+        const source = this.store.sessions.getSessionByNamespace(sourceSessionId, namespace)
+        if (!source) {
+            throw new Error('Source session not found')
+        }
+
+        // Grab in-memory session to copy volatile state (permissionMode, collaborationMode)
+        const sourceLive = this.sessions.get(sourceSessionId)
+
+        // Strip agent-specific session IDs so the clone starts fresh with Claude Code
+        const sourceMetadata = source.metadata as Record<string, unknown> | null
+        let cloneMetadata: Record<string, unknown> | null = null
+        if (sourceMetadata && typeof sourceMetadata === 'object') {
+            const { claudeSessionId: _c, codexSessionId: _x, geminiSessionId: _g, opencodeSessionId: _o, cursorSessionId: _cu, ...rest } = sourceMetadata as {
+                claudeSessionId?: unknown; codexSessionId?: unknown; geminiSessionId?: unknown;
+                opencodeSessionId?: unknown; cursorSessionId?: unknown; [key: string]: unknown
+            }
+            cloneMetadata = rest
+        }
+
+        const newTag = randomUUID()
+        const newStored = this.store.sessions.getOrCreateSession(
+            newTag,
+            cloneMetadata,
+            null,
+            namespace,
+            modelOverride ?? source.model ?? undefined,
+            source.effort ?? undefined,
+            source.modelReasoningEffort ?? undefined
+        )
+
+        const { copied } = this.store.messages.copySessionMessages(sourceSessionId, newStored.id)
+        const cloned = this.refreshSession(newStored.id)
+        if (!cloned) {
+            throw new Error('Failed to load cloned session')
+        }
+
+        // Copy volatile in-memory state from the source
+        if (sourceLive?.permissionMode !== undefined) {
+            cloned.permissionMode = sourceLive.permissionMode
+            this.sessions.set(newStored.id, cloned)
+        }
+        if (sourceLive?.collaborationMode !== undefined) {
+            cloned.collaborationMode = sourceLive.collaborationMode
+            this.sessions.set(newStored.id, cloned)
+        }
+
+        if (copied > 0) {
+            this.publisher.emit({ type: 'messages-invalidated', sessionId: newStored.id, namespace })
+        }
+        this.publisher.emit({ type: 'session-updated', sessionId: newStored.id, data: cloned })
+
+        return cloned
     }
 
     private async mergeSessionData(

@@ -8,6 +8,8 @@ import { createServer } from "node:http";
 import { lstat, readFile } from "node:fs/promises";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AddressInfo } from "node:net";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
@@ -155,6 +157,32 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
         }
     });
 
+    const claimLoopInputSchema: z.ZodTypeAny = z.object({
+        directory: z.string().describe('Absolute path to the directory where the loop was started'),
+    });
+
+    mcp.registerTool<any, any>('claim_loop', {
+        description: 'Record that the current HAPI session owns the claudeloop running in the given directory. Call this immediately after starting claudeloop.',
+        title: 'Claim Loop Session',
+        inputSchema: claimLoopInputSchema,
+    }, async (args: { directory: string }) => {
+        try {
+            const loopLogsDir = join(args.directory, '.loop-logs')
+            mkdirSync(loopLogsDir, { recursive: true })
+            writeFileSync(join(loopLogsDir, 'hapi-session-id'), client.sessionId)
+            logger.debug(`[hapiMCP] claimed loop for session ${client.sessionId} in ${args.directory}`)
+            return {
+                content: [{ type: 'text' as const, text: `Loop claimed for session ${client.sessionId}` }],
+                isError: false,
+            }
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Failed to claim loop: ${String(error)}` }],
+                isError: true,
+            }
+        }
+    });
+
     const transport = new StreamableHTTPServerTransport({
         // NOTE: Returning session id here will result in claude
         // sdk spawn to fail with `Invalid Request: Server already initialized`
@@ -186,7 +214,7 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
 
     return {
         url: baseUrl.toString(),
-        toolNames: ['change_title', 'display_image'],
+        toolNames: ['change_title', 'display_image', 'claim_loop'],
         stop: () => {
             logger.debug('[hapiMCP] Stopping server');
             mcp.close();

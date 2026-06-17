@@ -526,6 +526,10 @@ function SessionsPage() {
                         renderHeader={false}
                         api={api}
                         machineLabelsById={machineLabelsById}
+                        onCloned={(newSessionId) => navigate({
+                            to: '/sessions/$sessionId',
+                            params: { sessionId: newSessionId },
+                        })}
                     />
                 </div>
             </div>
@@ -810,6 +814,10 @@ function SessionPage() {
             availableSlashCommands={slashCommands}
             sendError={sendError}
             onClearSendError={clearSendError}
+            onCloned={(newSessionId) => navigate({
+                to: '/sessions/$sessionId',
+                params: { sessionId: newSessionId },
+            })}
         />
     )
 }

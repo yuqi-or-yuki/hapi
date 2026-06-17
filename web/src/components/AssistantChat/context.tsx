@@ -17,7 +17,7 @@ export type HappyChatContextValue = {
     loadOlderMessagesPreservingScroll: () => Promise<boolean>
 }
 
-const HappyChatContext = createContext<HappyChatContextValue | null>(null)
+export const HappyChatContext = createContext<HappyChatContextValue | null>(null)
 
 export function HappyChatProvider(props: { value: HappyChatContextValue; children: ReactNode }) {
     return (

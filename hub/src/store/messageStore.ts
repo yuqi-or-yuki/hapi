@@ -4,6 +4,7 @@ import type { StoredMessage } from './types'
 import {
     addMessage,
     cancelQueuedMessage,
+    copySessionMessages,
     deleteQueuedMessageById,
     lookupQueuedMessage,
     getMessages,
@@ -105,5 +106,9 @@ export class MessageStore {
 
     mergeSessionMessages(fromSessionId: string, toSessionId: string): { moved: number; oldMaxSeq: number; newMaxSeq: number } {
         return mergeSessionMessages(this.db, fromSessionId, toSessionId)
+    }
+
+    copySessionMessages(fromSessionId: string, toSessionId: string): { copied: number } {
+        return copySessionMessages(this.db, fromSessionId, toSessionId)
     }
 }

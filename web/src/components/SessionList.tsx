@@ -3,7 +3,9 @@ import type { SessionSummary } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePlatform } from '@/hooks/usePlatform'
+import { CloneSessionDialog } from '@/components/CloneSessionDialog'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
+import { useHideArchivedSessions } from '@/hooks/useHideArchivedSessions'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -190,8 +192,8 @@ function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
     return Array.from(groups.entries())
         .map(([key, group]) => {
             const sortedSessions = [...group.sessions].sort((a, b) => {
-                const rankA = a.active ? (a.pendingRequestsCount > 0 ? 0 : 1) : 2
-                const rankB = b.active ? (b.pendingRequestsCount > 0 ? 0 : 1) : 2
+                const rankA = a.active && a.thinking ? 0 : a.active ? (a.pendingRequestsCount > 0 ? 1 : 2) : 3
+                const rankB = b.active && b.thinking ? 0 : b.active ? (b.pendingRequestsCount > 0 ? 1 : 2) : 3
                 if (rankA !== rankB) return rankA - rankB
                 return b.updatedAt - a.updatedAt
             })
@@ -594,17 +596,23 @@ function SessionItem(props: {
     api: ApiClient | null
     selected?: boolean
     showDetailedStatus?: boolean
+    selectionMode?: boolean
+    isMultiSelected?: boolean
+    onEnterSelectionMode?: (sessionId: string) => void
+    onToggleMultiSelect?: (sessionId: string) => void
+    onCloned?: (newSessionId: string) => void
 }) {
     const { t } = useTranslation()
-    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false } = props
+    const { session: s, onSelect, showPath = true, api, selected = false, showDetailedStatus = false, selectionMode = false, isMultiSelected = false } = props
     const { haptic } = usePlatform()
     const [menuOpen, setMenuOpen] = useState(false)
     const [menuAnchorPoint, setMenuAnchorPoint] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
     const [renameOpen, setRenameOpen] = useState(false)
     const [archiveOpen, setArchiveOpen] = useState(false)
     const [deleteOpen, setDeleteOpen] = useState(false)
+    const [cloneOpen, setCloneOpen] = useState(false)
 
-    const { archiveSession, reopenSession, renameSession, deleteSession, isPending } = useSessionActions(
+    const { archiveSession, reopenSession, renameSession, deleteSession, cloneSession, isPending } = useSessionActions(
         api,
         s.id,
         s.metadata?.flavor ?? null
@@ -625,14 +633,30 @@ function SessionItem(props: {
         }
     }
 
+    const handleClone = async (model: string | null) => {
+        const newId = await cloneSession(model)
+        props.onCloned?.(newId)
+    }
+
     const longPressHandlers = useLongPress({
         onLongPress: (point) => {
             haptic.impact('medium')
-            setMenuAnchorPoint(point)
-            setMenuOpen(true)
+            if (selectionMode) {
+                // In selection mode, a long tap should still toggle (onClick is suppressed when long press fires)
+                props.onToggleMultiSelect?.(s.id)
+                return
+            }
+            if (props.onEnterSelectionMode) {
+                props.onEnterSelectionMode(s.id)
+            } else {
+                setMenuAnchorPoint(point)
+                setMenuOpen(true)
+            }
         },
         onClick: () => {
-            if (!menuOpen) {
+            if (selectionMode) {
+                props.onToggleMultiSelect?.(s.id)
+            } else if (!menuOpen) {
                 onSelect(s.id)
             }
         },
@@ -654,23 +678,44 @@ function SessionItem(props: {
     const scheduledLabel = s.futureScheduledMessageCount > 1
         ? t('session.item.scheduledMessages', { count: s.futureScheduledMessageCount })
         : t('session.item.scheduledMessage')
+    const readyForReview = s.metadata?.readyForReview === true
     return (
         <>
             <button
                 type="button"
                 {...longPressHandlers}
-                className={`session-list-item flex w-full flex-col gap-1 px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''}`}
+                className={`session-list-item flex w-full flex-col gap-1 px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''} ${s.active && s.thinking ? 'border-l-2 border-[var(--app-badge-success-text)] bg-[var(--app-badge-success-bg)] pl-[calc(0.625rem-2px)]' : 'border-l-2 border-transparent'}`}
                 style={{ WebkitTouchCallout: 'none' }}
                 aria-current={selected ? 'page' : undefined}
             >
                 <div className={`flex items-center justify-between gap-3 ${!s.active ? 'opacity-50' : ''}`}>
                     <div className="flex items-center gap-2 min-w-0">
-                        <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4 shrink-0" />
+                        {selectionMode ? (
+                            <span className={cn(
+                                'flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
+                                isMultiSelected
+                                    ? 'border-blue-500 bg-blue-500 text-white'
+                                    : 'border-[var(--app-hint)]'
+                            )}>
+                                {isMultiSelected ? (
+                                    <svg className="h-2.5 w-2.5" viewBox="0 0 10 10" fill="none">
+                                        <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                                    </svg>
+                                ) : null}
+                            </span>
+                        ) : (
+                            <div className="relative shrink-0">
+                                <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4" />
+                                {readyForReview ? (
+                                    <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500 ring-1 ring-[var(--app-bg)]" />
+                                ) : null}
+                            </div>
+                        )}
                         <div className={`truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}>
                             {sessionName}
                         </div>
                         {s.active && s.thinking ? (
-                            <LoaderIcon className="h-3.5 w-3.5 shrink-0 text-[var(--app-hint)] animate-spin-slow" />
+                            <LoaderIcon className="h-3.5 w-3.5 shrink-0 text-[var(--app-badge-success-text)] animate-spin-slow" />
                         ) : attention ? (
                             <SessionAttentionIndicator
                                 attention={attention}
@@ -680,6 +725,21 @@ function SessionItem(props: {
                         {showDetailedStatus && s.futureScheduledMessageCount > 0 ? (
                             <span title={scheduledLabel} aria-label={scheduledLabel} className="inline-flex shrink-0">
                                 <ScheduleIcon className="h-3.5 w-3.5 text-[var(--app-hint)]" />
+                            </span>
+                        ) : null}
+                        {s.loopActive ? (
+                            <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-[var(--app-badge-warning-bg)] text-[var(--app-badge-warning-text)]">
+                                ⟳ loop
+                            </span>
+                        ) : null}
+                        {s.debateActive ? (
+                            <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-purple-500/10 text-purple-500">
+                                ⚖ debate
+                            </span>
+                        ) : null}
+                        {readyForReview && !selectionMode ? (
+                            <span className="inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-blue-500/10 text-blue-500">
+                                review
                             </span>
                         ) : null}
                     </div>
@@ -707,61 +767,74 @@ function SessionItem(props: {
                 ) : null}
             </button>
 
-            <SessionActionMenu
-                isOpen={menuOpen}
-                onClose={() => setMenuOpen(false)}
-                sessionActive={s.active}
-                onRename={() => setRenameOpen(true)}
-                onArchive={() => setArchiveOpen(true)}
-                onReopen={handleReopen}
-                onDelete={() => setDeleteOpen(true)}
-                anchorPoint={menuAnchorPoint}
-            />
+            {!selectionMode ? (
+                <>
+                    <SessionActionMenu
+                        isOpen={menuOpen}
+                        onClose={() => setMenuOpen(false)}
+                        sessionActive={s.active}
+                        onRename={() => setRenameOpen(true)}
+                        onArchive={() => setArchiveOpen(true)}
+                        onReopen={handleReopen}
+                        onDelete={() => setDeleteOpen(true)}
+                        onClone={() => setCloneOpen(true)}
+                        anchorPoint={menuAnchorPoint}
+                    />
 
-            {reopenError ? (
-                <ConfirmDialog
-                    isOpen={true}
-                    onClose={() => setReopenError(null)}
-                    title={t('dialog.reopen.errorTitle')}
-                    description={reopenError}
-                    confirmLabel={t('dialog.reopen.dismiss')}
-                    confirmingLabel={t('dialog.reopen.dismiss')}
-                    onConfirm={async () => setReopenError(null)}
-                    isPending={false}
-                />
+                    {reopenError ? (
+                        <ConfirmDialog
+                            isOpen={true}
+                            onClose={() => setReopenError(null)}
+                            title={t('dialog.reopen.errorTitle')}
+                            description={reopenError}
+                            confirmLabel={t('dialog.reopen.dismiss')}
+                            confirmingLabel={t('dialog.reopen.dismiss')}
+                            onConfirm={async () => setReopenError(null)}
+                            isPending={false}
+                        />
+                    ) : null}
+
+                    <RenameSessionDialog
+                        isOpen={renameOpen}
+                        onClose={() => setRenameOpen(false)}
+                        currentName={sessionName}
+                        onRename={renameSession}
+                        isPending={isPending}
+                    />
+
+                    <ConfirmDialog
+                        isOpen={archiveOpen}
+                        onClose={() => setArchiveOpen(false)}
+                        title={t('dialog.archive.title')}
+                        description={t('dialog.archive.description', { name: sessionName })}
+                        confirmLabel={t('dialog.archive.confirm')}
+                        confirmingLabel={t('dialog.archive.confirming')}
+                        onConfirm={archiveSession}
+                        isPending={isPending}
+                        destructive
+                    />
+
+                    <ConfirmDialog
+                        isOpen={deleteOpen}
+                        onClose={() => setDeleteOpen(false)}
+                        title={t('dialog.delete.title')}
+                        description={t('dialog.delete.description', { name: sessionName })}
+                        confirmLabel={t('dialog.delete.confirm')}
+                        confirmingLabel={t('dialog.delete.confirming')}
+                        onConfirm={deleteSession}
+                        isPending={isPending}
+                        destructive
+                    />
+
+                    <CloneSessionDialog
+                        isOpen={cloneOpen}
+                        onClose={() => setCloneOpen(false)}
+                        sessionName={sessionName}
+                        onClone={handleClone}
+                        isPending={isPending}
+                    />
+                </>
             ) : null}
-
-            <RenameSessionDialog
-                isOpen={renameOpen}
-                onClose={() => setRenameOpen(false)}
-                currentName={sessionName}
-                onRename={renameSession}
-                isPending={isPending}
-            />
-
-            <ConfirmDialog
-                isOpen={archiveOpen}
-                onClose={() => setArchiveOpen(false)}
-                title={t('dialog.archive.title')}
-                description={t('dialog.archive.description', { name: sessionName })}
-                confirmLabel={t('dialog.archive.confirm')}
-                confirmingLabel={t('dialog.archive.confirming')}
-                onConfirm={archiveSession}
-                isPending={isPending}
-                destructive
-            />
-
-            <ConfirmDialog
-                isOpen={deleteOpen}
-                onClose={() => setDeleteOpen(false)}
-                title={t('dialog.delete.title')}
-                description={t('dialog.delete.description', { name: sessionName })}
-                confirmLabel={t('dialog.delete.confirm')}
-                confirmingLabel={t('dialog.delete.confirming')}
-                onConfirm={deleteSession}
-                isPending={isPending}
-                destructive
-            />
         </>
     )
 }
@@ -778,14 +851,54 @@ export function SessionList(props: {
     api: ApiClient | null
     machineLabelsById?: Record<string, string>
     selectedSessionId?: string | null
+    onCloned?: (newSessionId: string) => void
 }) {
     const { t } = useTranslation()
-    const { renderHeader = true, api, selectedSessionId, machineLabelsById = {}, onNewSessionInDirectory } = props
+    const { renderHeader = true, api, selectedSessionId, machineLabelsById = {}, onNewSessionInDirectory, onCloned } = props
     const { sessionPreviewLimit } = useSessionPreviewLimit()
     const { sessionListStatusMode } = useSessionListStatusMode()
     const showDetailedStatus = sessionListStatusMode === 'detailed'
+    const { hideArchivedSessions } = useHideArchivedSessions()
     const [searchQuery, setSearchQuery] = useState('')
     const [, setCodexImportedSessionsVersion] = useState(0)
+    const [selectionMode, setSelectionMode] = useState(false)
+    const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set())
+    const [reviewPending, setReviewPending] = useState(false)
+
+    const enterSelectionMode = (sessionId: string) => {
+        setSelectionMode(true)
+        setMultiSelectedIds(new Set([sessionId]))
+    }
+
+    const toggleMultiSelect = (sessionId: string) => {
+        setMultiSelectedIds(prev => {
+            const next = new Set(prev)
+            if (next.has(sessionId)) {
+                next.delete(sessionId)
+            } else {
+                next.add(sessionId)
+            }
+            return next
+        })
+    }
+
+    const exitSelectionMode = () => {
+        setSelectionMode(false)
+        setMultiSelectedIds(new Set())
+    }
+
+    const markSelectedReadyForReview = async (readyForReview: boolean) => {
+        if (!api || reviewPending) return
+        setReviewPending(true)
+        try {
+            await Promise.all(
+                Array.from(multiSelectedIds).map(id => api.setSessionReadyForReview(id, readyForReview))
+            )
+        } finally {
+            setReviewPending(false)
+            exitSelectionMode()
+        }
+    }
     const normalizedQuery = normalizeSearch(searchQuery)
     const isSearching = normalizedQuery.length > 0
 
@@ -807,8 +920,13 @@ export function SessionList(props: {
     }
 
     const allSessions = useMemo(
-        () => prepareSidebarSessions(props.sessions, selectedSessionId),
-        [props.sessions, selectedSessionId]
+        () => {
+            const base = hideArchivedSessions
+                ? props.sessions.filter(s => s.active || s.id === selectedSessionId)
+                : props.sessions
+            return prepareSidebarSessions(base, selectedSessionId)
+        },
+        [props.sessions, hideArchivedSessions, selectedSessionId]
     )
     const visibleSessions = useMemo(
         () => isSearching
@@ -950,7 +1068,7 @@ export function SessionList(props: {
     }, [allGroups])
 
     return (
-        <div className="mx-auto w-full max-w-content flex flex-col">
+        <div className="mx-auto w-full max-w-content flex flex-col relative">
             {renderHeader ? (
                 <div className="flex items-center justify-between px-3 py-1">
                     <div className="text-xs text-[var(--app-hint)]">
@@ -958,14 +1076,27 @@ export function SessionList(props: {
                             ? t('sessions.search.count', { n: visibleSessions.length, total: allSessions.length })
                             : t('sessions.count', { n: allSessions.length, m: allGroups.length })}
                     </div>
-                    <button
-                        type="button"
-                        onClick={props.onNewSession}
-                        className="session-list-new-button p-1.5 rounded-full text-[var(--app-link)] transition-colors"
-                        title={t('sessions.new')}
-                    >
-                        <PlusIcon className="h-5 w-5" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                        {props.sessions.length > 0 ? (
+                            <button
+                                type="button"
+                                onClick={selectionMode ? exitSelectionMode : () => setSelectionMode(true)}
+                                className="px-2 py-1 text-xs text-[var(--app-link)] transition-colors"
+                            >
+                                {selectionMode ? 'Cancel' : 'Select'}
+                            </button>
+                        ) : null}
+                        {!selectionMode ? (
+                            <button
+                                type="button"
+                                onClick={props.onNewSession}
+                                className="session-list-new-button p-1.5 rounded-full text-[var(--app-link)] transition-colors"
+                                title={t('sessions.new')}
+                            >
+                                <PlusIcon className="h-5 w-5" />
+                            </button>
+                        ) : null}
+                    </div>
                 </div>
             ) : null}
 
@@ -1060,6 +1191,11 @@ export function SessionList(props: {
                                                                 api={api}
                                                                 selected={s.id === selectedSessionId}
                                                                 showDetailedStatus={showDetailedStatus}
+                                                                selectionMode={selectionMode}
+                                                                isMultiSelected={multiSelectedIds.has(s.id)}
+                                                                onEnterSelectionMode={enterSelectionMode}
+                                                                onToggleMultiSelect={toggleMultiSelect}
+                                                                onCloned={onCloned}
                                                             />
                                                         ))}
                                                         {!isSearching && group.sessions.length > sessionPreviewLimit && (sessionGroupExpanded || hiddenSessionCount > 0) ? (
@@ -1089,6 +1225,41 @@ export function SessionList(props: {
                     )
                 })}
             </div>
+
+            {selectionMode ? (
+                <div className="sticky bottom-0 z-20 border-t border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-3 flex items-center gap-2">
+                    <span className="flex-1 text-sm text-[var(--app-hint)]">
+                        {multiSelectedIds.size} selected
+                    </span>
+                    {multiSelectedIds.size > 0 ? (
+                        <>
+                            <button
+                                type="button"
+                                disabled={reviewPending}
+                                onClick={() => void markSelectedReadyForReview(false)}
+                                className="rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] disabled:opacity-50"
+                            >
+                                Unmark
+                            </button>
+                            <button
+                                type="button"
+                                disabled={reviewPending}
+                                onClick={() => void markSelectedReadyForReview(true)}
+                                className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                            >
+                                {reviewPending ? 'Marking…' : 'Ready to Review'}
+                            </button>
+                        </>
+                    ) : null}
+                    <button
+                        type="button"
+                        onClick={exitSelectionMode}
+                        className="rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)]"
+                    >
+                        Cancel
+                    </button>
+                </div>
+            ) : null}
         </div>
     )
 }

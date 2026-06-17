@@ -22,6 +22,7 @@ import { MermaidDiagram } from '@/components/assistant-ui/mermaid-diagram'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { CopyIcon, CheckIcon } from '@/components/icons'
 import { useOptionalHappyChatContext } from '@/components/AssistantChat/context'
+import { HappyChatContext } from '@/components/AssistantChat/context'
 import { decodeFilePathHref, remarkFilePathLinks } from '@/lib/remark-file-path-links'
 import { UriConfirmDialog } from '@/components/UriConfirmDialog'
 
@@ -648,7 +649,13 @@ function Em(props: ComponentPropsWithoutRef<'em'>) {
 }
 
 function Image(props: ComponentPropsWithoutRef<'img'>) {
-    return <img {...props} className={cn('aui-md-img my-3 max-w-full rounded-xl', props.className)} />
+    const ctx = useContext(HappyChatContext)
+    let src = props.src
+    if (typeof src === 'string' && src.startsWith('hapi-blob://') && ctx) {
+        const blobId = src.slice('hapi-blob://'.length)
+        src = `/api/sessions/${ctx.sessionId}/blobs/${blobId}`
+    }
+    return <img {...props} src={src} className={cn('aui-md-img my-3 max-w-full rounded-xl', props.className)} />
 }
 
 export const defaultComponents = memoizeMarkdownComponents({
