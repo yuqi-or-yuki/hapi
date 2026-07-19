@@ -13,7 +13,7 @@ export function useSessionActions(
     codexCollaborationModeSupported?: boolean
 ): {
     abortSession: () => Promise<void>
-    archiveSession: () => Promise<void>
+    archiveSession: (confirmed: true) => Promise<void>
     switchSession: () => Promise<void>
     setPermissionMode: (mode: PermissionMode) => Promise<void>
     setCollaborationMode: (mode: CodexCollaborationMode) => Promise<void>
@@ -44,11 +44,11 @@ export function useSessionActions(
     })
 
     const archiveMutation = useMutation({
-        mutationFn: async () => {
+        mutationFn: async (confirmed: true) => {
             if (!api || !sessionId) {
                 throw new Error('Session unavailable')
             }
-            await api.archiveSession(sessionId)
+            await api.archiveSession(sessionId, confirmed)
         },
         onSuccess: () => void invalidateSession(),
     })

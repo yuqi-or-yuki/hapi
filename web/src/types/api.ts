@@ -84,6 +84,56 @@ export type AuthResponse = {
     }
 }
 
+export type ScheduledMessage = {
+    id: string
+    namespace: string
+    sourceSessionId: string
+    targetSessionId: string | null
+    text: string
+    dueAt: number
+    cloneBeforeSend: boolean
+    intervalMs: number | null
+    maxOccurrences: number | null
+    occurrenceCount: number
+    enabled: boolean
+    status: 'pending' | 'sent' | 'failed' | 'cancelled'
+    error: string | null
+    createdAt: number
+    updatedAt: number
+    sentAt: number | null
+    history: ScheduledMessageHistory[]
+}
+
+export type ScheduledMessageHistory = {
+    id: string
+    scheduledMessageId: string
+    namespace: string
+    event: 'created' | 'updated' | 'sent' | 'failed' | 'cancelled' | 'skipped' | 'enabled' | 'disabled'
+    sourceSessionId: string
+    targetSessionId: string | null
+    text: string
+    dueAt: number
+    cloneBeforeSend: boolean
+    intervalMs: number | null
+    maxOccurrences: number | null
+    occurrenceCount: number
+    enabled: boolean
+    status: 'pending' | 'sent' | 'failed' | 'cancelled'
+    error: string | null
+    createdAt: number
+}
+
+export type ScheduledMessagesResponse = { scheduledMessages: ScheduledMessage[] }
+export type ScheduledMessageResponse = { scheduledMessage: ScheduledMessage }
+
+export type SkillUsage = {
+    skillName: string
+    count: number
+    lastUsedAt: number
+}
+
+export type SkillUsageResponse = { skills: SkillUsage[] }
+
 export type SessionsResponse = { sessions: SessionSummary[] }
 export type SessionResponse = { session: Session }
 export type MessagesResponse = {
@@ -224,6 +274,24 @@ export type CodexModelSummary = {
 export type CodexModelsResponse = {
     success: boolean
     models?: CodexModelSummary[]
+    error?: string
+}
+
+export type ClaudeModelSummary = {
+    value: string
+    resolvedModel?: string
+    displayName: string
+    description: string
+    supportsEffort?: boolean
+    supportedEffortLevels?: string[]
+    supportsAdaptiveThinking?: boolean
+    supportsFastMode?: boolean
+    supportsAutoMode?: boolean
+}
+
+export type ClaudeModelsResponse = {
+    success: boolean
+    models?: ClaudeModelSummary[]
     error?: string
 }
 

@@ -65,6 +65,10 @@ export default {
   'session.time.minutesAgo': '{n}m ago',
   'session.time.hoursAgo': '{n}h ago',
   'session.time.daysAgo': '{n}d ago',
+  'session.time.dueNow': 'due now',
+  'session.time.inMinutes': 'in {n}m',
+  'session.time.inHours': 'in {n}h',
+  'session.time.inDays': 'in {n}d',
 
   // Session header
   'session.title': 'Files',

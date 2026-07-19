@@ -2,11 +2,12 @@ import { access, readdir, readFile } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { parse as parseYaml } from 'yaml';
+import { getBuiltinSlashCommands, type SlashCommandSource } from '@hapi/protocol/slashCommands';
 
 export interface SlashCommand {
     name: string;
     description?: string;
-    source: 'builtin' | 'user' | 'plugin' | 'project';
+    source: SlashCommandSource;
     content?: string;  // Expanded content for Codex user prompts
     pluginName?: string;  // Name of the plugin that provides this command
 }
@@ -20,40 +21,6 @@ export interface ListSlashCommandsResponse {
     commands?: SlashCommand[];
     error?: string;
 }
-
-/**
- * Built-in slash commands for each agent type.
- */
-const BUILTIN_COMMANDS: Record<string, SlashCommand[]> = {
-    claude: [
-        { name: 'clear', description: 'Clear conversation history', source: 'builtin' },
-        { name: 'compact', description: 'Compact conversation context', source: 'builtin' },
-        { name: 'context', description: 'Show context information', source: 'builtin' },
-        { name: 'cost', description: 'Show session cost', source: 'builtin' },
-        { name: 'plan', description: 'Toggle plan mode', source: 'builtin' },
-    ],
-    codex: [
-        { name: 'clear', description: 'Clear current Codex thread context', source: 'builtin' },
-        { name: 'compact', description: 'Compact current Codex thread context', source: 'builtin' },
-        { name: 'goal', description: 'Set, view, pause, resume, or clear a persistent Codex goal', source: 'builtin' },
-        { name: 'help', description: 'Show supported HAPI Codex slash commands', source: 'builtin' },
-        { name: 'plan', description: 'Enable plan mode; use /plan off to return to default', source: 'builtin' },
-        { name: 'default', description: 'Return Codex collaboration mode to default', source: 'builtin' },
-        { name: 'execute', description: 'Return Codex collaboration mode to default', source: 'builtin' },
-        { name: 'status', description: 'Show current Codex session config', source: 'builtin' },
-        { name: 'model', description: 'Show or set Codex model, e.g. /model gpt-5.5', source: 'builtin' },
-        { name: 'reasoning', description: 'Show or set reasoning effort', source: 'builtin' },
-        { name: 'effort', description: 'Alias for /reasoning', source: 'builtin' },
-        { name: 'permissions', description: 'Show or set permission mode', source: 'builtin' },
-        { name: 'permission', description: 'Alias for /permissions', source: 'builtin' },
-    ],
-    gemini: [
-        { name: 'about', description: 'About Gemini', source: 'builtin' },
-        { name: 'clear', description: 'Clear conversation', source: 'builtin' },
-        { name: 'compress', description: 'Compress context', source: 'builtin' },
-    ],
-    opencode: [],
-};
 
 /**
  * Interface for installed_plugins.json structure
@@ -316,7 +283,7 @@ async function scanPluginCommands(agent: string): Promise<SlashCommand[]> {
  * built-in -> global user -> plugin -> project (project overrides same-name globals).
  */
 export async function listSlashCommands(agent: string, projectDir?: string): Promise<SlashCommand[]> {
-    const builtin = BUILTIN_COMMANDS[agent] ?? [];
+    const builtin = getBuiltinSlashCommands(agent);
 
     // Scan all command sources in parallel
     const [user, plugin, project] = await Promise.all([

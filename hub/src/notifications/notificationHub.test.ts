@@ -35,6 +35,7 @@ class StubChannel implements NotificationChannel {
     readonly permissionSessions: Session[] = []
     readonly taskNotifications: Array<{ session: Session; notification: TaskNotification }> = []
     readonly sessionCompletions: Session[] = []
+    readonly allClearSessions: Session[] = []
 
     async sendReady(session: Session): Promise<void> {
         this.readySessions.push(session)
@@ -50,6 +51,10 @@ class StubChannel implements NotificationChannel {
 
     async sendSessionCompletion(session: Session): Promise<void> {
         this.sessionCompletions.push(session)
+    }
+
+    async sendAllClear(session: Session): Promise<void> {
+        this.allClearSessions.push(session)
     }
 }
 
@@ -210,6 +215,36 @@ describe('NotificationHub', () => {
             status: 'completed',
             summary: 'Commit T4 finished'
         })
+
+        hub.stop()
+    })
+
+
+    it('sends session completion when a running sidebar session becomes idle', async () => {
+        const engine = new FakeSyncEngine()
+        const channel = new StubChannel()
+        const hub = new NotificationHub(engine as unknown as SyncEngine, [channel], {
+            permissionDebounceMs: 1,
+            readyCooldownMs: 20
+        })
+
+        const runningSession = createSession({ id: 'session-running', active: true, thinking: true })
+        engine.setSession(runningSession)
+        engine.emit({ type: 'session-updated', sessionId: runningSession.id })
+
+        const idleSession = createSession({ id: runningSession.id, active: true, thinking: false })
+        engine.setSession(idleSession)
+        engine.emit({ type: 'session-updated', sessionId: idleSession.id })
+        await sleep(5)
+
+        expect(channel.sessionCompletions).toHaveLength(1)
+        expect(channel.sessionCompletions[0]?.id).toBe(idleSession.id)
+        expect(channel.allClearSessions).toHaveLength(1)
+
+        // Stale duplicate idle updates must not send duplicates.
+        engine.emit({ type: 'session-updated', sessionId: idleSession.id })
+        await sleep(5)
+        expect(channel.sessionCompletions).toHaveLength(1)
 
         hub.stop()
     })

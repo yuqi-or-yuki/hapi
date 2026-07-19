@@ -32,6 +32,24 @@ describe('convertCodexEvent', () => {
         expect(result?.userMessage).toBe('hello user');
     });
 
+    it('marks thinking=true on task_started', () => {
+        const result = convertCodexEvent({
+            type: 'event_msg',
+            payload: { type: 'task_started' }
+        });
+
+        expect(result).toEqual({ thinking: true });
+    });
+
+    it.each(['task_complete', 'task_failed', 'turn_aborted'])('marks thinking=false on %s', (eventType) => {
+        const result = convertCodexEvent({
+            type: 'event_msg',
+            payload: { type: eventType }
+        });
+
+        expect(result).toEqual({ thinking: false });
+    });
+
     it('converts reasoning events', () => {
         const result = convertCodexEvent({
             type: 'event_msg',

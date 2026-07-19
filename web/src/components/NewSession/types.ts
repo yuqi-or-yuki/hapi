@@ -8,6 +8,7 @@ export type ClaudeEffort = 'auto' | 'medium' | 'high' | 'max'
 export const MODEL_OPTIONS: Record<AgentType, { value: string; label: string }[]> = {
     claude: [
         { value: 'auto', label: 'Default' },
+        { value: 'fable', label: 'Fable 5' },
         { value: 'opus', label: 'Opus' },
         { value: 'opus[1m]', label: 'Opus 1M' },
         { value: 'sonnet', label: 'Sonnet' },

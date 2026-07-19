@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto'
 
 import type { StoredMessage } from './types'
 import { safeJsonParse } from './json'
+import { extractSkillInvocations } from './skillUsageDetection'
+import { recordSkillUsage } from './skillUsageStore'
 
 type DbMessageRow = {
     id: string
@@ -76,6 +78,16 @@ export function addMessage(
     if (!row) {
         throw new Error('Failed to create message')
     }
+
+    const skills = extractSkillInvocations(content, json)
+    if (skills.length > 0) {
+        const sessionRow = db.prepare('SELECT namespace FROM sessions WHERE id = ?').get(sessionId) as { namespace: string } | undefined
+        const namespace = sessionRow?.namespace ?? 'default'
+        for (const skill of skills) {
+            recordSkillUsage(db, namespace, skill, now)
+        }
+    }
+
     return toStoredMessage(row)
 }
 

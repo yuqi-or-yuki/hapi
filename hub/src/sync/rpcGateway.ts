@@ -61,6 +61,24 @@ export type RpcListCodexModelsResponse = {
     error?: string
 }
 
+export type RpcClaudeModel = {
+    value: string
+    resolvedModel?: string
+    displayName: string
+    description: string
+    supportsEffort?: boolean
+    supportedEffortLevels?: string[]
+    supportsAdaptiveThinking?: boolean
+    supportsFastMode?: boolean
+    supportsAutoMode?: boolean
+}
+
+export type RpcListClaudeModelsResponse = {
+    success: boolean
+    models?: RpcClaudeModel[]
+    error?: string
+}
+
 export type RpcOpencodeModel = {
     modelId: string
     name?: string
@@ -271,6 +289,14 @@ export class RpcGateway {
 
     async listCodexModelsForSession(sessionId: string): Promise<RpcListCodexModelsResponse> {
         return await this.sessionRpc(sessionId, 'listCodexModels', {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListCodexModelsResponse
+    }
+
+    async listClaudeModelsForSession(sessionId: string): Promise<RpcListClaudeModelsResponse> {
+        return await this.sessionRpc(sessionId, 'listClaudeModels', {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListClaudeModelsResponse
+    }
+
+    async listClaudeModelsForMachine(machineId: string): Promise<RpcListClaudeModelsResponse> {
+        return await this.machineRpc(machineId, 'listClaudeModels', {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListClaudeModelsResponse
     }
 
     async listCodexModelsForMachine(machineId: string): Promise<RpcListCodexModelsResponse> {

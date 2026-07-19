@@ -159,7 +159,7 @@ describe('SDKToLogConverter', () => {
     })
 
     describe('Result messages', () => {
-        it('should not convert result messages', () => {
+        it('should not convert result messages that have LLM turns', () => {
             const sdkMessage: SDKResultMessage = {
                 type: 'result',
                 subtype: 'success',
@@ -195,8 +195,51 @@ describe('SDKToLogConverter', () => {
 
             const logMessage = converter.convert(sdkMessage)
 
-            // Error results are not converted to summaries
             expect(logMessage).toBeFalsy()
+        })
+
+        it('should convert slash command results (num_turns === 0) to assistant messages', () => {
+            const sdkMessage: SDKResultMessage = {
+                type: 'result',
+                subtype: 'success',
+                result: 'You are currently using your subscription to power your Claude Code usage',
+                num_turns: 0,
+                total_cost_usd: 0,
+                duration_ms: 10,
+                duration_api_ms: 0,
+                is_error: false,
+                session_id: 'slash-session'
+            }
+
+            const logMessage = converter.convert(sdkMessage)
+
+            expect(logMessage).toBeTruthy()
+            expect(logMessage?.type).toBe('assistant')
+            expect(logMessage).toMatchObject({
+                type: 'assistant',
+                message: {
+                    role: 'assistant',
+                    content: [{ type: 'text', text: 'You are currently using your subscription to power your Claude Code usage' }]
+                }
+            })
+        })
+
+        it('should not convert slash command result when result text is empty', () => {
+            const sdkMessage: SDKResultMessage = {
+                type: 'result',
+                subtype: 'success',
+                result: '',
+                num_turns: 0,
+                total_cost_usd: 0,
+                duration_ms: 10,
+                duration_api_ms: 0,
+                is_error: false,
+                session_id: 'slash-session'
+            }
+
+            const logMessage = converter.convert(sdkMessage)
+
+            expect(logMessage).toBeNull()
         })
     })
 

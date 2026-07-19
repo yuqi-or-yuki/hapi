@@ -896,33 +896,13 @@ export function ingestIncomingMessages(sessionId: string, incoming: DecryptedMes
                 ...cursorUpdatesAfterAppendTrim(kept, dropped)
             })
         }
-        // 不在底部时：agent 消息立即显示，user 消息才放入 pending
-        // 原因：用户必须看到 AI 回复才能继续交互，pending 机制会导致回复滞后
-        const agentMessages = incoming.filter(msg => !isUserMessage(msg))
-        const userMessages = incoming.filter(msg => isUserMessage(msg))
-
-        let state = prev
-        if (agentMessages.length > 0) {
-            const merged = mergeMessages(state.messages, agentMessages)
-            const { kept, dropped } = trimVisibleWithDropped(merged, 'append')
-            const pending = filterPendingAgainstVisible(state.pending, kept)
-            state = buildState(state, {
-                messages: kept,
-                pending,
-                ...cursorUpdatesAfterAppendTrim(kept, dropped)
-            })
-        }
-        if (userMessages.length > 0) {
-            const pendingResult = mergeIntoPending(state, userMessages)
-            state = buildState(state, {
-                pending: pendingResult.pending,
-                pendingVisibleCount: pendingResult.pendingVisibleCount,
-                pendingOverflowCount: pendingResult.pendingOverflowCount,
-                pendingOverflowVisibleCount: pendingResult.pendingOverflowVisibleCount,
-                warning: pendingResult.warning,
-            })
-        }
-        return state
+        // Not at bottom: still merge all incoming messages into visible
+        // so that user messages and their corresponding agent responses
+        // stay together and the conversation doesn't appear out of order.
+        const merged = mergeMessages(prev.messages, incoming)
+        const { kept, dropped } = trimVisibleWithDropped(merged, 'append')
+        const pending = filterPendingAgainstVisible(prev.pending, kept)
+        return buildState(prev, { messages: kept, pending, ...cursorUpdatesAfterAppendTrim(kept, dropped) })
     })
 }
 

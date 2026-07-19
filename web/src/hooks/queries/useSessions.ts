@@ -18,9 +18,9 @@ export function useSessions(api: ApiClient | null): {
             return await api.getSessions()
         },
         enabled: Boolean(api),
-        // loopActive is computed server-side from loop-process liveness and is NOT
-        // delivered via SSE patches, so poll periodically to keep the loop badge fresh
-        // (appears when a loop starts, clears when it finishes) without a manual reload.
+        // loopActive/debateActive are computed server-side from process liveness and are NOT
+        // delivered via SSE patches, so poll periodically to keep the loop/debate badges fresh
+        // (appears when a loop/debate starts, clears when it finishes) without a manual reload.
         refetchInterval: 15000,
     })
 

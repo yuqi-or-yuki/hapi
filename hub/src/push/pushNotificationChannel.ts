@@ -1,3 +1,4 @@
+import type { SessionEndReason } from '@hapi/protocol'
 import type { Session } from '../sync/syncEngine'
 import type { NotificationChannel, TaskNotification } from '../notifications/notificationTypes'
 import { getAgentName, getSessionName } from '../notifications/sessionInfo'
@@ -110,6 +111,40 @@ export class PushNotificationChannel implements NotificationChannel {
             body: `${agentName} · ${name} · ${notification.summary}`,
             data: {
                 type: 'task-notification',
+                sessionId: session.id,
+                url: this.buildSessionPath(session.id)
+            }
+        }
+
+        const url = payload.data?.url ?? this.buildSessionPath(session.id)
+        if (this.visibilityTracker.hasVisibleConnection(session.namespace)) {
+            const delivered = await this.sseManager.sendToast(session.namespace, {
+                type: 'toast',
+                data: {
+                    title: payload.title,
+                    body: payload.body,
+                    sessionId: session.id,
+                    url
+                }
+            })
+            if (delivered > 0) {
+                return
+            }
+        }
+
+        await this.pushService.sendToNamespace(session.namespace, payload)
+    }
+
+    async sendSessionCompletion(session: Session, _reason: SessionEndReason): Promise<void> {
+        const agentName = getAgentName(session)
+        const name = getSessionName(session)
+
+        const payload: PushPayload = {
+            title: 'Task finished',
+            body: `${agentName} finished in ${name}`,
+            tag: `session-complete-${session.id}`,
+            data: {
+                type: 'session-complete',
                 sessionId: session.id,
                 url: this.buildSessionPath(session.id)
             }

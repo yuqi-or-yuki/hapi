@@ -21,6 +21,14 @@ type PushPayload = {
     }
 }
 
+// Without these, a newly installed worker sits in "waiting" state until every tab
+// holding the old worker closes — which can take days for a long-lived SPA tab, so
+// registerType: 'autoUpdate' (see main.tsx) never gets the reload it's expecting.
+self.skipWaiting()
+self.addEventListener('activate', (event) => {
+    event.waitUntil(self.clients.claim())
+})
+
 precacheAndRoute(self.__WB_MANIFEST)
 
 registerRoute(

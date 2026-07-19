@@ -15,6 +15,9 @@ export interface ServerSettings {
     telegramNotification: boolean
     serverChanSendKey: string | null
     serverChanNotification: boolean
+    ntfyServer: string
+    ntfyTopic: string | null
+    ntfyNotification: boolean
     listenHost: string
     listenPort: number
     publicUrl: string
@@ -28,6 +31,9 @@ export interface ServerSettingsResult {
         telegramNotification: 'env' | 'file' | 'default'
         serverChanSendKey: 'env' | 'file' | 'default'
         serverChanNotification: 'env' | 'file' | 'default'
+        ntfyServer: 'env' | 'file' | 'default'
+        ntfyTopic: 'env' | 'file' | 'default'
+        ntfyNotification: 'env' | 'file' | 'default'
         listenHost: 'env' | 'file' | 'default'
         listenPort: 'env' | 'file' | 'default'
         publicUrl: 'env' | 'file' | 'default'
@@ -93,6 +99,9 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
         telegramNotification: 'default',
         serverChanSendKey: 'default',
         serverChanNotification: 'default',
+        ntfyServer: 'default',
+        ntfyTopic: 'default',
+        ntfyNotification: 'default',
         listenHost: 'default',
         listenPort: 'default',
         publicUrl: 'default',
@@ -152,6 +161,48 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
     } else if (settings.serverChanNotification !== undefined) {
         serverChanNotification = settings.serverChanNotification
         sources.serverChanNotification = 'file'
+    }
+
+    // ntfyServer: env > file > https://ntfy.sh
+    let ntfyServer = 'https://ntfy.sh'
+    if (process.env.NTFY_SERVER) {
+        ntfyServer = process.env.NTFY_SERVER
+        sources.ntfyServer = 'env'
+        if (settings.ntfyServer === undefined) {
+            settings.ntfyServer = ntfyServer
+            needsSave = true
+        }
+    } else if (settings.ntfyServer !== undefined) {
+        ntfyServer = settings.ntfyServer
+        sources.ntfyServer = 'file'
+    }
+
+    // ntfyTopic: env > file > null
+    let ntfyTopic: string | null = null
+    if (process.env.NTFY_TOPIC) {
+        ntfyTopic = process.env.NTFY_TOPIC
+        sources.ntfyTopic = 'env'
+        if (settings.ntfyTopic === undefined) {
+            settings.ntfyTopic = ntfyTopic
+            needsSave = true
+        }
+    } else if (settings.ntfyTopic !== undefined) {
+        ntfyTopic = settings.ntfyTopic
+        sources.ntfyTopic = 'file'
+    }
+
+    // ntfyNotification: env > file > true
+    let ntfyNotification = true
+    if (process.env.NTFY_NOTIFICATION !== undefined) {
+        ntfyNotification = process.env.NTFY_NOTIFICATION === 'true'
+        sources.ntfyNotification = 'env'
+        if (settings.ntfyNotification === undefined) {
+            settings.ntfyNotification = ntfyNotification
+            needsSave = true
+        }
+    } else if (settings.ntfyNotification !== undefined) {
+        ntfyNotification = settings.ntfyNotification
+        sources.ntfyNotification = 'file'
     }
 
     // listenHost: env > file (new or old name) > default
@@ -248,6 +299,9 @@ export async function loadServerSettings(dataDir: string): Promise<ServerSetting
             telegramNotification,
             serverChanSendKey,
             serverChanNotification,
+            ntfyServer,
+            ntfyTopic,
+            ntfyNotification,
             listenHost,
             listenPort,
             publicUrl,

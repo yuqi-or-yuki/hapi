@@ -17,6 +17,34 @@ function resolveTheme() {
     return document.documentElement.dataset.theme === 'dark' ? 'dark' as const : 'light' as const
 }
 
+// LLM-generated mermaid frequently leaves special characters (parentheses,
+// angle brackets, slashes) unquoted inside node labels, which mermaid's
+// parser rejects — e.g. `A[Quality (size, coherence)]` or `A[A / B]`.
+// Wrapping such label text in quotes makes it parse. We only apply this as a
+// *repair* after the original source fails to render, and re-validate the
+// result before using it, so valid diagrams are never altered.
+const LABEL_NEEDS_QUOTING = /[()<>/]/
+
+function quoteNodeLabels(source: string, open: '[' | '{', close: ']' | '}'): string {
+    // Inner text must not contain the same bracket family, so we don't mangle
+    // compound shapes like [[subroutine]] or {{hexagon}}.
+    const innerClass = open === '[' ? '[^[\\]]+' : '[^{}]+'
+    const re = new RegExp(`\\${open}(${innerClass})\\${close}`, 'g')
+    return source.replace(re, (match, inner: string) => {
+        const trimmed = inner.trim()
+        if (!trimmed) return match
+        if (trimmed.startsWith('"') && trimmed.endsWith('"')) return match
+        if (!LABEL_NEEDS_QUOTING.test(inner)) return match
+        return `${open}"${inner.replace(/"/g, '&quot;')}"${close}`
+    })
+}
+
+export function repairMermaidSource(source: string): string {
+    let repaired = quoteNodeLabels(source, '[', ']')
+    repaired = quoteNodeLabels(repaired, '{', '}')
+    return repaired
+}
+
 async function ensureMermaid(theme: 'light' | 'dark') {
     const mermaid = await getMermaid()
     if (initializedTheme === theme) return mermaid
@@ -99,17 +127,36 @@ export function MermaidDiagram(props: SyntaxHighlighterProps) {
         let cancelled = false
 
         const render = async () => {
+            const mermaid = await ensureMermaid(theme)
             try {
-                const mermaid = await ensureMermaid(theme)
                 const result = await mermaid.render(`mermaid-${id}`, props.code)
                 if (cancelled) return
                 setSvg(result.svg)
                 setRenderError(false)
-            } catch {
-                if (cancelled) return
-                setSvg(null)
-                setRenderError(true)
+                return
+            } catch (err) {
+                console.error('[MermaidDiagram] initial render failed:', err, '\nSource:\n', props.code)
             }
+
+            // Retry once with common LLM syntax mistakes auto-repaired. Use a
+            // fresh render id since the failed attempt may have left a stale
+            // element behind.
+            const repaired = repairMermaidSource(props.code)
+            if (!cancelled && repaired !== props.code) {
+                try {
+                    const result = await mermaid.render(`mermaid-${id}-repaired`, repaired)
+                    if (cancelled) return
+                    setSvg(result.svg)
+                    setRenderError(false)
+                    return
+                } catch (err) {
+                    console.error('[MermaidDiagram] repaired render also failed:', err, '\nRepaired source:\n', repaired)
+                }
+            }
+
+            if (cancelled) return
+            setSvg(null)
+            setRenderError(true)
         }
 
         void render()

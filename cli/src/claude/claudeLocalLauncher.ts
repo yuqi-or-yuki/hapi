@@ -3,8 +3,14 @@ import { Session } from "./session";
 import { createSessionScanner } from "./utils/sessionScanner";
 import { isClaudeChatVisibleMessage } from "./utils/chatVisibility";
 import { BaseLocalLauncher } from "@/modules/common/launcher/BaseLocalLauncher";
+import { withImageUpload } from "./utils/imageUpload";
 
 export async function claudeLocalLauncher(session: Session): Promise<'switch' | 'exit'> {
+
+    const imageUploader = withImageUpload(
+        (msg) => session.client.sendClaudeSessionMessage(msg),
+        (mimeType, data) => session.client.uploadBlobToHub(mimeType, data)
+    )
 
     // Create scanner
     const scanner = await createSessionScanner({
@@ -25,7 +31,7 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
             if (!isClaudeChatVisibleMessage(message)) {
                 return
             }
-            session.client.sendClaudeSessionMessage(message)
+            imageUploader.send(message)
         }
     });
 
@@ -72,5 +78,6 @@ export async function claudeLocalLauncher(session: Session): Promise<'switch' | 
         // Cleanup
         session.removeSessionFoundCallback(handleSessionFound);
         await scanner.cleanup();
+        await imageUploader.flush();
     }
 }

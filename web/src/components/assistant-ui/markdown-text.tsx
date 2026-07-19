@@ -18,6 +18,7 @@ import { MermaidDiagram } from '@/components/assistant-ui/mermaid-diagram'
 import { useCopyToClipboard } from '@/hooks/useCopyToClipboard'
 import { CopyIcon, CheckIcon } from '@/components/icons'
 import { HappyChatContext } from '@/components/AssistantChat/context'
+import { openImageLightbox } from '@/components/ImageLightbox'
 
 import type { MarkdownTextPrimitiveProps } from '@assistant-ui/react-markdown'
 
@@ -209,9 +210,17 @@ function Image(props: ComponentPropsWithoutRef<'img'>) {
     let src = props.src
     if (typeof src === 'string' && src.startsWith('hapi-blob://') && ctx) {
         const blobId = src.slice('hapi-blob://'.length)
-        src = `/api/sessions/${ctx.sessionId}/blobs/${blobId}`
+        src = ctx.api.getBlobUrl(ctx.sessionId, blobId)
     }
-    return <img {...props} src={src} className={cn('aui-md-img my-3 max-w-full rounded-xl', props.className)} />
+    const resolvedSrc = src
+    return (
+        <img
+            {...props}
+            src={resolvedSrc}
+            className={cn('aui-md-img my-3 max-w-full rounded-xl cursor-zoom-in', props.className)}
+            onClick={resolvedSrc ? () => openImageLightbox(resolvedSrc, props.alt ?? '') : undefined}
+        />
+    )
 }
 
 export const defaultComponents = memoizeMarkdownComponents({

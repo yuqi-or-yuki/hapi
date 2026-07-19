@@ -8,6 +8,7 @@ export type SessionSummaryMetadata = {
     flavor?: string | null
     worktree?: WorktreeMetadata
     agentSessionId?: string
+    readyForReview?: boolean
 }
 
 export type SessionSummary = {
@@ -20,7 +21,11 @@ export type SessionSummary = {
     todoProgress: { completed: number; total: number } | null
     pendingRequestsCount: number
     model: string | null
+    modelReasoningEffort?: string | null
     effort: string | null
+    loopActive: boolean
+    debateActive: boolean
+    scheduledDueAts: number[]
 }
 
 export function toSessionSummary(session: Session): SessionSummary {
@@ -38,7 +43,8 @@ export function toSessionSummary(session: Session): SessionSummary {
             ?? session.metadata.geminiSessionId
             ?? session.metadata.opencodeSessionId
             ?? session.metadata.cursorSessionId
-            ?? undefined
+            ?? undefined,
+        readyForReview: session.metadata.readyForReview ?? undefined
     } : null
 
     const todoProgress = session.todos?.length ? {
@@ -56,6 +62,10 @@ export function toSessionSummary(session: Session): SessionSummary {
         todoProgress,
         pendingRequestsCount,
         model: session.model,
-        effort: session.effort
+        modelReasoningEffort: session.modelReasoningEffort,
+        effort: session.effort,
+        loopActive: false,    // computed server-side in the HTTP route; false here as safe default
+        debateActive: false,  // computed server-side in the HTTP route; false here as safe default
+        scheduledDueAts: []   // computed server-side in the HTTP route; empty here as safe default
     }
 }

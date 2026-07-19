@@ -4,6 +4,8 @@ export const queryKeys = {
     messages: (sessionId: string) => ['messages', sessionId] as const,
     machines: ['machines'] as const,
     machineCodexModels: (machineId: string) => ['machine-codex-models', machineId] as const,
+    machineClaudeModels: (machineId: string) => ['machine-claude-models', machineId] as const,
+    sessionClaudeModels: (sessionId: string) => ['session-claude-models', sessionId] as const,
     gitStatus: (sessionId: string) => ['git-status', sessionId] as const,
     sessionFiles: (sessionId: string, query: string) => ['session-files', sessionId, query] as const,
     sessionDirectory: (sessionId: string, path: string) => ['session-directory', sessionId, path] as const,
@@ -19,4 +21,6 @@ export const queryKeys = {
     sessionOpencodeModels: (sessionId: string) => ['session-opencode-models', sessionId] as const,
     machineOpencodeModelsForCwd: (machineId: string, cwd: string) => ['machine-opencode-models', machineId, cwd] as const,
     skills: (sessionId: string) => ['skills', sessionId] as const,
+    skillUsage: ['skill-usage'] as const,
+    sessionGroups: ['session-groups'] as const,
 }

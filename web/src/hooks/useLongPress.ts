@@ -78,9 +78,9 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressHandlers
     }, [startTimer])
 
     const onTouchEnd = useCallback<React.TouchEventHandler>((e) => {
-        if (isLongPressRef.current) {
-            e.preventDefault()
-        }
+        // Always prevent synthesized mouse events (mousedown/mouseup) that iOS fires
+        // after touch, which would cause a second onClick call and double-toggle.
+        e.preventDefault()
         handleEnd(!isLongPressRef.current)
     }, [handleEnd])
 

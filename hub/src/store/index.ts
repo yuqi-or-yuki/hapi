@@ -2,10 +2,14 @@ import { Database } from 'bun:sqlite'
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync } from 'node:fs'
 import { dirname } from 'node:path'
 
+import { BlobStore } from './blobStore'
 import { MachineStore } from './machineStore'
 import { MessageStore } from './messageStore'
+import { PreferencesStore } from './preferencesStore'
 import { PushStore } from './pushStore'
 import { SessionStore } from './sessionStore'
+import { ScheduledMessageStore } from './scheduledMessageStore'
+import { SkillUsageStore } from './skillUsageStore'
 import { UserStore } from './userStore'
 
 export type {
@@ -17,19 +21,29 @@ export type {
     VersionedUpdateResult
 } from './types'
 export type { CancelQueuedMessageResult, LookupQueuedMessageResult } from './messages'
+export { BlobStore } from './blobStore'
 export { MachineStore } from './machineStore'
 export { MessageStore } from './messageStore'
+export { PreferencesStore } from './preferencesStore'
 export { PushStore } from './pushStore'
 export { SessionStore } from './sessionStore'
+export { ScheduledMessageStore } from './scheduledMessageStore'
+export type { ScheduledMessageHistoryRow, ScheduledMessageRow, ScheduledMessageStatus } from './scheduledMessageStore'
+export { SkillUsageStore } from './skillUsageStore'
+export type { SkillUsageRow } from './skillUsageStore'
 export { UserStore } from './userStore'
 
-const SCHEMA_VERSION: number = 8
+const SCHEMA_VERSION: number = 12
 const REQUIRED_TABLES = [
     'sessions',
     'machines',
     'messages',
     'users',
-    'push_subscriptions'
+    'push_subscriptions',
+    'blobs',
+    'scheduled_messages',
+    'scheduled_message_history',
+    'skill_usage'
 ] as const
 
 export class Store {
@@ -41,6 +55,10 @@ export class Store {
     readonly messages: MessageStore
     readonly users: UserStore
     readonly push: PushStore
+    readonly blobs: BlobStore
+    readonly preferences: PreferencesStore
+    readonly scheduledMessages: ScheduledMessageStore
+    readonly skillUsage: SkillUsageStore
 
     constructor(dbPath: string) {
         this.dbPath = dbPath
@@ -82,6 +100,10 @@ export class Store {
         this.messages = new MessageStore(this.db)
         this.users = new UserStore(this.db)
         this.push = new PushStore(this.db)
+        this.blobs = new BlobStore(this.db)
+        this.preferences = new PreferencesStore(this.db)
+        this.scheduledMessages = new ScheduledMessageStore(this.db)
+        this.skillUsage = new SkillUsageStore(this.db)
     }
 
     private initSchema(): void {
@@ -98,6 +120,10 @@ export class Store {
             5: () => this.migrateFromV5ToV6(),
             6: () => this.migrateFromV6ToV7(),
             7: () => this.migrateFromV7ToV8(),
+            8: () => this.migrateFromV8ToV9(),
+            9: () => this.migrateFromV9ToV10(),
+            10: () => this.migrateFromV10ToV11(),
+            11: () => this.migrateFromV11ToV12(),
         })
 
         if (currentVersion === 0) {
@@ -140,6 +166,8 @@ export class Store {
             throw this.buildSchemaMismatchError(currentVersion)
         }
 
+        this.ensureScheduledMessagesSchema()
+        this.ensureSkillUsageSchema()
         this.assertRequiredTablesPresent()
     }
 
@@ -221,6 +249,75 @@ export class Store {
                 UNIQUE(namespace, endpoint)
             );
             CREATE INDEX IF NOT EXISTS idx_push_subscriptions_namespace ON push_subscriptions(namespace);
+
+            CREATE TABLE IF NOT EXISTS blobs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_blobs_session ON blobs(session_id);
+
+            CREATE TABLE IF NOT EXISTS preferences (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );
+
+            CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL DEFAULT 'default',
+                source_session_id TEXT NOT NULL,
+                target_session_id TEXT,
+                text TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                clone_before_send INTEGER NOT NULL DEFAULT 0,
+                interval_ms INTEGER,
+                max_occurrences INTEGER,
+                occurrence_count INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                sent_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, due_at);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_messages_source ON scheduled_messages(namespace, source_session_id);
+
+            CREATE TABLE IF NOT EXISTS scheduled_message_history (
+                id TEXT PRIMARY KEY,
+                scheduled_message_id TEXT NOT NULL,
+                namespace TEXT NOT NULL DEFAULT 'default',
+                event TEXT NOT NULL,
+                source_session_id TEXT NOT NULL DEFAULT '',
+                target_session_id TEXT,
+                text TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                clone_before_send INTEGER NOT NULL DEFAULT 0,
+                interval_ms INTEGER,
+                max_occurrences INTEGER,
+                occurrence_count INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL,
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (scheduled_message_id) REFERENCES scheduled_messages(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_scheduled_message_history_job ON scheduled_message_history(scheduled_message_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS skill_usage (
+                namespace TEXT NOT NULL DEFAULT 'default',
+                skill_name TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                last_used_at INTEGER NOT NULL,
+                PRIMARY KEY (namespace, skill_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_usage_namespace ON skill_usage(namespace, count DESC);
         `)
     }
 
@@ -378,6 +475,128 @@ export class Store {
         `)
     }
 
+    private migrateFromV8ToV9(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS blobs (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                mime_type TEXT NOT NULL,
+                data TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_blobs_session ON blobs(session_id);
+        `)
+    }
+
+    private migrateFromV9ToV10(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS preferences (
+                namespace TEXT NOT NULL,
+                key TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (namespace, key)
+            );
+        `)
+        this.ensureScheduledMessagesSchema()
+    }
+
+    private migrateFromV10ToV11(): void {
+        this.ensureSkillUsageSchema()
+    }
+
+    private migrateFromV11ToV12(): void {
+        this.ensureScheduledMessagesSchema()
+    }
+
+    private ensureSkillUsageSchema(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS skill_usage (
+                namespace TEXT NOT NULL DEFAULT 'default',
+                skill_name TEXT NOT NULL,
+                count INTEGER NOT NULL DEFAULT 0,
+                last_used_at INTEGER NOT NULL,
+                PRIMARY KEY (namespace, skill_name)
+            );
+            CREATE INDEX IF NOT EXISTS idx_skill_usage_namespace ON skill_usage(namespace, count DESC);
+        `)
+    }
+
+    private ensureScheduledMessagesSchema(): void {
+        this.db.exec(`
+            CREATE TABLE IF NOT EXISTS scheduled_messages (
+                id TEXT PRIMARY KEY,
+                namespace TEXT NOT NULL DEFAULT 'default',
+                source_session_id TEXT NOT NULL,
+                target_session_id TEXT,
+                text TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                clone_before_send INTEGER NOT NULL DEFAULT 0,
+                interval_ms INTEGER,
+                max_occurrences INTEGER,
+                occurrence_count INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                sent_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS idx_scheduled_messages_due ON scheduled_messages(status, due_at);
+            CREATE INDEX IF NOT EXISTS idx_scheduled_messages_source ON scheduled_messages(namespace, source_session_id);
+
+            CREATE TABLE IF NOT EXISTS scheduled_message_history (
+                id TEXT PRIMARY KEY,
+                scheduled_message_id TEXT NOT NULL,
+                namespace TEXT NOT NULL DEFAULT 'default',
+                event TEXT NOT NULL,
+                source_session_id TEXT NOT NULL DEFAULT '',
+                target_session_id TEXT,
+                text TEXT NOT NULL,
+                due_at INTEGER NOT NULL,
+                clone_before_send INTEGER NOT NULL DEFAULT 0,
+                interval_ms INTEGER,
+                max_occurrences INTEGER,
+                occurrence_count INTEGER NOT NULL DEFAULT 0,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                status TEXT NOT NULL,
+                error TEXT,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (scheduled_message_id) REFERENCES scheduled_messages(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_scheduled_message_history_job ON scheduled_message_history(scheduled_message_id, created_at DESC);
+        `)
+        const columns = this.getScheduledMessageColumnNames()
+        if (!columns.has('interval_ms')) {
+            this.db.exec('ALTER TABLE scheduled_messages ADD COLUMN interval_ms INTEGER')
+        }
+        if (!columns.has('enabled')) {
+            this.db.exec('ALTER TABLE scheduled_messages ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1')
+        }
+        if (!columns.has('max_occurrences')) {
+            // NULL (not the 10-send default) for existing rows — this migration must not
+            // retroactively cap schedules that were already repeating forever.
+            this.db.exec('ALTER TABLE scheduled_messages ADD COLUMN max_occurrences INTEGER')
+        }
+        if (!columns.has('occurrence_count')) {
+            this.db.exec('ALTER TABLE scheduled_messages ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 0')
+        }
+        const historyColumns = this.getScheduledMessageHistoryColumnNames()
+        if (!historyColumns.has('source_session_id')) {
+            this.db.exec("ALTER TABLE scheduled_message_history ADD COLUMN source_session_id TEXT NOT NULL DEFAULT ''")
+        }
+        if (!historyColumns.has('enabled')) {
+            this.db.exec('ALTER TABLE scheduled_message_history ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1')
+        }
+        if (!historyColumns.has('max_occurrences')) {
+            this.db.exec('ALTER TABLE scheduled_message_history ADD COLUMN max_occurrences INTEGER')
+        }
+        if (!historyColumns.has('occurrence_count')) {
+            this.db.exec('ALTER TABLE scheduled_message_history ADD COLUMN occurrence_count INTEGER NOT NULL DEFAULT 0')
+        }
+    }
+
     private getSessionColumnNames(): Set<string> {
         const rows = this.db.prepare('PRAGMA table_info(sessions)').all() as Array<{ name: string }>
         return new Set(rows.map((row) => row.name))
@@ -390,6 +609,16 @@ export class Store {
 
     private getMessageColumnNames(): Set<string> {
         const rows = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+        return new Set(rows.map((row) => row.name))
+    }
+
+    private getScheduledMessageColumnNames(): Set<string> {
+        const rows = this.db.prepare('PRAGMA table_info(scheduled_messages)').all() as Array<{ name: string }>
+        return new Set(rows.map((row) => row.name))
+    }
+
+    private getScheduledMessageHistoryColumnNames(): Set<string> {
+        const rows = this.db.prepare('PRAGMA table_info(scheduled_message_history)').all() as Array<{ name: string }>
         return new Set(rows.map((row) => row.name))
     }
 

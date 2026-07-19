@@ -235,9 +235,20 @@ export class SDKToLogConverter {
             }
 
             case 'result': {
-                // Result messages are not converted to log messages
-                // They're SDK-specific messages that indicate session completion
-                // Not part of the actual conversation log
+                const resultMsg = sdkMessage as SDKResultMessage
+                // When Claude Code handles a slash command directly (e.g. /cost, /usage, /stats),
+                // it responds without any LLM turns (num_turns === 0) and puts the response text
+                // in the result field. Surface it as an assistant message so the user sees it.
+                if (resultMsg.num_turns === 0 && resultMsg.result && resultMsg.subtype === 'success') {
+                    logMessage = {
+                        ...baseFields,
+                        type: 'assistant',
+                        message: {
+                            role: 'assistant',
+                            content: [{ type: 'text', text: resultMsg.result }]
+                        }
+                    }
+                }
                 break
             }
 

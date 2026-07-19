@@ -5,6 +5,7 @@ import { CodexCollaborationModeSchema, PermissionModeSchema } from '@hapi/protoc
 import { Hono } from 'hono'
 import { z } from 'zod'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
+import type { Store } from '../../store'
 import type { WebAppEnv } from '../middleware/auth'
 import { requireSessionFromParam, requireSyncEngine } from './guards'
 
@@ -38,6 +39,11 @@ const renameSessionSchema = z.object({
 
 const reviewSchema = z.object({
     readyForReview: z.boolean()
+})
+
+
+const archiveSessionSchema = z.object({
+    confirmed: z.literal(true)
 })
 
 const uploadSchema = z.object({
@@ -292,7 +298,7 @@ function computeLoopActiveIds(sessions: Session[]): Set<string> {
     return result
 }
 
-export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
+export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, store: Store): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
     app.get('/sessions', (c) => {
@@ -307,6 +313,19 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const allSessions = engine.getSessionsByNamespace(namespace)
         const loopActiveIds = computeLoopActiveIds(allSessions)
         const debateActiveIds = computeDebateActiveIds(allSessions)
+        const scheduledDueAtsBySessionId = new Map<string, number[]>()
+        for (const m of store.scheduledMessages.list(namespace, { status: 'pending' })) {
+            if (!m.enabled) continue
+            const dueAts = scheduledDueAtsBySessionId.get(m.sourceSessionId)
+            if (dueAts) {
+                dueAts.push(m.dueAt)
+            } else {
+                scheduledDueAtsBySessionId.set(m.sourceSessionId, [m.dueAt])
+            }
+        }
+        for (const dueAts of scheduledDueAtsBySessionId.values()) {
+            dueAts.sort((a, b) => a - b)
+        }
         const sessions = allSessions
             .sort((a, b) => {
                 // Active sessions first
@@ -325,7 +344,8 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             .map(s => ({
                 ...toSessionSummary(s),
                 loopActive: loopActiveIds.has(s.id),
-                debateActive: debateActiveIds.has(s.id)
+                debateActive: debateActiveIds.has(s.id),
+                scheduledDueAts: scheduledDueAtsBySessionId.get(s.id) ?? []
             }))
 
         return c.json({ sessions })
@@ -493,6 +513,12 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
             return engine
+        }
+
+        const body = await c.req.json().catch(() => ({}))
+        const parsed = archiveSessionSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Archive requires explicit confirmation' }, 400)
         }
 
         const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
@@ -870,6 +896,36 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list Codex models'
+            }, 500)
+        }
+    })
+
+    app.get('/sessions/:id/claude-models', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+
+        const flavor = sessionResult.session.metadata?.flavor ?? 'claude'
+        if (flavor !== 'claude') {
+            return c.json({
+                success: false,
+                error: 'Claude models are only available for Claude sessions'
+            }, 400)
+        }
+
+        try {
+            const result = await engine.listClaudeModelsForSession(sessionResult.sessionId)
+            return c.json(result)
+        } catch (error) {
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list Claude models'
             }, 500)
         }
     })

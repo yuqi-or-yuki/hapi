@@ -155,6 +155,70 @@ export function HappyComposer(props: {
 
     const textareaRef = useRef<HTMLTextAreaElement>(null)
     const prevControlledByUser = useRef(controlledByUser)
+    const prevControlsDisabled = useRef(controlsDisabled)
+
+    // Message history navigation (like terminal readline up/down)
+    const sentHistoryRef = useRef<string[]>([]) // newest first, max 50
+    const historyIdxRef = useRef(-1)            // -1 = not navigating
+    const savedDraftRef = useRef('')            // draft saved before navigation
+    const composerTextRef = useRef(composerText)
+    composerTextRef.current = composerText
+
+    // Simulate user typing by setting the native textarea value + dispatching input event.
+    // This goes through React's controlled-input reconciliation properly.
+    const setTextareaNative = useCallback((text: string) => {
+        const el = textareaRef.current
+        if (!el) return
+        const nativeSetter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set
+        if (nativeSetter) nativeSetter.call(el, text)
+        el.dispatchEvent(new Event('input', { bubbles: true }))
+        requestAnimationFrame(() => el.setSelectionRange(text.length, text.length))
+    }, [])
+
+    const sendWithHistory = useCallback(() => {
+        const text = composerTextRef.current.trim()
+        if (text) {
+            sentHistoryRef.current = [text, ...sentHistoryRef.current.filter(t => t !== text)].slice(0, 50)
+        }
+        historyIdxRef.current = -1
+        api.composer().send()
+    }, [api])
+
+    // Native keydown listener for history navigation — attached to document so it survives
+    // any textarea DOM element replacement on re-render.
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            // Only handle when the composer textarea is focused
+            const el = textareaRef.current
+            if (!el || document.activeElement !== el) return
+            if (e.shiftKey || e.ctrlKey || e.metaKey || e.altKey) return
+            if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return
+
+            const alreadyNavigating = historyIdxRef.current >= 0
+
+            if (e.key === 'ArrowUp') {
+                const cursorAtStart = el.selectionStart === 0 && el.selectionEnd === 0
+                if ((alreadyNavigating || cursorAtStart) && sentHistoryRef.current.length > 0) {
+                    const nextIdx = historyIdxRef.current + 1
+                    if (nextIdx < sentHistoryRef.current.length) {
+                        e.preventDefault()
+                        if (historyIdxRef.current === -1) savedDraftRef.current = composerTextRef.current
+                        historyIdxRef.current = nextIdx
+                        setTextareaNative(sentHistoryRef.current[nextIdx])
+                    } else if (alreadyNavigating) {
+                        e.preventDefault()
+                    }
+                }
+            } else if (e.key === 'ArrowDown' && alreadyNavigating) {
+                e.preventDefault()
+                const nextIdx = historyIdxRef.current - 1
+                historyIdxRef.current = nextIdx
+                setTextareaNative(nextIdx < 0 ? savedDraftRef.current : sentHistoryRef.current[nextIdx])
+            }
+        }
+        document.addEventListener('keydown', handler)
+        return () => document.removeEventListener('keydown', handler)
+    }, [setTextareaNative])
 
     useComposerDraft(sessionId, composerText, (text) => api.composer().setText(text))
 
@@ -180,6 +244,16 @@ export function HappyComposer(props: {
     }, [controlledByUser])
 
     const { haptic: platformHaptic, isTouch } = usePlatform()
+
+    // Re-focus composer when it recovers from disabled (e.g. after a message send clears isSending).
+    // The disabled attribute causes the textarea to lose focus; this restores it on desktop.
+    useEffect(() => {
+        if (prevControlsDisabled.current && !controlsDisabled && !isTouch) {
+            textareaRef.current?.focus({ preventScroll: true })
+        }
+        prevControlsDisabled.current = controlsDisabled
+    }, [controlsDisabled, isTouch])
+
     const { isStandalone, isIOS } = usePWAInstall()
     const isIOSPWA = isIOS && isStandalone
     const bottomPaddingClass = isIOSPWA ? 'pb-0' : 'pb-3'
@@ -323,14 +397,14 @@ export function HappyComposer(props: {
             if (composerEnterBehavior === 'newline') {
                 if ((e.ctrlKey || e.metaKey) && !e.altKey && canSend) {
                     e.preventDefault()
-                    api.composer().send()
+                    sendWithHistory()
                     setShowContinueHint(false)
                 }
                 return
             }
             e.preventDefault()
             if (!e.ctrlKey && !e.altKey && !e.metaKey && canSend) {
-                api.composer().send()
+                sendWithHistory()
                 setShowContinueHint(false)
             }
             return
@@ -389,7 +463,8 @@ export function HappyComposer(props: {
         canSend,
         api,
         haptic,
-        composerEnterBehavior
+        composerEnterBehavior,
+        sendWithHistory
     ])
 
     useEffect(() => {
@@ -502,8 +577,8 @@ export function HappyComposer(props: {
     const voiceEnabled = Boolean(onVoiceToggle)
 
     const handleSend = useCallback(() => {
-        api.composer().send()
-    }, [api])
+        sendWithHistory()
+    }, [sendWithHistory])
 
     const overlays = useMemo(() => {
         if (showSettings && (showCollaborationSettings || showPermissionSettings || showModelSettings || showModelReasoningEffortSettings || showEffortSettings)) {

@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { ApiClient } from '@/api/client'
 
-function isPushSupported(): boolean {
-    return typeof window !== 'undefined'
-        && 'serviceWorker' in navigator
-        && 'PushManager' in window
-        && 'Notification' in window
+type PushUnsupportedReason = 'insecure-context' | 'no-service-worker' | 'no-push-api' | null
+
+function getPushUnsupportedReason(): PushUnsupportedReason {
+    if (typeof window === 'undefined') return 'no-push-api'
+    if (!window.isSecureContext) return 'insecure-context'
+    if (!('serviceWorker' in navigator)) return 'no-service-worker'
+    if (!('PushManager' in window) || !('Notification' in window)) return 'no-push-api'
+    return null
 }
 
 function base64UrlToUint8Array(base64Url: string): Uint8Array {
@@ -23,17 +26,21 @@ function base64UrlToUint8Array(base64Url: string): Uint8Array {
 
 export function usePushNotifications(api: ApiClient | null) {
     const [isSupported, setIsSupported] = useState(false)
+    const [unsupportedReason, setUnsupportedReason] = useState<PushUnsupportedReason>(null)
     const [permission, setPermission] = useState<NotificationPermission>('default')
     const [isSubscribed, setIsSubscribed] = useState(false)
 
     const refreshSubscription = useCallback(async () => {
-        if (!isPushSupported()) {
+        const reason = getPushUnsupportedReason()
+        if (reason) {
             setIsSupported(false)
+            setUnsupportedReason(reason)
             setIsSubscribed(false)
             return
         }
 
         setIsSupported(true)
+        setUnsupportedReason(null)
         setPermission(Notification.permission)
 
         if (Notification.permission !== 'granted') {
@@ -51,7 +58,7 @@ export function usePushNotifications(api: ApiClient | null) {
     }, [refreshSubscription])
 
     const requestPermission = useCallback(async (): Promise<boolean> => {
-        if (!isPushSupported()) {
+        if (getPushUnsupportedReason()) {
             return false
         }
 
@@ -64,7 +71,7 @@ export function usePushNotifications(api: ApiClient | null) {
     }, [])
 
     const subscribe = useCallback(async (): Promise<boolean> => {
-        if (!api || !isPushSupported()) {
+        if (!api || getPushUnsupportedReason()) {
             return false
         }
 
@@ -105,7 +112,7 @@ export function usePushNotifications(api: ApiClient | null) {
     }, [api])
 
     const unsubscribe = useCallback(async (): Promise<boolean> => {
-        if (!api || !isPushSupported()) {
+        if (!api || getPushUnsupportedReason()) {
             return false
         }
 
@@ -130,6 +137,7 @@ export function usePushNotifications(api: ApiClient | null) {
 
     return {
         isSupported,
+        unsupportedReason,
         permission,
         isSubscribed,
         requestPermission,

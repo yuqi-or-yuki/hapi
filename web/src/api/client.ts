@@ -11,6 +11,7 @@ import type {
     MachinePathsExistsResponse,
     MachinesResponse,
     MessagesResponse,
+    ClaudeModelsResponse,
     CodexModelsResponse,
     OpencodeModelsResponse,
     PermissionMode,
@@ -23,7 +24,10 @@ import type {
     UploadFileResponse,
     VisibilityPayload,
     SessionResponse,
-    SessionsResponse
+    SessionsResponse,
+    ScheduledMessageResponse,
+    ScheduledMessagesResponse,
+    SkillUsageResponse
 } from '@/types/api'
 import type { CancelMessageResponse } from '@hapi/protocol/schemas'
 
@@ -329,10 +333,10 @@ export class ApiClient {
         })
     }
 
-    async archiveSession(sessionId: string): Promise<void> {
+    async archiveSession(sessionId: string, confirmed: true): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/archive`, {
             method: 'POST',
-            body: JSON.stringify({})
+            body: JSON.stringify({ confirmed })
         })
     }
 
@@ -469,6 +473,18 @@ export class ApiClient {
         )
     }
 
+    async getMachineClaudeModels(machineId: string): Promise<ClaudeModelsResponse> {
+        return await this.request<ClaudeModelsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/claude-models`
+        )
+    }
+
+    async getSessionClaudeModels(sessionId: string): Promise<ClaudeModelsResponse> {
+        return await this.request<ClaudeModelsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/claude-models`
+        )
+    }
+
     async getSessionOpencodeModels(sessionId: string): Promise<OpencodeModelsResponse> {
         return await this.request<OpencodeModelsResponse>(
             `/api/sessions/${encodeURIComponent(sessionId)}/opencode-models`
@@ -520,6 +536,38 @@ export class ApiClient {
         }) as SessionResponse
     }
 
+    async getAllScheduledMessages(status: 'pending' | 'sent' | 'failed' | 'cancelled' | 'all' = 'pending'): Promise<ScheduledMessagesResponse> {
+        return await this.request<ScheduledMessagesResponse>(`/api/scheduled-messages?status=${encodeURIComponent(status)}`)
+    }
+
+    async getScheduledMessages(sessionId: string): Promise<ScheduledMessagesResponse> {
+        return await this.request<ScheduledMessagesResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/scheduled-messages`)
+    }
+
+    async scheduleMessage(sessionId: string, options: { text: string; dueAt: number; cloneBeforeSend: boolean; intervalMs?: number | null; maxOccurrences?: number | null; enabled?: boolean }): Promise<ScheduledMessageResponse> {
+        return await this.request<ScheduledMessageResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/scheduled-messages`, {
+            method: 'POST',
+            body: JSON.stringify(options)
+        })
+    }
+
+    async updateScheduledMessage(id: string, patch: { sourceSessionId?: string; text?: string; dueAt?: number; cloneBeforeSend?: boolean; intervalMs?: number | null; maxOccurrences?: number | null; enabled?: boolean }): Promise<ScheduledMessageResponse> {
+        return await this.request<ScheduledMessageResponse>(`/api/scheduled-messages/${encodeURIComponent(id)}`, {
+            method: 'PATCH',
+            body: JSON.stringify(patch)
+        })
+    }
+
+    async cancelScheduledMessage(id: string): Promise<ScheduledMessageResponse> {
+        return await this.request<ScheduledMessageResponse>(`/api/scheduled-messages/${encodeURIComponent(id)}`, {
+            method: 'DELETE'
+        })
+    }
+
+    async getSkillUsage(): Promise<SkillUsageResponse> {
+        return await this.request<SkillUsageResponse>('/api/skills/usage')
+    }
+
     async fetchVoiceToken(options?: { customAgentId?: string; customApiKey?: string }): Promise<{
         allowed: boolean
         token?: string
@@ -529,6 +577,18 @@ export class ApiClient {
         return await this.request('/api/voice/token', {
             method: 'POST',
             body: JSON.stringify(options || {})
+        })
+    }
+
+    async getPreference<T>(key: string): Promise<T | null> {
+        const res = await this.request<{ value: T | null }>(`/api/preferences/${encodeURIComponent(key)}`)
+        return res.value
+    }
+
+    async setPreference<T>(key: string, value: T): Promise<void> {
+        await this.request(`/api/preferences/${encodeURIComponent(key)}`, {
+            method: 'PUT',
+            body: JSON.stringify({ value })
         })
     }
 }

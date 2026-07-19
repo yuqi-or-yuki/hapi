@@ -29,10 +29,103 @@ import { LoadingState } from '@/components/LoadingState'
 import { ToastContainer } from '@/components/ToastContainer'
 import { ToastProvider, useToast } from '@/lib/toast-context'
 import type { SyncEvent } from '@/types/api'
+import { normalizeAgentDoneRing, playAgentDoneRing, type AgentDoneRing } from '@/lib/agentDoneSound'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
 const REQUIRE_SERVER_URL = requireHubUrlForLogin()
+const AGENT_DONE_SOUND_MUTED_KEY = 'hapi-agent-done-sound-muted-v1'
+const AGENT_DONE_RING_KEY = 'hapi-agent-done-ring-v1'
+const ALL_DONE_RING_KEY = 'hapi-all-done-ring-v1'
+const UNREAD_DONE_ORDERS_KEY = 'hapi-unread-done-orders-v1'
+const UNREAD_DONE_NEXT_ORDER_KEY = 'hapi-unread-done-next-order-v1'
+
+function compactUnreadDoneOrders(orders: Record<string, number>): Record<string, number> {
+    const entries = Object.entries(orders)
+        .filter(([, order]) => Number.isFinite(order) && order > 0)
+        .sort((left, right) => left[1] - right[1] || left[0].localeCompare(right[0]))
+
+    return Object.fromEntries(entries.map(([sessionId], index) => [sessionId, index + 1]))
+}
+
+function loadUnreadDoneOrders(): Record<string, number> {
+    try {
+        const parsed = JSON.parse(localStorage.getItem(UNREAD_DONE_ORDERS_KEY) ?? '{}') as unknown
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+        const result: Record<string, number> = {}
+        for (const [key, value] of Object.entries(parsed)) {
+            if (typeof value === 'number' && Number.isFinite(value) && value > 0) {
+                result[key] = value
+            }
+        }
+        return compactUnreadDoneOrders(result)
+    } catch {
+        return {}
+    }
+}
+
+function saveUnreadDoneOrders(orders: Record<string, number>): void {
+    try {
+        localStorage.setItem(UNREAD_DONE_ORDERS_KEY, JSON.stringify(orders))
+    } catch {}
+}
+
+function loadUnreadDoneNextOrder(initialOrders: Record<string, number>): number {
+    try {
+        const stored = Number(localStorage.getItem(UNREAD_DONE_NEXT_ORDER_KEY))
+        if (Number.isFinite(stored) && stored > 0) return stored
+    } catch {}
+    return Math.max(0, ...Object.values(initialOrders)) + 1
+}
+
+function saveUnreadDoneNextOrder(order: number): void {
+    try {
+        localStorage.setItem(UNREAD_DONE_NEXT_ORDER_KEY, String(order))
+    } catch {}
+}
+
+function loadAgentDoneSoundMuted(): boolean {
+    try {
+        return localStorage.getItem(AGENT_DONE_SOUND_MUTED_KEY) === '1'
+    } catch {
+        return false
+    }
+}
+
+function saveAgentDoneSoundMuted(muted: boolean): void {
+    try {
+        localStorage.setItem(AGENT_DONE_SOUND_MUTED_KEY, muted ? '1' : '0')
+    } catch {}
+}
+
+function loadAgentDoneRing(): AgentDoneRing {
+    try {
+        return normalizeAgentDoneRing(localStorage.getItem(AGENT_DONE_RING_KEY))
+    } catch {
+        return 'microwave'
+    }
+}
+
+function saveAgentDoneRing(ring: AgentDoneRing): void {
+    try {
+        localStorage.setItem(AGENT_DONE_RING_KEY, ring)
+    } catch {}
+}
+
+function loadAllDoneRing(): AgentDoneRing {
+    try {
+        const raw = localStorage.getItem(ALL_DONE_RING_KEY)
+        return raw ? normalizeAgentDoneRing(raw) : 'chime'
+    } catch {
+        return 'chime'
+    }
+}
+
+function saveAllDoneRing(ring: AgentDoneRing): void {
+    try {
+        localStorage.setItem(ALL_DONE_RING_KEY, ring)
+    } catch {}
+}
 
 export function App() {
     return (
@@ -52,6 +145,76 @@ function AppInner() {
     const matchRoute = useMatchRoute()
     const router = useRouter()
     const { addToast } = useToast()
+    const [agentDoneSoundMuted, setAgentDoneSoundMutedState] = useState(loadAgentDoneSoundMuted)
+    const [agentDoneRing, setAgentDoneRingState] = useState(loadAgentDoneRing)
+    const [allDoneRing, setAllDoneRingState] = useState(loadAllDoneRing)
+    const [unreadDoneOrders, setUnreadDoneOrders] = useState(loadUnreadDoneOrders)
+    const unreadDoneNextOrderRef = useRef(loadUnreadDoneNextOrder(unreadDoneOrders))
+    const recentAgentDoneSoundKeysRef = useRef<Map<string, number>>(new Map())
+
+    const previewAgentDoneRing = useCallback((ring?: AgentDoneRing) => {
+        try {
+            playAgentDoneRing(ring ?? agentDoneRing)
+        } catch {}
+    }, [agentDoneRing])
+
+    const setAgentDoneSoundMuted = useCallback((muted: boolean) => {
+        setAgentDoneSoundMutedState(muted)
+        saveAgentDoneSoundMuted(muted)
+        if (!muted) {
+            previewAgentDoneRing()
+        }
+    }, [previewAgentDoneRing])
+
+    const setAgentDoneRing = useCallback((ring: AgentDoneRing) => {
+        setAgentDoneRingState(ring)
+        saveAgentDoneRing(ring)
+    }, [])
+
+    const setAllDoneRing = useCallback((ring: AgentDoneRing) => {
+        setAllDoneRingState(ring)
+        saveAllDoneRing(ring)
+    }, [])
+
+    const playDoneSound = useCallback((key: string, ring: AgentDoneRing = agentDoneRing) => {
+        if (agentDoneSoundMuted) return
+        const now = Date.now()
+        const recent = recentAgentDoneSoundKeysRef.current
+        for (const [recentKey, playedAt] of recent) {
+            if (now - playedAt > 10_000) recent.delete(recentKey)
+        }
+        const lastPlayedAt = recent.get(key)
+        if (lastPlayedAt && now - lastPlayedAt < 5_000) return
+        recent.set(key, now)
+        previewAgentDoneRing(ring)
+    }, [agentDoneRing, agentDoneSoundMuted, previewAgentDoneRing])
+
+    const markUnreadDone = useCallback((sessionId: string) => {
+        setUnreadDoneOrders(prev => {
+            if (Object.prototype.hasOwnProperty.call(prev, sessionId)) return prev
+            const next = compactUnreadDoneOrders({
+                ...prev,
+                [sessionId]: Math.max(0, ...Object.values(prev)) + 1
+            })
+            unreadDoneNextOrderRef.current = Math.max(0, ...Object.values(next)) + 1
+            saveUnreadDoneNextOrder(unreadDoneNextOrderRef.current)
+            saveUnreadDoneOrders(next)
+            return next
+        })
+    }, [])
+
+    const clearUnreadDone = useCallback((sessionId: string) => {
+        setUnreadDoneOrders(prev => {
+            if (!Object.prototype.hasOwnProperty.call(prev, sessionId)) return prev
+            const withoutSession = { ...prev }
+            delete withoutSession[sessionId]
+            const next = compactUnreadDoneOrders(withoutSession)
+            unreadDoneNextOrderRef.current = Math.max(0, ...Object.values(next)) + 1
+            saveUnreadDoneNextOrder(unreadDoneNextOrderRef.current)
+            saveUnreadDoneOrders(next)
+            return next
+        })
+    }, [])
 
     useEffect(() => {
         const tg = getTelegramWebApp()
@@ -241,6 +404,17 @@ function AppInner() {
         clearMessageWindow(event.sessionId)
         void fetchLatestMessages(api, event.sessionId)
     }, [api, selectedSessionId])
+
+    const handleSessionFinished = useCallback((event: { sessionId: string; allClear: boolean }) => {
+        if (event.sessionId !== selectedSessionId) {
+            markUnreadDone(event.sessionId)
+        }
+        if (event.allClear) {
+            playDoneSound(`all-clear:${event.sessionId}`, allDoneRing)
+            return
+        }
+        playDoneSound(event.sessionId, agentDoneRing)
+    }, [markUnreadDone, selectedSessionId, playDoneSound, allDoneRing, agentDoneRing])
     const translateIncomingToast = useCallback((title: string, body: string): { title: string; body: string } => {
         const normalizedTitle = title.trim()
         const normalizedBody = body.trim()
@@ -295,12 +469,7 @@ function AppInner() {
         })
     }, [addToast, translateIncomingToast])
 
-    const eventSubscription = useMemo(() => {
-        if (selectedSessionId) {
-            return { sessionId: selectedSessionId }
-        }
-        return { all: true }
-    }, [selectedSessionId])
+    const eventSubscription = useMemo(() => ({ all: true }), [])
 
     const { subscriptionId } = useSSE({
         enabled: Boolean(api && token),
@@ -310,7 +479,8 @@ function AppInner() {
         onConnect: handleSseConnect,
         onDisconnect: handleSseDisconnect,
         onEvent: handleSseEvent,
-        onToast: handleToast
+        onToast: handleToast,
+        onSessionFinished: handleSessionFinished
     })
 
     useVisibilityReporter({
@@ -398,7 +568,20 @@ function AppInner() {
     }
 
     return (
-        <AppContextProvider value={{ api, token, baseUrl }}>
+        <AppContextProvider value={{
+            api,
+            token,
+            baseUrl,
+            agentDoneSoundMuted,
+            setAgentDoneSoundMuted,
+            agentDoneRing,
+            setAgentDoneRing,
+            allDoneRing,
+            setAllDoneRing,
+            previewAgentDoneRing,
+            unreadDoneOrders,
+            clearUnreadDone
+        }}>
             <VoiceProvider>
                 <SyncingBanner isSyncing={isSyncing} />
                 <ReconnectingBanner

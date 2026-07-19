@@ -75,7 +75,7 @@ export class SessionCache {
         return this.refreshSession(stored.id) ?? (() => { throw new Error('Failed to load session') })()
     }
 
-    refreshSession(sessionId: string): Session | null {
+    refreshSession(sessionId: string, options: { backfillTodos?: boolean } = {}): Session | null {
         let stored = this.store.sessions.getSession(sessionId)
         if (!stored) {
             const existed = this.sessions.delete(sessionId)
@@ -87,8 +87,9 @@ export class SessionCache {
         }
 
         const existing = this.sessions.get(sessionId)
+        const shouldBackfillTodos = options.backfillTodos ?? false
 
-        if (stored.todos === null && !this.todoBackfillAttemptedSessionIds.has(sessionId)) {
+        if (shouldBackfillTodos && stored.todos === null && !this.todoBackfillAttemptedSessionIds.has(sessionId)) {
             this.todoBackfillAttemptedSessionIds.add(sessionId)
             const messages = this.store.messages.getMessages(sessionId, 200)
             for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -158,7 +159,7 @@ export class SessionCache {
     reloadAll(): void {
         const sessions = this.store.sessions.getSessions()
         for (const session of sessions) {
-            this.refreshSession(session.id)
+            this.refreshSession(session.id, { backfillTodos: false })
         }
     }
 

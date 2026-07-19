@@ -212,6 +212,7 @@ export interface ClientToServerEvents {
         version: number
         runnerState: unknown | null
     }) => void) => void
+    'store-blob': (data: { sid: string; mimeType: string; data: string }, cb: (response: { blobId: string } | { error: string }) => void) => void
     'rpc-register': (data: { method: string }) => void
     'rpc-unregister': (data: { method: string }) => void
     'terminal:ready': (data: TerminalReadyPayload) => void

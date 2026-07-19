@@ -65,6 +65,50 @@ describe('SSEManager namespace filtering', () => {
         expect(received.map((entry) => entry.id).sort()).toEqual(['alpha', 'beta'])
     })
 
+    it('routes preference updates to all connections in the namespace', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const received: Array<{ id: string; event: SyncEvent }> = []
+
+        manager.subscribe({
+            id: 'alpha-all',
+            namespace: 'alpha',
+            all: true,
+            send: (event) => {
+                received.push({ id: 'alpha-all', event })
+            },
+            sendHeartbeat: () => {}
+        })
+
+        manager.subscribe({
+            id: 'alpha-session',
+            namespace: 'alpha',
+            sessionId: 's1',
+            send: (event) => {
+                received.push({ id: 'alpha-session', event })
+            },
+            sendHeartbeat: () => {}
+        })
+
+        manager.subscribe({
+            id: 'beta-all',
+            namespace: 'beta',
+            all: true,
+            send: (event) => {
+                received.push({ id: 'beta-all', event })
+            },
+            sendHeartbeat: () => {}
+        })
+
+        manager.broadcast({
+            type: 'preference-updated',
+            namespace: 'alpha',
+            key: 'sessionGroups',
+            value: [{ id: 'g1' }]
+        })
+
+        expect(received.map((entry) => entry.id).sort()).toEqual(['alpha-all', 'alpha-session'])
+    })
+
     it('sends toast only to visible connections in a namespace', async () => {
         const manager = new SSEManager(0, new VisibilityTracker())
         const received: Array<{ id: string; event: SyncEvent }> = []

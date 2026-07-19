@@ -20,6 +20,7 @@ import {
     type CanUseToolControlResponse,
     type ControlCancelRequest,
     type PermissionResult,
+    type ModelInfo,
     AbortError
 } from './types'
 import { getDefaultClaudeCodePath, logDebug, streamToStdin } from './utils'
@@ -176,6 +177,21 @@ export class Query implements AsyncIterableIterator<SDKMessage> {
         await this.request({
             subtype: 'interrupt'
         }, this.childStdin)
+    }
+
+    /**
+     * Ask the running `claude` process for the models it currently supports.
+     * Works immediately after spawn — no prior turn or explicit handshake needed.
+     */
+    async listModels(): Promise<ModelInfo[]> {
+        if (!this.childStdin) {
+            throw new Error('listModels requires --input-format stream-json')
+        }
+
+        const response = await this.request({
+            subtype: 'list_models'
+        }, this.childStdin) as SDKControlResponse['response']
+        return response.response?.models ?? []
     }
 
     /**

@@ -111,6 +111,32 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
         }
     });
 
+
+    const claimDebateInputSchema: z.ZodTypeAny = z.object({
+        directory: z.string().describe('Absolute path to the .hapi-debates/<run-id> directory for the debate'),
+    });
+
+    mcp.registerTool<any, any>('claim_debate', {
+        description: 'Record that the current HAPI session owns/manages the hapi-debate running in the given debate run directory. Call this immediately after starting hapi-debate.',
+        title: 'Claim Debate Session',
+        inputSchema: claimDebateInputSchema,
+    }, async (args: { directory: string }) => {
+        try {
+            mkdirSync(args.directory, { recursive: true })
+            writeFileSync(join(args.directory, 'hapi-session-id'), client.sessionId)
+            logger.debug(`[hapiMCP] claimed debate for session ${client.sessionId} in ${args.directory}`)
+            return {
+                content: [{ type: 'text' as const, text: `Debate claimed for session ${client.sessionId}` }],
+                isError: false,
+            }
+        } catch (error) {
+            return {
+                content: [{ type: 'text' as const, text: `Failed to claim debate: ${String(error)}` }],
+                isError: true,
+            }
+        }
+    });
+
     const transport = new StreamableHTTPServerTransport({
         // NOTE: Returning session id here will result in claude
         // sdk spawn to fail with `Invalid Request: Server already initialized`
@@ -142,7 +168,7 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
 
     return {
         url: baseUrl.toString(),
-        toolNames: ['change_title', 'claim_loop'],
+        toolNames: ['change_title', 'claim_loop', 'claim_debate'],
         stop: () => {
             logger.debug('[hapiMCP] Stopping server');
             mcp.close();

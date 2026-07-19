@@ -97,6 +97,12 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             attachments: parsed.data.attachments,
             sentFrom: 'webapp'
         })
+
+        // If the session was marked ready for review, clear it when a new message is sent
+        if (sessionResult.session.metadata?.readyForReview) {
+            void engine.setSessionReadyForReview(sessionId, false).catch(() => undefined)
+        }
+
         return c.json({ ok: true })
     })
 

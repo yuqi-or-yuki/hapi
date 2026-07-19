@@ -28,11 +28,43 @@ import { SessionHeader } from '@/components/SessionHeader'
 import { TeamPanel } from '@/components/TeamPanel'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
+import { useClaudeModels } from '@/hooks/queries/useClaudeModels'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
 import { useVoiceOptional } from '@/lib/voice-context'
 import { RealtimeVoiceSession, registerSessionStore, registerVoiceHooksStore, voiceHooks } from '@/realtime'
 import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
+
+function UsageContextRow({ contextSize, contextWindow }: { contextSize: number; contextWindow: number }) {
+    const pctLeft = Math.round((1 - contextSize / contextWindow) * 100)
+    const colorClass = pctLeft <= 5 ? 'text-red-500' : pctLeft <= 15 ? 'text-amber-500' : 'text-[var(--app-fg)]'
+    return (
+        <div className={`flex justify-between font-medium ${colorClass}`}>
+            <span>Context remaining</span>
+            <span>{pctLeft}% ({(contextWindow - contextSize).toLocaleString()} tokens)</span>
+        </div>
+    )
+}
+
+function UsageLimitRow({ event }: { event: { type: 'limit-reached'; limitType: string } | { type: 'limit-warning'; utilization: number; limitType: string } }) {
+    const label = event.limitType.replace(/_/g, ' ')
+    if (event.type === 'limit-reached') {
+        return (
+            <div className="flex justify-between font-medium text-red-500">
+                <span>{label ? `${label} limit` : 'Usage limit'}</span>
+                <span>Reached</span>
+            </div>
+        )
+    }
+    const pctLeft = Math.round((1 - event.utilization) * 100)
+    const colorClass = pctLeft <= 10 ? 'text-red-500' : pctLeft <= 25 ? 'text-amber-500' : 'text-[var(--app-fg)]'
+    return (
+        <div className={`flex justify-between font-medium ${colorClass}`}>
+            <span>{label ? `${label} allowance` : 'Allowance'} remaining</span>
+            <span>~{pctLeft}%</span>
+        </div>
+    )
+}
 
 function getOutlineTitle(session: Session): string {
     if (session.metadata?.name) {
@@ -158,6 +190,7 @@ export function SessionChat(props: {
     const visibleGroupsRef = useRef<ToolGroupBlock[]>([])
     const [forceScrollToken, setForceScrollToken] = useState(0)
     const [outlineOpen, setOutlineOpen] = useState(false)
+    const [showUsagePanel, setShowUsagePanel] = useState(false)
     const agentFlavor = props.session.metadata?.flavor ?? null
     const controlledByUser = props.session.agentState?.controlledByUser === true
     const codexCollaborationModeSupported = agentFlavor === 'codex' && !controlledByUser
@@ -195,6 +228,24 @@ export function SessionChat(props: {
             label: opencodeModel.name ?? opencodeModel.modelId
         }))
     }, [agentFlavor, opencodeModelsState.availableModels])
+    const claudeModelsState = useClaudeModels({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'claude' && props.session.active && !controlledByUser
+    })
+    const claudeModelOptions = useMemo(() => {
+        if (agentFlavor !== 'claude' || claudeModelsState.models.length === 0) {
+            // Empty means "still loading" or "fetch failed" — fall back to the
+            // static CLAUDE_MODEL_PRESETS list inside getClaudeComposerModelOptions
+            // rather than showing an empty picker.
+            return undefined
+        }
+
+        return claudeModelsState.models.map((claudeModel) => ({
+            value: claudeModel.value,
+            label: claudeModel.displayName
+        }))
+    }, [agentFlavor, claudeModelsState.models])
     const {
         abortSession,
         switchSession,
@@ -354,6 +405,34 @@ export function SessionChat(props: {
         () => reduceChatBlocks(normalizedMessages, props.session.agentState),
         [normalizedMessages, props.session.agentState]
     )
+
+    const sessionUsageTotals = useMemo(() => {
+        let inputTokens = 0
+        let outputTokens = 0
+        let cacheCreation = 0
+        let cacheRead = 0
+        for (const msg of normalizedMessages) {
+            if (msg.usage && !msg.isSidechain && msg.usage.scope_role !== 'child') {
+                inputTokens += msg.usage.input_tokens
+                outputTokens += msg.usage.output_tokens
+                cacheCreation += msg.usage.cache_creation_input_tokens ?? 0
+                cacheRead += msg.usage.cache_read_input_tokens ?? 0
+            }
+        }
+        return { inputTokens, outputTokens, cacheCreation, cacheRead }
+    }, [normalizedMessages])
+
+    const latestLimitEvent = useMemo((): { type: 'limit-reached'; limitType: string } | { type: 'limit-warning'; utilization: number; limitType: string } | null => {
+        for (let i = normalizedMessages.length - 1; i >= 0; i--) {
+            const msg = normalizedMessages[i]
+            if (msg.role === 'event') {
+                const ev = msg.content as import('@/chat/types').AgentEvent
+                if (ev.type === 'limit-reached') return { type: 'limit-reached', limitType: String((ev as any).limitType ?? '') }
+                if (ev.type === 'limit-warning') return { type: 'limit-warning', utilization: Number((ev as any).utilization ?? 0), limitType: String((ev as any).limitType ?? '') }
+            }
+        }
+        return null
+    }, [normalizedMessages])
     const reconciled = useMemo(
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),
         [reduced.blocks]
@@ -492,6 +571,11 @@ export function SessionChat(props: {
     }, [navigate, props.session.id])
 
     const handleSend = useCallback((text: string, attachments?: AttachmentMetadata[]) => {
+        if (text.trim() === '/usage' && !attachments?.length) {
+            setShowUsagePanel(true)
+            return
+        }
+        setShowUsagePanel(false)
         props.onSend(text, attachments)
         setForceScrollToken((token) => token + 1)
     }, [props.onSend])
@@ -579,6 +663,64 @@ export function SessionChat(props: {
                         <QueuedMessagesBar sessionId={props.session.id} api={props.api} />
                     </div>
 
+                    {showUsagePanel && (
+                        <div className="px-3 pb-2">
+                            <div className="mx-auto w-full max-w-content rounded-md border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-3 text-sm">
+                                <div className="mb-2 flex items-center justify-between">
+                                    <span className="font-medium text-[var(--app-fg)]">Usage</span>
+                                    <button
+                                        onClick={() => setShowUsagePanel(false)}
+                                        className="text-lg leading-none text-[var(--app-hint)] hover:text-[var(--app-fg)]"
+                                        aria-label="Dismiss"
+                                    >
+                                        ×
+                                    </button>
+                                </div>
+                                <div className="space-y-1 font-mono text-xs text-[var(--app-hint)]">
+                                    {/* Context window remaining */}
+                                    {reduced.latestUsage?.contextWindow ? (
+                                        <UsageContextRow
+                                            contextSize={reduced.latestUsage.contextSize}
+                                            contextWindow={reduced.latestUsage.contextWindow}
+                                        />
+                                    ) : null}
+                                    {/* Weekly / hourly allowance remaining */}
+                                    {latestLimitEvent ? (
+                                        <UsageLimitRow event={latestLimitEvent} />
+                                    ) : null}
+                                    {/* Token breakdown */}
+                                    <div className="mt-1 border-t border-[var(--app-border)] pt-1">
+                                        <div className="flex justify-between">
+                                            <span>Input tokens</span>
+                                            <span>{sessionUsageTotals.inputTokens.toLocaleString()}</span>
+                                        </div>
+                                        <div className="flex justify-between">
+                                            <span>Output tokens</span>
+                                            <span>{sessionUsageTotals.outputTokens.toLocaleString()}</span>
+                                        </div>
+                                        {sessionUsageTotals.cacheRead > 0 && (
+                                            <div className="flex justify-between">
+                                                <span>Cache read</span>
+                                                <span>{sessionUsageTotals.cacheRead.toLocaleString()}</span>
+                                            </div>
+                                        )}
+                                        {sessionUsageTotals.cacheCreation > 0 && (
+                                            <div className="flex justify-between">
+                                                <span>Cache creation</span>
+                                                <span>{sessionUsageTotals.cacheCreation.toLocaleString()}</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    {props.hasMoreMessages && (
+                                        <div className="mt-1 text-[10px] opacity-70">
+                                            Scroll up to load older messages for complete totals
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+
                     <HappyComposer
                         key={props.session.id}
                         sessionId={props.session.id}
@@ -595,7 +737,9 @@ export function SessionChat(props: {
                                 ? codexModelOptions
                                 : agentFlavor === 'opencode'
                                     ? opencodeModelOptions
-                                    : undefined
+                                    : agentFlavor === 'claude'
+                                        ? claudeModelOptions
+                                        : undefined
                         }
                         active={props.session.active}
                         allowSendWhenInactive

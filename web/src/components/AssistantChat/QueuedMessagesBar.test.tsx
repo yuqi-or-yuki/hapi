@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { computeCanCancel } from './QueuedMessagesBar'
+import { computeCanCancel, STALE_OPTIMISTIC_MS } from './QueuedMessagesBar'
 
 /**
  * Unit tests for computeCanCancel — the race guard that prevents sending
@@ -11,12 +11,15 @@ import { computeCanCancel } from './QueuedMessagesBar'
  * message-window-store replaces the row with the server-assigned UUID id.
  * After that replace, id !== localId.
  *
- * canCancel = hasServerEcho && !isPending
+ * Stale fallback: after STALE_OPTIMISTIC_MS without a server echo the POST
+ * is guaranteed done; cancel is enabled regardless so stuck messages can
+ * always be removed.
+ *
+ * canCancel = (hasServerEcho || isStale) && !isPending
  */
 describe('computeCanCancel', () => {
     describe('hasServerEcho detection', () => {
         it('is false when id === localId (purely optimistic, no server echo)', () => {
-            // useSendMessage.onMutate sets id = localId before POST /messages completes.
             const localId = 'local-abc-123'
             expect(computeCanCancel({ id: localId, localId, isPending: false })).toBe(false)
         })
@@ -53,6 +56,40 @@ describe('computeCanCancel', () => {
             const serverId = 'server-uuid-456'
             // The normal case: user can click ✕ or ✎
             expect(computeCanCancel({ id: serverId, localId, isPending: false })).toBe(true)
+        })
+    })
+
+    describe('stale optimistic fallback', () => {
+        const localId = 'local-abc-123'
+        const base = 1_000_000
+
+        it('is false when optimistic and not yet stale', () => {
+            expect(computeCanCancel({
+                id: localId, localId, isPending: false,
+                createdAt: base, now: base + STALE_OPTIMISTIC_MS - 1
+            })).toBe(false)
+        })
+
+        it('is true when optimistic but stale (echo permanently lost)', () => {
+            expect(computeCanCancel({
+                id: localId, localId, isPending: false,
+                createdAt: base, now: base + STALE_OPTIMISTIC_MS
+            })).toBe(true)
+        })
+
+        it('is false when stale but isPending', () => {
+            expect(computeCanCancel({
+                id: localId, localId, isPending: true,
+                createdAt: base, now: base + STALE_OPTIMISTIC_MS + 1000
+            })).toBe(false)
+        })
+
+        it('is false when optimistic, stale, but no createdAt provided', () => {
+            // Without createdAt we cannot determine staleness — stay disabled.
+            expect(computeCanCancel({
+                id: localId, localId, isPending: false,
+                createdAt: undefined, now: base + STALE_OPTIMISTIC_MS + 1000
+            })).toBe(false)
         })
     })
 })

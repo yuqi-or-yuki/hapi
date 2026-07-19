@@ -20,6 +20,19 @@ import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { normalizeClaudeSessionModel } from './model';
 import { normalizeClaudeSessionEffort } from './effort';
 import { getInvokedCwd } from '@/utils/invokedCwd';
+import { existsSync, readFileSync } from 'node:fs';
+import { configuration } from '@/configuration';
+import { isProcessAlive } from '@/utils/process';
+
+function isRunnerActive(): boolean {
+    try {
+        if (!existsSync(configuration.runnerLockFile)) return false;
+        const lockPid = readFileSync(configuration.runnerLockFile, 'utf-8').trim();
+        return !!lockPid && !isNaN(Number(lockPid)) && isProcessAlive(Number(lockPid));
+    } catch {
+        return false;
+    }
+}
 
 export interface StartOptions {
     model?: string
@@ -134,8 +147,12 @@ export async function runClaude(options: StartOptions = {}): Promise<void> {
     lifecycle.registerProcessHandlers();
     registerKillSessionHandler(session.rpcHandlerManager, lifecycle.cleanupAndExit);
 
-    // Set initial agent state
-    const startingMode = options.startingMode ?? (startedBy === 'runner' ? 'remote' : 'local');
+    // Set initial agent state.
+    // Default to remote mode when the HAPI runner is active: this avoids a local→remote
+    // subprocess restart when the user switches devices (e.g. phone), which would otherwise
+    // drop Claude Desktop's bridge and disconnect local MCPs like claude-in-chrome.
+    const defaultMode = (startedBy === 'runner' || isRunnerActive()) ? 'remote' : 'local';
+    const startingMode = options.startingMode ?? defaultMode;
     setControlledByUser(session, startingMode);
 
     // Import MessageQueue2 and create message queue

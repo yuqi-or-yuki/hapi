@@ -18,6 +18,7 @@ import { buildThreadStartParams, buildTurnStartParams } from './utils/appServerC
 import type { ThreadGoal, ThreadGoalStatus } from './appServerTypes';
 import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
+import { uploadImagesInCodexOutput } from './utils/imageUpload';
 import {
     RemoteLauncherBase,
     type RemoteLauncherDisplayContext,
@@ -251,6 +252,95 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
         const errorMessage = (error: unknown): string => {
             return error instanceof Error ? error.message : String(error);
+        };
+
+        let imageUploadChain: Promise<void> = Promise.resolve();
+        const uploadCodexToolOutputImages = async (output: unknown): Promise<unknown> => {
+            const uploadBlob = (session.client as unknown as {
+                uploadBlobToHub?: (mimeType: string, data: string) => Promise<string>;
+            }).uploadBlobToHub;
+            if (!uploadBlob) {
+                return output;
+            }
+            return uploadImagesInCodexOutput(output, uploadBlob.bind(session.client));
+        };
+
+        const extractUploadedImages = (value: unknown): Array<{ blobId: string; mimeType: string }> => {
+            const images: Array<{ blobId: string; mimeType: string }> = [];
+            const scan = (item: unknown): void => {
+                if (Array.isArray(item)) {
+                    for (const child of item) scan(child);
+                    return;
+                }
+                const record = asRecord(item);
+                if (!record) return;
+                if (record.type === 'hapi_image' && typeof record.blobId === 'string' && typeof record.mimeType === 'string') {
+                    images.push({ blobId: record.blobId, mimeType: record.mimeType });
+                    return;
+                }
+                for (const child of Object.values(record)) scan(child);
+            };
+            scan(value);
+            return images;
+        };
+
+        let messageImageUploadChain: Promise<void> = Promise.resolve();
+        const sendAgentTextMessage = (message: string): void => {
+            messageImageUploadChain = messageImageUploadChain
+                .then(async () => {
+                    const processed = await uploadCodexToolOutputImages({ message });
+                    const images = extractUploadedImages(processed);
+                    if (images.length === 0) {
+                        session.sendAgentMessage({
+                            type: 'message',
+                            message,
+                            id: randomUUID()
+                        });
+                        return;
+                    }
+
+                    const seen = new Set<string>();
+                    const markdownImages = images
+                        .filter((image) => {
+                            if (seen.has(image.blobId)) return false;
+                            seen.add(image.blobId);
+                            return true;
+                        })
+                        .map((image) => `![image](hapi-blob://${image.blobId})`)
+                        .join('\n');
+
+                    session.sendAgentMessage({
+                        type: 'message',
+                        message: `${message}\n\n${markdownImages}`,
+                        id: randomUUID()
+                    });
+                })
+                .catch((error) => {
+                    logger.debug('[codex-blob-upload]: message image upload failed, sending unprocessed', error);
+                    session.sendAgentMessage({
+                        type: 'message',
+                        message,
+                        id: randomUUID()
+                    });
+                });
+        };
+
+        const sendToolCallResult = (message: {
+            type: 'tool-call-result';
+            callId: string;
+            output: unknown;
+            is_error?: boolean;
+            id: string;
+        }): void => {
+            imageUploadChain = imageUploadChain
+                .then(async () => {
+                    const output = await uploadCodexToolOutputImages(message.output);
+                    session.sendAgentMessage({ ...message, output });
+                })
+                .catch((error) => {
+                    logger.debug('[codex-blob-upload]: message chain error, sending unprocessed', error);
+                    session.sendAgentMessage(message);
+                });
         };
 
         const isExitPlanModeTool = (toolName: string): boolean => {
@@ -1961,11 +2051,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             if (msgType === 'agent_message') {
                 const message = asString(msg.message);
                 if (message) {
-                    session.sendAgentMessage({
-                        type: 'message',
-                        message,
-                        id: randomUUID()
-                    });
+                    sendAgentTextMessage(message);
                 }
             }
             if (msgType === 'exec_command_begin' || msgType === 'exec_approval_request') {
@@ -1995,7 +2081,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     output.stdout = output.output;
                     delete output.output;
 
-                    session.sendAgentMessage({
+                    sendToolCallResult({
                         type: 'tool-call-result',
                         callId: callId,
                         output,
@@ -2077,7 +2163,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         messageBuffer.addMessage(`Error: ${errorMsg.substring(0, 200)}`, 'result');
                     }
 
-                    session.sendAgentMessage({
+                    sendToolCallResult({
                         type: 'tool-call-result',
                         callId: callId,
                         output: {
@@ -2134,7 +2220,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         sendTitleSummary(title);
                     }
 
-                    session.sendAgentMessage({
+                    sendToolCallResult({
                         type: 'tool-call-result',
                         callId,
                         output,
@@ -2193,7 +2279,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         handleAgentToolEnd(callId, name, msg.output, Boolean(msg.is_error ?? msg.isError));
                         return;
                     }
-                    session.sendAgentMessage({
+                    sendToolCallResult({
                         type: 'tool-call-result',
                         callId,
                         output: msg.output,
@@ -2831,6 +2917,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
         }
 
+        await imageUploadChain;
         failPendingAgentStarts('spawn_agent did not return an agent id before the Codex session ended');
         cancelAllPendingThrottledAgentRunUpdates();
     }

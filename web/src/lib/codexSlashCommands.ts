@@ -1,50 +1,12 @@
 import type { SlashCommand } from '@/types/api'
-
-const BUILTIN_COMMANDS: Record<string, SlashCommand[]> = {
-    claude: [
-        { name: 'clear', description: 'Clear conversation history and free up context', source: 'builtin' },
-        { name: 'compact', description: 'Clear conversation history but keep a summary in context', source: 'builtin' },
-        { name: 'context', description: 'Visualize current context usage as a colored grid', source: 'builtin' },
-        { name: 'cost', description: 'Show the total cost and duration of the current session', source: 'builtin' },
-        { name: 'doctor', description: 'Diagnose and verify your Claude Code installation and settings', source: 'builtin' },
-        { name: 'plan', description: 'View or open the current session plan', source: 'builtin' },
-        { name: 'stats', description: 'Show your Claude Code usage statistics and activity', source: 'builtin' },
-        { name: 'status', description: 'Show Claude Code status including version, model, account, and API connectivity', source: 'builtin' },
-    ],
-    codex: [
-        { name: 'clear', description: 'Clear current Codex thread context', source: 'builtin' },
-        { name: 'compact', description: 'Compact current Codex thread context', source: 'builtin' },
-        { name: 'goal', description: 'Set, view, pause, resume, or clear a persistent Codex goal', source: 'builtin' },
-        { name: 'help', description: 'Show supported HAPI Codex slash commands', source: 'builtin' },
-        { name: 'plan', description: 'Enable plan mode; use /plan off to return to default', source: 'builtin' },
-        { name: 'default', description: 'Return Codex collaboration mode to default', source: 'builtin' },
-        { name: 'execute', description: 'Return Codex collaboration mode to default', source: 'builtin' },
-        { name: 'status', description: 'Show current Codex session config', source: 'builtin' },
-        { name: 'model', description: 'Show or set Codex model, e.g. /model gpt-5.5', source: 'builtin' },
-        { name: 'reasoning', description: 'Show or set reasoning effort', source: 'builtin' },
-        { name: 'effort', description: 'Alias for /reasoning', source: 'builtin' },
-        { name: 'permissions', description: 'Show or set permission mode', source: 'builtin' },
-        { name: 'permission', description: 'Alias for /permissions', source: 'builtin' },
-    ],
-    gemini: [
-        { name: 'about', description: 'Show version info', source: 'builtin' },
-        { name: 'clear', description: 'Clear the screen and conversation history', source: 'builtin' },
-        { name: 'compress', description: 'Compress the context by replacing it with a summary', source: 'builtin' },
-        { name: 'stats', description: 'Check session stats', source: 'builtin' },
-    ],
-    opencode: [],
-}
-
-const UNSUPPORTED_CODEX_BUILTIN_COMMANDS = new Set([
-    'review',
-    'new',
-    'compat',
-    'undo',
-    'diff',
-])
+import {
+    getBuiltinSlashCommands as getSharedBuiltinSlashCommands,
+    isUnsupportedCodexBuiltinSlashCommand,
+} from '@hapi/protocol/slashCommands'
 
 export function getBuiltinSlashCommands(agentType: string): SlashCommand[] {
-    return BUILTIN_COMMANDS[agentType] ?? BUILTIN_COMMANDS.claude ?? []
+    const commands = getSharedBuiltinSlashCommands(agentType)
+    return commands.length > 0 ? commands : getSharedBuiltinSlashCommands('claude')
 }
 
 export function mergeSlashCommands(commands: readonly SlashCommand[]): SlashCommand[] {
@@ -93,7 +55,7 @@ export function findUnsupportedCodexBuiltinSlashCommand(
     }
 
     const commandName = match[1]?.toLowerCase()
-    if (!commandName || !UNSUPPORTED_CODEX_BUILTIN_COMMANDS.has(commandName)) {
+    if (!commandName || !isUnsupportedCodexBuiltinSlashCommand(commandName)) {
         return null
     }
 

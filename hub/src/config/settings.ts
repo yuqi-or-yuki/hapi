@@ -16,6 +16,9 @@ export interface Settings {
     telegramNotification?: boolean
     serverChanSendKey?: string
     serverChanNotification?: boolean
+    ntfyServer?: string
+    ntfyTopic?: string
+    ntfyNotification?: boolean
     listenHost?: string
     listenPort?: number
     publicUrl?: string

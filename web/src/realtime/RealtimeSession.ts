@@ -56,6 +56,10 @@ export function registerVoiceSession(session: VoiceSession) {
     voiceSession = session
 }
 
+export function unregisterVoiceSession() {
+    voiceSession = null
+}
+
 export function isVoiceSessionStarted(): boolean {
     return voiceSessionStarted
 }

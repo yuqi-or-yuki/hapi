@@ -1,10 +1,13 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useTranslation, type Locale } from '@/lib/use-translation'
 import { useAppGoBack } from '@/hooks/useAppGoBack'
+import { useAppContext } from '@/lib/app-context'
+import { usePushNotifications } from '@/hooks/usePushNotifications'
 import { getElevenLabsSupportedLanguages, getLanguageDisplayName, type Language } from '@/lib/languages'
 import { getFontScaleOptions, useFontScale, type FontScale } from '@/hooks/useFontScale'
 import { getTerminalFontSizeOptions, useTerminalFontSize, type TerminalFontSize } from '@/hooks/useTerminalFontSize'
 import { getComposerEnterBehaviorOptions, useComposerEnterBehavior, type ComposerEnterBehavior } from '@/hooks/useComposerEnterBehavior'
+import { useHideArchivedSessions } from '@/hooks/useHideArchivedSessions'
 import { getTerminalToolDisplayModeOptions, useTerminalToolDisplayMode, type TerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import {
     getChatSurfaceColorPickerValue,
@@ -142,6 +145,9 @@ function ChatSurfaceColorControl(props: {
 export default function SettingsPage() {
     const { t, locale, setLocale } = useTranslation()
     const goBack = useAppGoBack()
+    const { api } = useAppContext()
+    const { isSupported: isPushSupported, unsupportedReason: pushUnsupportedReason, permission: pushPermission, isSubscribed: isPushSubscribed, requestPermission: requestPushPermission, subscribe: subscribePush, unsubscribe: unsubscribePush } = usePushNotifications(api)
+    const [isPushLoading, setIsPushLoading] = useState(false)
     const [isOpen, setIsOpen] = useState(false)
     const [isAppearanceOpen, setIsAppearanceOpen] = useState(false)
     const [isFontOpen, setIsFontOpen] = useState(false)
@@ -167,6 +173,7 @@ export default function SettingsPage() {
         setUserMessageBackground,
     } = useChatSurfaceColors()
     const { appearance, setAppearance } = useAppearance()
+    const { hideArchivedSessions, setHideArchivedSessions } = useHideArchivedSessions()
 
     // Voice language state - read from localStorage
     const [voiceLanguage, setVoiceLanguage] = useState<string | null>(() => {
@@ -185,6 +192,23 @@ export default function SettingsPage() {
     const currentComposerEnterBehaviorLabel = composerEnterBehaviorOptions.find((opt) => opt.value === composerEnterBehavior)?.labelKey ?? 'settings.chat.enterBehavior.send'
     const currentTerminalToolDisplayModeLabel = terminalToolDisplayModeOptions.find((opt) => opt.value === terminalToolDisplayMode)?.labelKey ?? 'settings.chat.terminalToolDisplay.compact'
     const currentVoiceLanguage = voiceLanguages.find((lang) => lang.code === voiceLanguage)
+
+    const handlePushToggle = useCallback(async () => {
+        if (isPushLoading) return
+        setIsPushLoading(true)
+        try {
+            if (isPushSubscribed) {
+                await unsubscribePush()
+            } else {
+                const granted = pushPermission === 'granted' || await requestPushPermission()
+                if (granted) {
+                    await subscribePush()
+                }
+            }
+        } finally {
+            setIsPushLoading(false)
+        }
+    }, [isPushLoading, isPushSubscribed, pushPermission, requestPushPermission, subscribePush, unsubscribePush])
 
     const handleLocaleChange = (newLocale: Locale) => {
         setLocale(newLocale)
@@ -499,6 +523,57 @@ export default function SettingsPage() {
                                 </div>
                             )}
                         </div>
+                    </div>
+
+                    {/* Sessions section */}
+                    <div className="border-b border-[var(--app-divider)]">
+                        <div className="px-3 py-2 text-xs font-semibold text-[var(--app-hint)] uppercase tracking-wide">
+                            {t('settings.sessions.title')}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setHideArchivedSessions(!hideArchivedSessions)}
+                            className="flex w-full items-center justify-between px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
+                            aria-pressed={hideArchivedSessions}
+                        >
+                            <div className="flex flex-col gap-0.5">
+                                <span className="text-[var(--app-fg)]">{t('settings.sessions.hideArchived')}</span>
+                                <span className="text-xs text-[var(--app-hint)]">{t('settings.sessions.hideArchived.hint')}</span>
+                            </div>
+                            <div className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 ${hideArchivedSessions ? 'bg-[var(--app-link)]' : 'bg-[var(--app-border)]'}`}>
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${hideArchivedSessions ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                            </div>
+                        </button>
+                    </div>
+
+                    {/* Notifications section */}
+                    <div className="border-b border-[var(--app-divider)]">
+                        <div className="px-3 py-2 text-xs font-semibold text-[var(--app-hint)] uppercase tracking-wide">
+                            {t('settings.notifications.title')}
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => { void handlePushToggle() }}
+                            disabled={!isPushSupported || pushPermission === 'denied' || isPushLoading}
+                            className="flex w-full items-center justify-between px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)] disabled:cursor-not-allowed disabled:opacity-60"
+                            aria-pressed={isPushSubscribed}
+                        >
+                            <div className="flex flex-col gap-0.5">
+                                <span className="text-[var(--app-fg)]">{t('settings.notifications.push')}</span>
+                                <span className="text-xs text-[var(--app-hint)]">
+                                    {!isPushSupported
+                                        ? pushUnsupportedReason === 'insecure-context'
+                                            ? t('settings.notifications.push.insecure')
+                                            : t('settings.notifications.push.unsupported')
+                                        : pushPermission === 'denied'
+                                            ? t('settings.notifications.push.blocked')
+                                            : t('settings.notifications.push.hint')}
+                                </span>
+                            </div>
+                            <div className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors duration-200 ${isPushSubscribed ? 'bg-[var(--app-link)]' : 'bg-[var(--app-border)]'}`}>
+                                <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ${isPushSubscribed ? 'translate-x-5' : 'translate-x-0.5'}`} />
+                            </div>
+                        </button>
                     </div>
 
                     {/* Chat section */}

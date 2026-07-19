@@ -11,6 +11,7 @@ import { queryClient } from './lib/query-client'
 import { createAppRouter } from './router'
 import { I18nProvider } from './lib/i18n-context'
 import { restoreSpaRedirect } from './lib/spaRedirect'
+import { ImageLightbox } from './components/ImageLightbox'
 
 function getStartParam(): string | null {
     const query = new URLSearchParams(window.location.search)
@@ -34,6 +35,14 @@ function getInitialPath(): string {
 }
 
 async function bootstrap() {
+    // Clean up scroll restoration data written by older builds (can fill the 5 MB quota).
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i)
+        if (key?.startsWith('tsr-scroll-restoration')) {
+            localStorage.removeItem(key)
+        }
+    }
+
     initializeFontScale()
 
     // Only load Telegram SDK in Telegram environment (with 3s timeout)
@@ -50,12 +59,10 @@ async function bootstrap() {
         restoreSpaRedirect()
     }
 
-    const updateSW = registerSW({
-        onNeedRefresh() {
-            if (confirm('New version available! Reload to update?')) {
-                updateSW(true)
-            }
-        },
+    registerSW({
+        // registerType is 'autoUpdate' (vite.config.ts), so the registration itself
+        // reloads the page once the new worker activates — onNeedRefresh is only
+        // invoked in 'prompt' mode and never fires here.
         onOfflineReady() {
             console.log('App ready for offline use')
         },
@@ -81,6 +88,7 @@ async function bootstrap() {
             <I18nProvider>
                 <QueryClientProvider client={queryClient}>
                     <RouterProvider router={router} />
+                    <ImageLightbox />
                     {import.meta.env.DEV ? <ReactQueryDevtools initialIsOpen={false} /> : null}
                 </QueryClientProvider>
             </I18nProvider>

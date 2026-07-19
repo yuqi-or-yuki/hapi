@@ -1,5 +1,5 @@
 import { useAssistantApi } from '@assistant-ui/react'
-import { useCallback, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import type { ApiClient } from '@/api/client'
 import { getMessageWindowState, subscribeMessageWindow } from '@/lib/message-window-store'
 import { isQueuedForInvocation } from '@/lib/messages'
@@ -65,18 +65,27 @@ function getTextFromMessage(msg: DecryptedMessage): string {
     return attachments.map((a) => a.filename ?? 'attachment').join(', ')
 }
 
+// After this many ms without a server echo the optimistic message is treated as
+// stale: the POST has either been persisted by the hub or permanently failed, so
+// it is safe to send the DELETE (hub matches by local_id too, and returns
+// 'cancelled' if the row is absent — the optimistic removal in onMutate stands).
+export const STALE_OPTIMISTIC_MS = 5_000
+
 /**
  * Determines whether the user can cancel or edit a queued message.
  *
- * Two conditions must both be true:
- * 1. hasServerEcho: the hub has persisted the row.
- *    useSendMessage.onMutate creates { id: localId, localId } before POST /messages
- *    completes. Only after the server echo (message-received SSE) does the store
- *    replace the row with a server-assigned UUID id, making id !== localId.
- *    Sending DELETE before that echo would find no row in the hub and return
- *    cancelled/localId:null; the original POST could then still insert and broadcast
- *    the message, letting a canceled message reappear and be invoked.
- * 2. !isPending: no cancel mutation is already in-flight.
+ * Condition 1 — hasServerEcho OR isStale:
+ *   useSendMessage.onMutate creates { id: localId, localId } before POST /messages
+ *   completes. Only after the server echo (message-received SSE) does the store
+ *   replace the row with a server-assigned UUID id, making id !== localId.
+ *   Sending DELETE before that echo would find no row in the hub and return
+ *   cancelled/localId:null; the original POST could then still insert and broadcast
+ *   the message, letting a canceled message reappear and be invoked.
+ *   The stale fallback kicks in when the echo is permanently lost (e.g. hub
+ *   restart during send): after STALE_OPTIMISTIC_MS the POST is guaranteed to
+ *   have completed, so cancel is safe regardless.
+ *
+ * Condition 2 — !isPending: no cancel mutation is already in-flight.
  *
  * @internal Exported for unit testing.
  */
@@ -84,13 +93,18 @@ export function computeCanCancel({
     id,
     localId,
     isPending,
+    createdAt,
+    now = Date.now(),
 }: {
     id: string
     localId: string | null | undefined
     isPending: boolean
+    createdAt?: number
+    now?: number
 }): boolean {
     const hasServerEcho = localId ? id !== localId : true
-    return hasServerEcho && !isPending
+    const isStale = !hasServerEcho && createdAt !== undefined && now - createdAt >= STALE_OPTIMISTIC_MS
+    return (hasServerEcho || isStale) && !isPending
 }
 
 /**
@@ -104,6 +118,21 @@ export function QueuedMessagesBar({ sessionId, api }: { sessionId: string; api: 
     const queued = useQueuedMessages(sessionId)
     const assistantApi = useAssistantApi()
     const cancelMutation = useCancelQueuedMessage(api)
+
+    // Tick that advances once the earliest stuck-optimistic message becomes stale,
+    // so the cancel/edit buttons enable without needing any external store update.
+    const [nowTick, setNowTick] = useState(() => Date.now())
+    useEffect(() => {
+        const stuck = queued.filter(
+            (msg) => msg.localId && msg.id === msg.localId && msg.createdAt !== undefined
+        )
+        if (stuck.length === 0) return
+        const earliest = Math.min(...stuck.map((m) => m.createdAt!))
+        const msUntilStale = earliest + STALE_OPTIMISTIC_MS - Date.now()
+        if (msUntilStale <= 0) return
+        const timer = setTimeout(() => setNowTick(Date.now()), msUntilStale + 50)
+        return () => clearTimeout(timer)
+    }, [queued])
 
     if (queued.length === 0) {
         return null
@@ -128,7 +157,7 @@ export function QueuedMessagesBar({ sessionId, api }: { sessionId: string; api: 
                         const text = getTextFromMessage(msg)
                         const localId = msg.localId ?? msg.id
                         const isPending = cancelMutation.isPending && cancelMutation.variables?.localId === localId
-                        const canCancel = computeCanCancel({ id: msg.id, localId: msg.localId, isPending })
+                        const canCancel = computeCanCancel({ id: msg.id, localId: msg.localId, isPending, createdAt: msg.createdAt, now: nowTick })
 
                         const handleCancel = () => {
                             if (!canCancel) return

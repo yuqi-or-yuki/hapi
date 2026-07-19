@@ -1,10 +1,20 @@
 import { createContext, useContext, type ReactNode } from 'react'
 import type { ApiClient } from '@/api/client'
+import type { AgentDoneRing } from '@/lib/agentDoneSound'
 
 type AppContextValue = {
     api: ApiClient
     token: string
     baseUrl: string
+    agentDoneSoundMuted: boolean
+    setAgentDoneSoundMuted: (muted: boolean) => void
+    agentDoneRing: AgentDoneRing
+    setAgentDoneRing: (ring: AgentDoneRing) => void
+    allDoneRing: AgentDoneRing
+    setAllDoneRing: (ring: AgentDoneRing) => void
+    previewAgentDoneRing: (ring?: AgentDoneRing) => void
+    unreadDoneOrders: Record<string, number>
+    clearUnreadDone: (sessionId: string) => void
 }
 
 const AppContext = createContext<AppContextValue | null>(null)

@@ -19,6 +19,9 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         pendingRequestsCount: 0,
         model: null,
         effort: null,
+        loopActive: false,
+        debateActive: false,
+        scheduledDueAts: [],
         ...overrides
     }
 }
@@ -95,3 +98,98 @@ describe('SessionList directory action', () => {
         expect(screen.queryByRole('button', { name: 'New session in this directory' })).toBeNull()
     })
 })
+
+describe('SessionList keyboard safety', () => {
+    it('prevents Cmd+Delete on a focused session item from bubbling into destructive shortcuts', () => {
+        renderWithProviders(
+            <SessionList
+                sessions={[makeSession({
+                    id: 'session-1',
+                    active: true,
+                    updatedAt: Date.now(),
+                    metadata: {
+                        path: '/home/ubuntu',
+                        machineId: 'machine-1',
+                        name: 'Focused session',
+                        flavor: 'codex',
+                    }
+                })]}
+                selectedSessionId="session-1"
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+                machineLabelsById={{ 'machine-1': 'Mint' }}
+            />
+        )
+
+        const sessionButton = screen.getByText('Focused session').closest('button')
+        expect(sessionButton).not.toBeNull()
+
+        expect(fireEvent.keyDown(sessionButton!, { key: 'Backspace', metaKey: true })).toBe(false)
+        expect(fireEvent.keyDown(sessionButton!, { key: 'Delete', metaKey: true })).toBe(false)
+    })
+
+    it('keeps Cmd+Delete usable inside the session search field', () => {
+        renderWithProviders(
+            <SessionList
+                sessions={[makeSession({
+                    id: 'session-1',
+                    active: true,
+                    updatedAt: Date.now(),
+                    metadata: {
+                        path: '/home/ubuntu',
+                        machineId: 'machine-1',
+                        name: 'Searchable session',
+                        flavor: 'codex',
+                    }
+                })]}
+                selectedSessionId="session-1"
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+                machineLabelsById={{ 'machine-1': 'Mint' }}
+            />
+        )
+
+        const search = screen.getByPlaceholderText('Search sessions…')
+        expect(fireEvent.keyDown(search, { key: 'Backspace', metaKey: true })).toBe(true)
+    })
+})
+
+    it('opens archive confirmation with the browser-friendly E shortcut on a focused active session', () => {
+        renderWithProviders(
+            <SessionList
+                sessions={[makeSession({
+                    id: 'session-archive-shortcut',
+                    active: true,
+                    updatedAt: Date.now(),
+                    metadata: {
+                        path: '/home/ubuntu',
+                        machineId: 'machine-1',
+                        name: 'Archive shortcut session',
+                        flavor: 'codex',
+                    }
+                })]}
+                selectedSessionId="session-archive-shortcut"
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+                machineLabelsById={{ 'machine-1': 'Mint' }}
+            />
+        )
+
+        const sessionButton = screen.getByText('Archive shortcut session').closest('button')
+        expect(sessionButton).not.toBeNull()
+
+        expect(fireEvent.keyDown(sessionButton!, { key: 'e' })).toBe(false)
+        expect(screen.getByText('Archive Session')).toBeTruthy()
+    })

@@ -421,6 +421,24 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
+    uploadBlobToHub(mimeType: string, data: string): Promise<string> {
+        return new Promise((resolve, reject) => {
+            const timeout = setTimeout(() => reject(new Error('Blob upload timed out')), 15000)
+            this.socket.emit(
+                'store-blob',
+                { sid: this.sessionId, mimeType, data },
+                (response: { blobId: string } | { error: string }) => {
+                    clearTimeout(timeout)
+                    if ('error' in response) {
+                        reject(new Error(response.error))
+                    } else {
+                        resolve(response.blobId)
+                    }
+                }
+            )
+        })
+    }
+
     sendUserMessage(text: string, meta?: MessageMeta): void {
         if (!text) {
             return

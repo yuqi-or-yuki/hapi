@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react'
+import { ApiError } from '@/api/client'
 import type { ApiClient } from '@/api/client'
 
 type VisibilityState = 'visible' | 'hidden'
@@ -87,6 +88,11 @@ export function useVisibilityReporter(options: {
                     return
                 }
                 hadError = true
+                // 404 means the subscription no longer exists on the server (SSE reconnected).
+                // Retrying will never succeed for this ID; the new connection will re-report.
+                if (error instanceof ApiError && error.status === 404) {
+                    return
+                }
                 console.error('Failed to update visibility:', error)
                 if (!retryTimerRef.current) {
                     retryTimerRef.current = setTimeout(() => {

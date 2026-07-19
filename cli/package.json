@@ -13,10 +13,12 @@
     "directory": "cli"
   },
   "bin": {
-    "hapi": "bin/hapi.cjs"
+    "hapi": "bin/hapi.cjs",
+    "hapi-dan": "bin/hapi-dan.cjs"
   },
   "files": [
     "bin/hapi.cjs",
+    "bin/hapi-dan.cjs",
     "NOTICE"
   ],
   "imports": {

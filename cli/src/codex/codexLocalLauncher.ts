@@ -105,6 +105,9 @@ export async function codexLocalLauncher(session: CodexSession): Promise<'switch
                 if (converted?.message) {
                     session.sendAgentMessage(converted.message);
                 }
+                if (converted?.thinking !== undefined) {
+                    session.onThinkingChange(converted.thinking);
+                }
             }
         });
         if (shuttingDown) {

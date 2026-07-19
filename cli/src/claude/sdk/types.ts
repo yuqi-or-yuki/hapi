@@ -79,7 +79,35 @@ export interface SDKControlResponse extends SDKMessage {
         request_id: string
         subtype: 'success' | 'error'
         error?: string
+        /**
+         * Nested payload for control requests that return data (e.g. `list_models`).
+         * Matches the same shape as CanUseToolControlResponse.response.response below —
+         * the CLI always wraps successful non-trivial control responses one level deep.
+         */
+        response?: {
+            models?: ModelInfo[]
+        }
     }
+}
+
+/**
+ * Information about an available model, as reported by the `claude` CLI itself
+ * in response to a `list_models` control request. Mirrors (a subset of)
+ * @anthropic-ai/claude-agent-sdk's `ModelInfo` type — HAPI has no SDK dependency,
+ * it talks the same stream-json control protocol directly (see Query.listModels).
+ */
+export interface ModelInfo {
+    /** Model identifier to pass back via --model / QueryOptions.model */
+    value: string
+    /** Canonical wire model id this row's `value` resolves to (e.g. 'sonnet' -> 'claude-sonnet-5') */
+    resolvedModel?: string
+    displayName: string
+    description: string
+    supportsEffort?: boolean
+    supportedEffortLevels?: ('low' | 'medium' | 'high' | 'xhigh' | 'max')[]
+    supportsAdaptiveThinking?: boolean
+    supportsFastMode?: boolean
+    supportsAutoMode?: boolean
 }
 
 export interface SDKLog extends SDKMessage {

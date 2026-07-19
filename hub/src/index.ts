@@ -25,6 +25,8 @@ import { VisibilityTracker } from './visibility/visibilityTracker'
 import { TunnelManager } from './tunnel'
 import { waitForTunnelTlsReady } from './tunnel/tlsGate'
 import { ServerChanChannel } from './serverchan/channel'
+import { NtfyChannel } from './ntfy/channel'
+import { ScheduledMessageService } from './scheduled/scheduledMessageService'
 import QRCode from 'qrcode'
 import type { Server as BunServer } from 'bun'
 import type { WebSocketData } from '@socket.io/bun-engine'
@@ -104,6 +106,7 @@ let webServer: BunServer<WebSocketData> | null = null
 let sseManager: SSEManager | null = null
 let visibilityTracker: VisibilityTracker | null = null
 let notificationHub: NotificationHub | null = null
+let scheduledMessageService: ScheduledMessageService | null = null
 let tunnelManager: TunnelManager | null = null
 
 async function main() {
@@ -203,6 +206,10 @@ async function main() {
         notificationChannels.push(new ServerChanChannel(config.serverChanSendKey, config.publicUrl))
     }
 
+    if (config.ntfyTopic && config.ntfyNotification) {
+        notificationChannels.push(new NtfyChannel(config.ntfyServer, config.ntfyTopic, config.publicUrl))
+    }
+
     // Initialize Telegram bot (optional)
     if (config.telegramEnabled && config.telegramBotToken) {
         happyBot = new HappyBot({
@@ -217,7 +224,12 @@ async function main() {
         }
     }
 
-    notificationHub = new NotificationHub(syncEngine, notificationChannels)
+    notificationHub = new NotificationHub(syncEngine, notificationChannels, {
+        preferences: store.preferences
+    })
+
+    scheduledMessageService = new ScheduledMessageService(store, () => syncEngine)
+    scheduledMessageService.start()
 
     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
     webServer = await startWebServer({
@@ -310,6 +322,8 @@ async function main() {
         console.log('\nShutting down...')
         await tunnelManager?.stop()
         await happyBot?.stop()
+        scheduledMessageService?.stop()
+        scheduledMessageService = null
         notificationHub?.stop()
         syncEngine?.stop()
         sseManager?.stop()

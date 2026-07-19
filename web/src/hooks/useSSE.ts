@@ -12,6 +12,7 @@ import type {
 } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
+import { getAgentDoneRingDecision } from '@/lib/agentDoneRingTrigger'
 
 type SSESubscription = {
     all?: boolean
@@ -182,6 +183,7 @@ export function useSSE(options: {
     onDisconnect?: (reason: string) => void
     onError?: (error: unknown) => void
     onToast?: (event: ToastEvent) => void
+    onSessionFinished?: (event: { sessionId: string; allClear: boolean }) => void
 }): { subscriptionId: string | null } {
     const queryClient = useQueryClient()
     const onEventRef = useRef(options.onEvent)
@@ -189,6 +191,7 @@ export function useSSE(options: {
     const onDisconnectRef = useRef(options.onDisconnect)
     const onErrorRef = useRef(options.onError)
     const onToastRef = useRef(options.onToast)
+    const onSessionFinishedRef = useRef(options.onSessionFinished)
     const eventSourceRef = useRef<EventSource | null>(null)
     const invalidationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const pendingInvalidationsRef = useRef<{
@@ -221,6 +224,10 @@ export function useSSE(options: {
     useEffect(() => {
         onToastRef.current = options.onToast
     }, [options.onToast])
+
+    useEffect(() => {
+        onSessionFinishedRef.current = options.onSessionFinished
+    }, [options.onSessionFinished])
 
     const subscription = options.subscription ?? {}
 
@@ -395,7 +402,9 @@ export function useSSE(options: {
                     activeAt: patch.activeAt ?? current.activeAt,
                     updatedAt: patch.updatedAt ?? current.updatedAt,
                     model: Object.prototype.hasOwnProperty.call(patch, 'model') ? patch.model ?? null : current.model,
-                    effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
+                    effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort,
+                    loopActive: Object.prototype.hasOwnProperty.call(patch, 'loopActive') ? (patch as { loopActive?: boolean }).loopActive ?? current.loopActive : current.loopActive,
+                    debateActive: Object.prototype.hasOwnProperty.call(patch, 'debateActive') ? (patch as { debateActive?: boolean }).debateActive ?? current.debateActive : current.debateActive
                 }
 
                 patched = true
@@ -497,6 +506,15 @@ export function useSSE(options: {
                 return
             }
 
+            const previousSessions = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions)?.sessions
+            const ringDecision = getAgentDoneRingDecision(event, previousSessions)
+            if (ringDecision.type !== 'none') {
+                onSessionFinishedRef.current?.({
+                    sessionId: ringDecision.sessionId,
+                    allClear: ringDecision.type === 'all-clear'
+                })
+            }
+
             if (event.type === 'messages-consumed') {
                 markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt)
             }
@@ -552,6 +570,12 @@ export function useSSE(options: {
                 }
             }
 
+            if (event.type === 'preference-updated') {
+                if (event.key === 'sessionGroups') {
+                    queryClient.setQueryData(queryKeys.sessionGroups, event.value)
+                }
+            }
+
             onEventRef.current(event)
         }
 
@@ -590,11 +614,12 @@ export function useSSE(options: {
         }
         eventSource.onerror = (error) => {
             onErrorRef.current?.(error)
-            if (eventSource.readyState === EventSource.CLOSED) {
-                requestReconnect('closed')
-                return
-            }
-            notifyDisconnect('error')
+            // Always trigger a full reconnect on error.
+            // Previously we only called notifyDisconnect('error') for non-CLOSED
+            // states and relied on the browser's built-in EventSource retry,
+            // but that can silently fail (e.g. after hub restart, stale params)
+            // leaving the banner stuck until the 90s heartbeat watchdog.
+            requestReconnect(eventSource.readyState === EventSource.CLOSED ? 'closed' : 'error')
         }
 
         const watchdogTimer = setInterval(() => {

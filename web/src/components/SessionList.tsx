@@ -1,6 +1,8 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { KeyboardEvent, RefObject } from 'react'
 import type { SessionSummary } from '@/types/api'
 import type { ApiClient } from '@/api/client'
+import { useQueryClient } from '@tanstack/react-query'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePlatform } from '@/hooks/usePlatform'
 import { CloneSessionDialog } from '@/components/CloneSessionDialog'
@@ -12,6 +14,8 @@ import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { CopyIcon, CheckIcon } from '@/components/icons'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
+import { queryKeys } from '@/lib/query-keys'
+import { useSessionGroups, type UserSessionGroup } from '@/hooks/useSessionGroups'
 
 type SessionGroup = {
     key: string
@@ -545,6 +549,50 @@ function MachineIcon(props: { className?: string }) {
     )
 }
 
+
+function isEditableShortcutTarget(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false
+    return target.closest('input, textarea, select, [contenteditable="true"]') !== null
+}
+
+function isDeleteShortcut(event: Pick<KeyboardEvent<HTMLElement> | globalThis.KeyboardEvent, 'key' | 'metaKey' | 'ctrlKey'>): boolean {
+    const isDeleteKey = event.key === 'Backspace' || event.key === 'Delete'
+    return isDeleteKey && (event.metaKey || event.ctrlKey)
+}
+
+function shouldBlockSidebarDeleteShortcut(
+    event: KeyboardEvent<HTMLElement> | globalThis.KeyboardEvent,
+    containerRef?: RefObject<HTMLElement | null>
+): boolean {
+    if (!isDeleteShortcut(event)) return false
+    if (isEditableShortcutTarget(event.target)) return false
+
+    const target = event.target instanceof Node ? event.target : null
+    const activeElement = document.activeElement
+    const container = containerRef?.current ?? null
+
+    if (target instanceof HTMLElement && target.closest('.session-list-item')) return true
+    if (activeElement instanceof HTMLElement && activeElement.closest('.session-list-item')) return true
+
+    // Native browser/app shortcuts can arrive at document/body even though keyboard
+    // focus is visually in the sidebar. If focus is anywhere inside SessionList,
+    // block the destructive delete shortcut, but keep inputs editable above.
+    if (container && activeElement instanceof Node && container.contains(activeElement)) return true
+    if (container && target && container.contains(target)) return true
+
+    return false
+}
+
+
+function isSessionItemArchiveShortcut(event: KeyboardEvent<HTMLElement>): boolean {
+    if (event.key.toLowerCase() !== 'e') return false
+    if (event.metaKey || event.ctrlKey || event.altKey) return false
+    if (isEditableShortcutTarget(event.target)) return false
+
+    const target = event.target
+    return target instanceof HTMLElement && target.closest('.session-list-item') !== null
+}
+
 function formatRelativeTime(value: number, t: (key: string, params?: Record<string, string | number>) => string): string | null {
     const ms = value < 1_000_000_000_000 ? value * 1000 : value
     if (!Number.isFinite(ms)) return null
@@ -559,6 +607,20 @@ function formatRelativeTime(value: number, t: (key: string, params?: Record<stri
     return new Date(ms).toLocaleDateString()
 }
 
+function formatFutureRelativeTime(value: number, t: (key: string, params?: Record<string, string | number>) => string): string | null {
+    const ms = value < 1_000_000_000_000 ? value * 1000 : value
+    if (!Number.isFinite(ms)) return null
+    const delta = ms - Date.now()
+    if (delta < 60_000) return t('session.time.dueNow')
+    const minutes = Math.floor(delta / 60_000)
+    if (minutes < 60) return t('session.time.inMinutes', { n: minutes })
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return t('session.time.inHours', { n: hours })
+    const days = Math.floor(hours / 24)
+    if (days < 7) return t('session.time.inDays', { n: days })
+    return new Date(ms).toLocaleDateString()
+}
+
 function SessionItem(props: {
     session: SessionSummary
     onSelect: (sessionId: string) => void
@@ -567,9 +629,10 @@ function SessionItem(props: {
     selected?: boolean
     selectionMode?: boolean
     isMultiSelected?: boolean
-    onEnterSelectionMode?: (sessionId: string) => void
     onToggleMultiSelect?: (sessionId: string) => void
+    onCheckboxClick?: (sessionId: string, shiftKey: boolean) => void
     onCloned?: (newSessionId: string) => void
+    unreadDoneOrder?: number
 }) {
     const { t } = useTranslation()
     const { session: s, onSelect, showPath = true, api, selected = false, selectionMode = false, isMultiSelected = false } = props
@@ -595,108 +658,145 @@ function SessionItem(props: {
     const longPressHandlers = useLongPress({
         onLongPress: (point) => {
             haptic.impact('medium')
-            if (selectionMode) {
-                // In selection mode, a long tap should still toggle (onClick is suppressed when long press fires)
-                props.onToggleMultiSelect?.(s.id)
-                return
-            }
-            if (props.onEnterSelectionMode) {
-                props.onEnterSelectionMode(s.id)
-            } else {
-                setMenuAnchorPoint(point)
-                setMenuOpen(true)
-            }
+            setMenuAnchorPoint(point)
+            setMenuOpen(true)
         },
         onClick: () => {
-            if (selectionMode) {
-                props.onToggleMultiSelect?.(s.id)
-            } else if (!menuOpen) {
+            if (!menuOpen) {
                 onSelect(s.id)
             }
         },
         threshold: 500
     })
 
+    const handleKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+        if (!isSessionItemArchiveShortcut(event)) return
+        if (!s.active) return
+        event.preventDefault()
+        event.stopPropagation()
+        setArchiveOpen(true)
+    }
+
     const sessionName = getSessionTitle(s)
     const todoProgress = getTodoProgress(s)
     const readyForReview = s.metadata?.readyForReview === true
+
     return (
         <>
-            <button
-                type="button"
-                {...longPressHandlers}
-                className={`session-list-item flex w-full flex-col gap-1 px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)] select-none rounded-lg ${selected ? 'bg-[var(--app-secondary-bg)]' : ''} ${s.active && s.thinking ? 'border-l-2 border-[var(--app-badge-success-text)] bg-[var(--app-badge-success-bg)] pl-[calc(0.625rem-2px)]' : 'border-l-2 border-transparent'}`}
-                style={{ WebkitTouchCallout: 'none' }}
-                aria-current={selected ? 'page' : undefined}
-            >
-                <div className={`flex items-center justify-between gap-3 ${!s.active ? 'opacity-50' : ''}`}>
-                    <div className="flex items-center gap-2 min-w-0">
-                        {selectionMode ? (
-                            <span className={cn(
-                                'flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
-                                isMultiSelected
-                                    ? 'border-blue-500 bg-blue-500 text-white'
-                                    : 'border-[var(--app-hint)]'
-                            )}>
-                                {isMultiSelected ? (
-                                    <svg className="h-2.5 w-2.5" viewBox="0 0 10 10" fill="none">
-                                        <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                                    </svg>
-                                ) : null}
-                            </span>
-                        ) : (
+            <div className={cn(
+                'session-list-item group/session-row flex items-stretch rounded-lg transition-colors select-none',
+                isMultiSelected ? 'bg-blue-500/10' : '',
+                selected && !isMultiSelected ? 'bg-[var(--app-secondary-bg)]' : '',
+                s.active && s.thinking ? 'border-l-2 border-[var(--app-badge-success-text)] bg-[var(--app-badge-success-bg)] -ml-2 pl-2' : 'border-l-2 border-transparent',
+            )}>
+                {/* Checkbox column — always present so layout is stable; visible on hover or in selection mode */}
+                <button
+                    type="button"
+                    onClick={(e) => props.onCheckboxClick?.(s.id, e.shiftKey)}
+                    className={cn(
+                        'flex shrink-0 items-center justify-center transition-opacity',
+                        selectionMode
+                            ? 'w-7 opacity-100'
+                            : 'w-7 opacity-100 sm:w-0 sm:overflow-hidden sm:opacity-0 sm:group-hover/session-row:w-7 sm:group-hover/session-row:opacity-100'
+                    )}
+                    style={{ transition: 'width 120ms ease, opacity 120ms ease' }}
+                    tabIndex={-1}
+                    aria-label={isMultiSelected ? 'Deselect session' : 'Select session'}
+                >
+                    <span className={cn(
+                        'flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors',
+                        isMultiSelected ? 'border-blue-500 bg-blue-500 text-white' : 'border-[var(--app-hint)]'
+                    )}>
+                        {isMultiSelected ? (
+                            <svg className="h-2.5 w-2.5" viewBox="0 0 10 10" fill="none">
+                                <path d="M2 5l2.5 2.5L8 3" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                            </svg>
+                        ) : null}
+                    </span>
+                </button>
+
+                {/* Main row button */}
+                <button
+                    type="button"
+                    data-session-id={s.id}
+                    {...longPressHandlers}
+                    onKeyDown={handleKeyDown}
+                    title={s.active ? 'Press E to archive' : undefined}
+                    className={cn(
+                        'flex min-w-0 flex-1 flex-col gap-1 py-2 pr-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]',
+                        'pl-0'
+                    )}
+                    style={{ WebkitTouchCallout: 'none' }}
+                    aria-current={selected ? 'page' : undefined}
+                >
+                    <div className={`flex items-center justify-between gap-3 ${!s.active ? 'opacity-50' : ''}`}>
+                        <div className="flex items-center gap-2 min-w-0">
                             <div className="relative shrink-0">
                                 <FlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4" />
-                                {readyForReview ? (
+                                {readyForReview && !selectionMode ? (
                                     <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500 ring-1 ring-[var(--app-bg)]" />
                                 ) : null}
                             </div>
-                        )}
-                        <div className={`truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}>
-                            {sessionName}
+                            <div className={`truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}>
+                                {sessionName}
+                            </div>
+                            {s.active && s.thinking ? (
+                                <LoaderIcon className="h-3.5 w-3.5 shrink-0 text-[var(--app-badge-success-text)] animate-spin-slow" />
+                            ) : null}
+                            {s.loopActive ? (
+                                <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-[var(--app-badge-warning-bg)] text-[var(--app-badge-warning-text)]">
+                                    ⟳ loop
+                                </span>
+                            ) : null}
+                            {s.debateActive ? (
+                                <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-purple-500/10 text-purple-500">
+                                    ⚖ debate
+                                </span>
+                            ) : null}
+                            {s.scheduledDueAts.map((dueAt, index) => (
+                                <span key={`${dueAt}-${index}`} className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-teal-500/10 text-teal-500">
+                                    ⏰ {formatFutureRelativeTime(dueAt, t)}
+                                </span>
+                            ))}
+                            {readyForReview && !selectionMode ? (
+                                <span className="inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-blue-500/10 text-blue-500">
+                                    review
+                                </span>
+                            ) : null}
                         </div>
-                        {s.active && s.thinking ? (
-                            <LoaderIcon className="h-3.5 w-3.5 shrink-0 text-[var(--app-badge-success-text)] animate-spin-slow" />
-                        ) : null}
-                        {s.loopActive ? (
-                            <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-[var(--app-badge-warning-bg)] text-[var(--app-badge-warning-text)]">
-                                ⟳ loop
+                        <div className="flex items-center gap-2 shrink-0 text-xs">
+                            {props.unreadDoneOrder ? (
+                                <span
+                                    className="inline-flex items-center rounded-full bg-blue-500 px-1.5 py-0.5 text-[10px] font-semibold leading-none text-white shadow-sm"
+                                    title={props.unreadDoneOrder === 1 ? 'Next finished session to review' : `Finished session review priority ${props.unreadDoneOrder}`}
+                                    aria-label={props.unreadDoneOrder === 1 ? 'Next finished session to review' : `Finished session review priority ${props.unreadDoneOrder}`}
+                                >
+                                    {props.unreadDoneOrder === 1 ? 'next' : `#${props.unreadDoneOrder}`}
+                                </span>
+                            ) : null}
+                            {todoProgress ? (
+                                <span className="flex items-center gap-1 text-[var(--app-hint)]">
+                                    <BulbIcon className="h-3 w-3" />
+                                    {todoProgress.completed}/{todoProgress.total}
+                                </span>
+                            ) : null}
+                            {s.pendingRequestsCount > 0 ? (
+                                <span className="text-[var(--app-badge-warning-text)]">
+                                    {t('session.item.pending')} {s.pendingRequestsCount}
+                                </span>
+                            ) : null}
+                            <span className="text-[var(--app-hint)]">
+                                {formatRelativeTime(s.updatedAt, t)}
                             </span>
-                        ) : null}
-                        {s.debateActive ? (
-                            <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-purple-500/10 text-purple-500">
-                                ⚖ debate
-                            </span>
-                        ) : null}
-                        {readyForReview && !selectionMode ? (
-                            <span className="inline-flex items-center rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-blue-500/10 text-blue-500">
-                                review
-                            </span>
-                        ) : null}
+                        </div>
                     </div>
-                    <div className="flex items-center gap-2 shrink-0 text-xs">
-                        {todoProgress ? (
-                            <span className="flex items-center gap-1 text-[var(--app-hint)]">
-                                <BulbIcon className="h-3 w-3" />
-                                {todoProgress.completed}/{todoProgress.total}
-                            </span>
-                        ) : null}
-                        {s.pendingRequestsCount > 0 ? (
-                            <span className="text-[var(--app-badge-warning-text)]">
-                                {t('session.item.pending')} {s.pendingRequestsCount}
-                            </span>
-                        ) : null}
-                        <span className="text-[var(--app-hint)]">
-                            {formatRelativeTime(s.updatedAt, t)}
-                        </span>
-                    </div>
-                </div>
-                {showPath ? (
-                    <div className="truncate text-xs text-[var(--app-hint)]">
-                        {s.metadata?.path ?? s.id}
-                    </div>
-                ) : null}
-            </button>
+                    {showPath ? (
+                        <div className="truncate text-xs text-[var(--app-hint)]">
+                            {s.metadata?.path ?? s.id}
+                        </div>
+                    ) : null}
+                </button>
+            </div>
 
             {!selectionMode ? (
                 <>
@@ -726,7 +826,7 @@ function SessionItem(props: {
                         description={t('dialog.archive.description', { name: sessionName })}
                         confirmLabel={t('dialog.archive.confirm')}
                         confirmingLabel={t('dialog.archive.confirming')}
-                        onConfirm={archiveSession}
+                        onConfirm={() => archiveSession(true)}
                         isPending={isPending}
                         destructive
                     />
@@ -756,6 +856,103 @@ function SessionItem(props: {
     )
 }
 
+function FolderIcon(props: { className?: string }) {
+    return (
+        <svg className={props.className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+    )
+}
+
+function UserGroupHeader(props: {
+    group: UserSessionGroup
+    sessionCount: number
+    onRename: (id: string, name: string) => void
+    onDelete: (id: string) => void
+    onToggleCollapsed: (id: string) => void
+    isDragOver: boolean
+    onDragOver: React.DragEventHandler<HTMLDivElement>
+    onDragLeave: React.DragEventHandler<HTMLDivElement>
+    onDrop: React.DragEventHandler<HTMLDivElement>
+}) {
+    const { group } = props
+    const [isRenaming, setIsRenaming] = useState(false)
+    const [renameValue, setRenameValue] = useState(group.name)
+    const inputRef = useRef<HTMLInputElement>(null)
+
+    useEffect(() => {
+        if (isRenaming) inputRef.current?.select()
+    }, [isRenaming])
+
+    const commitRename = () => {
+        const trimmed = renameValue.trim()
+        if (trimmed && trimmed !== group.name) props.onRename(group.id, trimmed)
+        else setRenameValue(group.name)
+        setIsRenaming(false)
+    }
+
+    return (
+        <div
+            className={cn(
+                'group/user-group flex items-center gap-1.5 rounded-lg px-1 py-1 transition-colors',
+                props.isDragOver
+                    ? 'bg-blue-500/20 ring-1 ring-blue-500/40'
+                    : 'hover:bg-[var(--app-subtle-bg)]'
+            )}
+            onDragOver={props.onDragOver}
+            onDragLeave={props.onDragLeave}
+            onDrop={props.onDrop}
+        >
+            <button
+                type="button"
+                onClick={() => props.onToggleCollapsed(group.id)}
+                className="shrink-0 rounded p-0.5 text-[var(--app-hint)] hover:text-[var(--app-fg)]"
+                aria-label={group.collapsed ? 'Expand group' : 'Collapse group'}
+            >
+                <ChevronIcon className="h-3 w-3" collapsed={group.collapsed} />
+            </button>
+
+            <FolderIcon className="h-3.5 w-3.5 shrink-0 text-[var(--app-hint)]" />
+
+            {isRenaming ? (
+                <input
+                    ref={inputRef}
+                    className="min-w-0 flex-1 border-b border-[var(--app-link)] bg-transparent text-sm font-medium text-[var(--app-fg)] outline-none"
+                    value={renameValue}
+                    onChange={e => setRenameValue(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={e => {
+                        if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+                        if (e.key === 'Escape') { setRenameValue(group.name); setIsRenaming(false) }
+                    }}
+                />
+            ) : (
+                <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left text-sm font-medium text-[var(--app-fg)] hover:text-[var(--app-link)]"
+                    onClick={() => { setRenameValue(group.name); setIsRenaming(true) }}
+                    title="Click to rename"
+                >
+                    {group.name}
+                </button>
+            )}
+
+            <span className="shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">
+                ({props.sessionCount})
+            </span>
+
+            <button
+                type="button"
+                onClick={() => props.onDelete(group.id)}
+                className="shrink-0 rounded p-0.5 text-[var(--app-hint)] opacity-0 transition-opacity hover:text-red-500 group-hover/user-group:opacity-100"
+                title="Dissolve group (sessions stay)"
+            >
+                <XIcon className="h-3 w-3" />
+            </button>
+        </div>
+    )
+}
+
 export function SessionList(props: {
     sessions: SessionSummary[]
     onSelect: (sessionId: string) => void
@@ -769,21 +966,32 @@ export function SessionList(props: {
     machineLabelsById?: Record<string, string>
     selectedSessionId?: string | null
     onCloned?: (newSessionId: string) => void
+    unreadDoneOrders?: Record<string, number>
+    onMarkReviewed?: (sessionId: string) => void
 }) {
     const { t } = useTranslation()
     const { renderHeader = true, api, selectedSessionId, machineLabelsById = {}, onNewSessionInDirectory, onCloned } = props
     const { hideArchivedSessions } = useHideArchivedSessions()
+    const queryClient = useQueryClient()
+    const { groups: userGroups, createGroup, renameGroup, deleteGroup, toggleGroupCollapsed, moveSessionToGroup, getGroupsForProject } = useSessionGroups(props.api)
+    const draggingSessionId = useRef<string | null>(null)
+    const [dragActive, setDragActive] = useState(false)
+    const [dragOverTarget, setDragOverTarget] = useState<string | null>(null)
+    const [showGroupNameInput, setShowGroupNameInput] = useState(false)
+    const [groupNameValue, setGroupNameValue] = useState('')
+    const groupNameInputRef = useRef<HTMLInputElement>(null)
     const [searchQuery, setSearchQuery] = useState('')
-    const [selectionMode, setSelectionMode] = useState(false)
     const [multiSelectedIds, setMultiSelectedIds] = useState<Set<string>>(new Set())
+    const selectionMode = multiSelectedIds.size > 0
     const [reviewPending, setReviewPending] = useState(false)
+    const [archivePending, setArchivePending] = useState(false)
+    const [lastCheckedId, setLastCheckedId] = useState<string | null>(null)
+    const selectedUnreadCount = useMemo(
+        () => Array.from(multiSelectedIds).filter(id => props.unreadDoneOrders?.[id]).length,
+        [multiSelectedIds, props.unreadDoneOrders]
+    )
 
-    const enterSelectionMode = (sessionId: string) => {
-        setSelectionMode(true)
-        setMultiSelectedIds(new Set([sessionId]))
-    }
-
-    const toggleMultiSelect = (sessionId: string) => {
+    const toggleMultiSelect = useCallback((sessionId: string) => {
         setMultiSelectedIds(prev => {
             const next = new Set(prev)
             if (next.has(sessionId)) {
@@ -793,11 +1001,11 @@ export function SessionList(props: {
             }
             return next
         })
-    }
+    }, [])
 
     const exitSelectionMode = () => {
-        setSelectionMode(false)
         setMultiSelectedIds(new Set())
+        setLastCheckedId(null)
     }
 
     const markSelectedReadyForReview = async (readyForReview: boolean) => {
@@ -812,6 +1020,47 @@ export function SessionList(props: {
             exitSelectionMode()
         }
     }
+
+    const markSelectedReviewed = () => {
+        for (const sessionId of multiSelectedIds) {
+            props.onMarkReviewed?.(sessionId)
+        }
+        exitSelectionMode()
+    }
+
+    const archiveSelected = async () => {
+        if (!api || archivePending) return
+        setArchivePending(true)
+        try {
+            await Promise.all(
+                Array.from(multiSelectedIds).map(id => api.archiveSession(id, true))
+            )
+            await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+        } finally {
+            setArchivePending(false)
+            exitSelectionMode()
+        }
+    }
+    const groupSelectedSessions = (name: string) => {
+        const trimmed = name.trim() || 'New Group'
+        const byProjectGroup = new Map<string, string[]>()
+        for (const sessionId of multiSelectedIds) {
+            const session = allSessions.find(s => s.id === sessionId)
+            if (!session) continue
+            const path = session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other'
+            const machineId = session.metadata?.machineId ?? null
+            const key = `${machineId ?? UNKNOWN_MACHINE_ID}::${path}`
+            if (!byProjectGroup.has(key)) byProjectGroup.set(key, [])
+            byProjectGroup.get(key)!.push(sessionId)
+        }
+        for (const [key, ids] of byProjectGroup) {
+            createGroup(trimmed, ids, key)
+        }
+        exitSelectionMode()
+        setShowGroupNameInput(false)
+        setGroupNameValue('')
+    }
+
     const normalizedQuery = normalizeSearch(searchQuery)
     const isSearching = normalizedQuery.length > 0
 
@@ -958,8 +1207,85 @@ export function SessionList(props: {
         })
     }, [allGroups])
 
+    const containerRef = useRef<HTMLDivElement | null>(null)
+
+    const flatVisibleSessions = useMemo(() => {
+        return machineGroups
+            .filter(mg => !isMachineCollapsed(mg))
+            .flatMap(mg =>
+                mg.projectGroups
+                    .filter(pg => !isGroupCollapsed(pg))
+                    .flatMap(pg => {
+                        const projectUserGroups = getGroupsForProject(pg.key)
+                        const allGroupedIds = new Set(userGroups.flatMap(g => g.sessionIds))
+                        const ungrouped = pg.sessions.filter(s => !allGroupedIds.has(s.id))
+
+                        const groupedSessions = projectUserGroups
+                            .filter(ug => !ug.collapsed)
+                            .flatMap(ug => pg.sessions.filter(s => ug.sessionIds.includes(s.id)))
+
+                        const visibleUngrouped = getVisibleSessionPreview(ungrouped, {
+                            expanded: isSessionGroupExpanded(pg),
+                            selectedSessionId,
+                        })
+
+                        return [...groupedSessions, ...visibleUngrouped]
+                    })
+            )
+    }, [machineGroups, collapseOverrides, selectedSessionId, isSearching, userGroups]) // eslint-disable-line react-hooks/exhaustive-deps
+
+    const handleCheckboxClick = useCallback((sessionId: string, shiftKey: boolean) => {
+        if (shiftKey && lastCheckedId) {
+            const ids = flatVisibleSessions.map(s => s.id)
+            const fromIdx = ids.indexOf(lastCheckedId)
+            const toIdx = ids.indexOf(sessionId)
+            if (fromIdx !== -1 && toIdx !== -1) {
+                const start = Math.min(fromIdx, toIdx)
+                const end = Math.max(fromIdx, toIdx)
+                setMultiSelectedIds(prev => {
+                    const next = new Set(prev)
+                    for (let i = start; i <= end; i++) next.add(ids[i])
+                    return next
+                })
+            }
+        } else {
+            toggleMultiSelect(sessionId)
+        }
+        setLastCheckedId(sessionId)
+    }, [lastCheckedId, flatVisibleSessions, toggleMultiSelect])
+
+    const blockSidebarDeleteShortcut = (event: KeyboardEvent<HTMLElement> | globalThis.KeyboardEvent) => {
+        if (!shouldBlockSidebarDeleteShortcut(event, containerRef)) return
+        // Avoid accidental destructive cascades: on macOS, Cmd+Delete/Backspace on a
+        // focused sidebar item can archive the selected session, then focus falls to
+        // the next item and a repeated shortcut archives that one too.
+        event.preventDefault()
+        event.stopPropagation()
+    }
+
+    useEffect(() => {
+        const handleDocumentKeyDown = (event: globalThis.KeyboardEvent) => {
+            blockSidebarDeleteShortcut(event)
+        }
+
+        document.addEventListener('keydown', handleDocumentKeyDown, { capture: true })
+        window.addEventListener('keydown', handleDocumentKeyDown, { capture: true })
+        return () => {
+            document.removeEventListener('keydown', handleDocumentKeyDown, { capture: true })
+            window.removeEventListener('keydown', handleDocumentKeyDown, { capture: true })
+        }
+    })
+
+    const handleKeyDownCapture = (event: KeyboardEvent<HTMLDivElement>) => {
+        blockSidebarDeleteShortcut(event)
+    }
+
     return (
-        <div className="mx-auto w-full max-w-content flex flex-col relative">
+        <div
+            ref={containerRef}
+            className="mx-auto w-full max-w-content flex flex-col relative"
+            onKeyDownCapture={handleKeyDownCapture}
+        >
             {renderHeader ? (
                 <div className="flex items-center justify-between px-3 py-1">
                     <div className="text-xs text-[var(--app-hint)]">
@@ -968,16 +1294,16 @@ export function SessionList(props: {
                             : t('sessions.count', { n: props.sessions.length, m: allGroups.length })}
                     </div>
                     <div className="flex items-center gap-1">
-                        {props.sessions.length > 0 ? (
+                        {selectionMode ? (
                             <button
                                 type="button"
-                                onClick={selectionMode ? exitSelectionMode : () => setSelectionMode(true)}
+                                onClick={exitSelectionMode}
                                 className="px-2 py-1 text-xs text-[var(--app-link)] transition-colors"
                             >
-                                {selectionMode ? 'Cancel' : 'Select'}
+                                Cancel
                             </button>
                         ) : null}
-                        {!selectionMode ? (
+                        {props.sessions.length > 0 ? (
                             <button
                                 type="button"
                                 onClick={props.onNewSession}
@@ -1031,10 +1357,19 @@ export function SessionList(props: {
                                 <div className="flex flex-col ml-3.5 pl-1 mt-0.5">
                                     {mg.projectGroups.map((group) => {
                                         const isCollapsed = isGroupCollapsed(group)
-                                        const visibleGroupSessions = getVisibleGroupSessions(group)
-                                        const hiddenSessionCount = group.sessions.length - visibleGroupSessions.length
                                         const sessionGroupExpanded = isSessionGroupExpanded(group)
                                         const canStartInGroupDirectory = group.directory !== 'Other'
+                                        const projectUserGroups = getGroupsForProject(group.key)
+                                        // Use all user groups (not just this project's) so a session that moved
+                                        // project groups is still excluded from ungrouped and stays in its group.
+                                        const allGroupedIds = new Set(userGroups.flatMap(ug => ug.sessionIds))
+                                        const ungroupedSessions = group.sessions.filter(s => !allGroupedIds.has(s.id))
+                                        const visibleUngroupedSessions = getVisibleSessionPreview(ungroupedSessions, {
+                                            expanded: sessionGroupExpanded,
+                                            selectedSessionId,
+                                        })
+                                        const hiddenUngroupedCount = ungroupedSessions.length - visibleUngroupedSessions.length
+                                        const isDraggingGrouped = dragActive && projectUserGroups.some(ug => ug.sessionIds.includes(draggingSessionId.current ?? ''))
                                         return (
                                             <div key={group.key}>
                                                 <div
@@ -1069,37 +1404,146 @@ export function SessionList(props: {
                                                     </span>
                                                 </div>
 
-                                                {/* Level 3: Sessions */}
+                                                {/* Level 3: User groups + ungrouped sessions */}
                                                 <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
                                                     <div className="collapsible-inner">
-                                                    <div className="flex flex-col gap-0.5 ml-3 pl-1 pr-1 py-1">
-                                                        {visibleGroupSessions.map((s) => (
-                                                            <SessionItem
-                                                                key={s.id}
-                                                                session={s}
-                                                                onSelect={props.onSelect}
-                                                                showPath={false}
-                                                                api={api}
-                                                                selected={s.id === selectedSessionId}
-                                                                selectionMode={selectionMode}
-                                                                isMultiSelected={multiSelectedIds.has(s.id)}
-                                                                onEnterSelectionMode={enterSelectionMode}
-                                                                onToggleMultiSelect={toggleMultiSelect}
-                                                                onCloned={onCloned}
-                                                            />
-                                                        ))}
-                                                        {!isSearching && group.sessions.length > GROUP_SESSION_PREVIEW_LIMIT && (sessionGroupExpanded || hiddenSessionCount > 0) ? (
+                                                    <div className="flex flex-col ml-3 pl-1 pr-1 py-1">
+                                                        {/* User groups */}
+                                                        {projectUserGroups.map(ug => {
+                                                            const ugSessions = ug.sessionIds
+                                                                // Fall back to allSessions if the session moved to a different
+                                                                // project group (e.g. after a rename that changes metadata).
+                                                                .map(id => group.sessions.find(s => s.id === id) ?? allSessions.find(s => s.id === id))
+                                                                .filter((s): s is SessionSummary => !!s)
+                                                            if (isSearching && ugSessions.length === 0) return null
+                                                            return (
+                                                                <div key={ug.id} className="mb-0.5">
+                                                                    <UserGroupHeader
+                                                                        group={ug}
+                                                                        sessionCount={ugSessions.length}
+                                                                        onRename={renameGroup}
+                                                                        onDelete={deleteGroup}
+                                                                        onToggleCollapsed={toggleGroupCollapsed}
+                                                                        isDragOver={dragOverTarget === `group:${ug.id}`}
+                                                                        onDragOver={e => { e.preventDefault(); setDragOverTarget(`group:${ug.id}`) }}
+                                                                        onDragLeave={() => setDragOverTarget(null)}
+                                                                        onDrop={e => {
+                                                                            e.preventDefault()
+                                                                            const sid = e.dataTransfer.getData('text/plain')
+                                                                            if (sid) moveSessionToGroup(sid, ug.id)
+                                                                            setDragOverTarget(null)
+                                                                        }}
+                                                                    />
+                                                                    {!ug.collapsed ? (
+                                                                        <div className="flex flex-col gap-0.5 ml-4 border-l border-[var(--app-border)] pl-1.5 pb-0.5">
+                                                                            {ugSessions.map(s => (
+                                                                                <div
+                                                                                    key={s.id}
+                                                                                    draggable
+                                                                                    onDragStart={e => {
+                                                                                        e.dataTransfer.setData('text/plain', s.id)
+                                                                                        e.dataTransfer.effectAllowed = 'move'
+                                                                                        draggingSessionId.current = s.id
+                                                                                        setDragActive(true)
+                                                                                    }}
+                                                                                    onDragEnd={() => {
+                                                                                        draggingSessionId.current = null
+                                                                                        setDragActive(false)
+                                                                                        setDragOverTarget(null)
+                                                                                    }}
+                                                                                >
+                                                                                    <SessionItem
+                                                                                        session={s}
+                                                                                        onSelect={props.onSelect}
+                                                                                        showPath={false}
+                                                                                        api={api}
+                                                                                        selected={s.id === selectedSessionId}
+                                                                                        selectionMode={selectionMode}
+                                                                                        isMultiSelected={multiSelectedIds.has(s.id)}
+                                                                                        onToggleMultiSelect={toggleMultiSelect}
+                                                                                        onCheckboxClick={handleCheckboxClick}
+                                                                                        onCloned={onCloned}
+                                                                                        unreadDoneOrder={props.unreadDoneOrders?.[s.id]}
+                                                                                    />
+                                                                                </div>
+                                                                            ))}
+                                                                        </div>
+                                                                    ) : null}
+                                                                </div>
+                                                            )
+                                                        })}
+
+                                                        {/* Drop zone to remove session from a group (shown while dragging a grouped session) */}
+                                                        {isDraggingGrouped ? (
+                                                            <div
+                                                                className={cn(
+                                                                    'mx-1 my-1 cursor-copy rounded-lg border-2 border-dashed py-2 text-center text-xs transition-colors',
+                                                                    dragOverTarget === `ungrouped:${group.key}`
+                                                                        ? 'border-blue-400 bg-blue-500/10 text-blue-500'
+                                                                        : 'border-[var(--app-border)] text-[var(--app-hint)]'
+                                                                )}
+                                                                onDragOver={e => { e.preventDefault(); setDragOverTarget(`ungrouped:${group.key}`) }}
+                                                                onDragLeave={() => setDragOverTarget(null)}
+                                                                onDrop={e => {
+                                                                    e.preventDefault()
+                                                                    const sid = e.dataTransfer.getData('text/plain')
+                                                                    if (sid) moveSessionToGroup(sid, null)
+                                                                    draggingSessionId.current = null
+                                                                    setDragActive(false)
+                                                                    setDragOverTarget(null)
+                                                                }}
+                                                            >
+                                                                Remove from group
+                                                            </div>
+                                                        ) : null}
+
+                                                        {/* Ungrouped sessions */}
+                                                        <div className="flex flex-col gap-0.5">
+                                                            {visibleUngroupedSessions.map(s => (
+                                                                <div
+                                                                    key={s.id}
+                                                                    draggable={projectUserGroups.length > 0}
+                                                                    onDragStart={e => {
+                                                                        e.dataTransfer.setData('text/plain', s.id)
+                                                                        e.dataTransfer.effectAllowed = 'move'
+                                                                        draggingSessionId.current = s.id
+                                                                        setDragActive(true)
+                                                                    }}
+                                                                    onDragEnd={() => {
+                                                                        draggingSessionId.current = null
+                                                                        setDragActive(false)
+                                                                        setDragOverTarget(null)
+                                                                    }}
+                                                                >
+                                                                    <SessionItem
+                                                                        session={s}
+                                                                        onSelect={props.onSelect}
+                                                                        showPath={false}
+                                                                        api={api}
+                                                                        selected={s.id === selectedSessionId}
+                                                                        selectionMode={selectionMode}
+                                                                        isMultiSelected={multiSelectedIds.has(s.id)}
+                                                                        onToggleMultiSelect={toggleMultiSelect}
+                                                                        onCheckboxClick={handleCheckboxClick}
+                                                                        onCloned={onCloned}
+                                                                        unreadDoneOrder={props.unreadDoneOrders?.[s.id]}
+                                                                    />
+                                                                </div>
+                                                            ))}
+                                                        </div>
+
+                                                        {!isSearching && ungroupedSessions.length > GROUP_SESSION_PREVIEW_LIMIT && (sessionGroupExpanded || hiddenUngroupedCount > 0) ? (
                                                             <button
                                                                 type="button"
                                                                 onClick={() => toggleSessionGroup(group)}
                                                                 className={cn(
                                                                     'mx-2 my-1 rounded-md px-2 py-1 text-left text-xs text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] hover:text-[var(--app-fg)]',
-                                                                    hiddenSessionCount > 0 && 'border border-dashed border-[var(--app-border)]'
+                                                                    hiddenUngroupedCount > 0 && 'border border-dashed border-[var(--app-border)]'
                                                                 )}
                                                             >
                                                                 {sessionGroupExpanded
                                                                     ? t('sessions.group.showLess')
-                                                                    : t('sessions.group.showMore', { n: hiddenSessionCount })}
+                                                                    : t('sessions.group.showMore', { n: hiddenUngroupedCount })}
                                                             </button>
                                                         ) : null}
                                                     </div>
@@ -1117,15 +1561,33 @@ export function SessionList(props: {
             </div>
 
             {selectionMode ? (
-                <div className="sticky bottom-0 z-20 border-t border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-3 flex items-center gap-2">
+                <div className="sticky bottom-0 z-20 border-t border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-3 flex items-center gap-2 flex-wrap">
                     <span className="flex-1 text-sm text-[var(--app-hint)]">
                         {multiSelectedIds.size} selected
                     </span>
-                    {multiSelectedIds.size > 0 ? (
+                    {multiSelectedIds.size > 0 && !showGroupNameInput ? (
                         <>
+                            {selectedUnreadCount > 0 ? (
+                                <button
+                                    type="button"
+                                    disabled={archivePending || reviewPending}
+                                    onClick={markSelectedReviewed}
+                                    className="rounded-lg bg-green-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                                >
+                                    Mark reviewed ({selectedUnreadCount})
+                                </button>
+                            ) : null}
                             <button
                                 type="button"
-                                disabled={reviewPending}
+                                disabled={archivePending || reviewPending}
+                                onClick={() => void archiveSelected()}
+                                className="rounded-lg border border-red-500/30 px-3 py-1.5 text-xs font-medium text-red-500 transition-colors hover:bg-red-500/10 disabled:opacity-50"
+                            >
+                                {archivePending ? 'Archiving…' : 'Archive'}
+                            </button>
+                            <button
+                                type="button"
+                                disabled={reviewPending || archivePending}
                                 onClick={() => void markSelectedReadyForReview(false)}
                                 className="rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)] disabled:opacity-50"
                             >
@@ -1133,21 +1595,70 @@ export function SessionList(props: {
                             </button>
                             <button
                                 type="button"
-                                disabled={reviewPending}
+                                disabled={reviewPending || archivePending}
                                 onClick={() => void markSelectedReadyForReview(true)}
                                 className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
                             >
                                 {reviewPending ? 'Marking…' : 'Ready to Review'}
                             </button>
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setGroupNameValue('')
+                                    setShowGroupNameInput(true)
+                                    setTimeout(() => groupNameInputRef.current?.focus(), 0)
+                                }}
+                                className="rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)]"
+                            >
+                                Group
+                            </button>
                         </>
                     ) : null}
-                    <button
-                        type="button"
-                        onClick={exitSelectionMode}
-                        className="rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)]"
-                    >
-                        Cancel
-                    </button>
+                    {showGroupNameInput ? (
+                        <>
+                            <input
+                                ref={groupNameInputRef}
+                                type="text"
+                                value={groupNameValue}
+                                onChange={e => setGroupNameValue(e.target.value)}
+                                onKeyDown={e => {
+                                    if (e.key === 'Enter') {
+                                        e.preventDefault()
+                                        groupSelectedSessions(groupNameValue)
+                                    }
+                                    if (e.key === 'Escape') {
+                                        setShowGroupNameInput(false)
+                                        setGroupNameValue('')
+                                    }
+                                }}
+                                placeholder="Group name…"
+                                className="min-w-0 flex-1 rounded-lg border border-[var(--app-link)] bg-[var(--app-bg)] px-3 py-1.5 text-xs text-[var(--app-fg)] outline-none placeholder:text-[var(--app-hint)]"
+                            />
+                            <button
+                                type="button"
+                                onClick={() => groupSelectedSessions(groupNameValue)}
+                                disabled={!groupNameValue.trim()}
+                                className="rounded-lg bg-blue-500 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                            >
+                                Create
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => { setShowGroupNameInput(false); setGroupNameValue('') }}
+                                className="rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)]"
+                            >
+                                Cancel
+                            </button>
+                        </>
+                    ) : (
+                        <button
+                            type="button"
+                            onClick={exitSelectionMode}
+                            className="rounded-lg border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-hint)] transition-colors hover:bg-[var(--app-subtle-bg)]"
+                        >
+                            Cancel
+                        </button>
+                    )}
                 </div>
             ) : null}
         </div>

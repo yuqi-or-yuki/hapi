@@ -3,24 +3,10 @@ import type { CodexPermissionMode } from '@hapi/protocol/types';
 import type { ReasoningEffort } from '../appServerTypes';
 import type { EnhancedMode } from '../loop';
 import type { SlashCommand } from '@/modules/common/slashCommands';
+import { isUnsupportedCodexBuiltinSlashCommand } from '@hapi/protocol/slashCommands';
 
 const REASONING_EFFORTS = new Set<ReasoningEffort>(['none', 'minimal', 'low', 'medium', 'high', 'xhigh']);
 export const MAX_CODEX_GOAL_OBJECTIVE_CHARS = 4_000;
-
-const UNSUPPORTED_CODEX_BUILTIN_COMMANDS = new Set([
-    'compat',
-    'diff',
-    'init',
-    'login',
-    'logout',
-    'mcp',
-    'new',
-    'prompts',
-    'quit',
-    'redo',
-    'review',
-    'undo'
-]);
 
 export type CodexSlashResolution =
     | { kind: 'passthrough' }
@@ -232,7 +218,7 @@ export function resolveCodexSlashCommand(
         };
     }
 
-    if (UNSUPPORTED_CODEX_BUILTIN_COMMANDS.has(command)) {
+    if (isUnsupportedCodexBuiltinSlashCommand(command)) {
         return {
             kind: 'handled',
             message: `/${command} is a Codex CLI command that is not supported in HAPI sessions yet.`

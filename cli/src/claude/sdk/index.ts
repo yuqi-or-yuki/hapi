@@ -18,5 +18,6 @@ export type {
     InterruptRequest,
     SDKControlRequest,
     CanCallToolCallback,
-    PermissionResult
+    PermissionResult,
+    ModelInfo
 } from './types'

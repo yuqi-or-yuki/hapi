@@ -1,5 +1,6 @@
 import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
 import { registerBashHandlers } from './handlers/bash'
+import { registerClaudeModelHandlers } from './handlers/claudeModels'
 import { registerCodexModelHandlers } from './handlers/codexModels'
 import { registerOpencodeModelHandlers } from './handlers/opencodeModels'
 import { registerDirectoryHandlers } from './handlers/directories'
@@ -13,6 +14,7 @@ import { registerUploadHandlers } from './handlers/uploads'
 
 export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, workingDirectory: string): void {
     registerBashHandlers(rpcHandlerManager, workingDirectory)
+    registerClaudeModelHandlers(rpcHandlerManager)
     registerCodexModelHandlers(rpcHandlerManager)
     registerOpencodeModelHandlers(rpcHandlerManager)
     registerFileHandlers(rpcHandlerManager, workingDirectory)

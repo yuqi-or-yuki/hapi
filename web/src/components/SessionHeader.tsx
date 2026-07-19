@@ -7,6 +7,7 @@ import { SessionActionMenu } from '@/components/SessionActionMenu'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { CloneSessionDialog } from '@/components/CloneSessionDialog'
+import { ScheduleMessageDialog } from '@/components/ScheduleMessageDialog'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -110,6 +111,7 @@ export function SessionHeader(props: {
     const [archiveOpen, setArchiveOpen] = useState(false)
     const [deleteOpen, setDeleteOpen] = useState(false)
     const [cloneOpen, setCloneOpen] = useState(false)
+    const [scheduleOpen, setScheduleOpen] = useState(false)
 
     const { archiveSession, renameSession, deleteSession, cloneSession, isPending } = useSessionActions(
         api,
@@ -253,6 +255,7 @@ export function SessionHeader(props: {
                 onArchive={() => setArchiveOpen(true)}
                 onDelete={() => setDeleteOpen(true)}
                 onClone={() => setCloneOpen(true)}
+                onSchedule={() => setScheduleOpen(true)}
                 anchorPoint={menuAnchorPoint}
                 menuId={menuId}
             />
@@ -272,7 +275,7 @@ export function SessionHeader(props: {
                 description={t('dialog.archive.description', { name: title })}
                 confirmLabel={t('dialog.archive.confirm')}
                 confirmingLabel={t('dialog.archive.confirming')}
-                onConfirm={archiveSession}
+                onConfirm={() => archiveSession(true)}
                 isPending={isPending}
                 destructive
             />
@@ -295,6 +298,14 @@ export function SessionHeader(props: {
                 sessionName={title}
                 onClone={handleClone}
                 isPending={isPending}
+            />
+
+            <ScheduleMessageDialog
+                isOpen={scheduleOpen}
+                onClose={() => setScheduleOpen(false)}
+                sessionId={session.id}
+                sessionName={title}
+                api={api}
             />
         </>
     )

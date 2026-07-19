@@ -65,6 +65,10 @@ export default {
   'session.time.minutesAgo': '{n} 分钟前',
   'session.time.hoursAgo': '{n} 小时前',
   'session.time.daysAgo': '{n} 天前',
+  'session.time.dueNow': '即将到期',
+  'session.time.inMinutes': '{n} 分钟后',
+  'session.time.inHours': '{n} 小时后',
+  'session.time.inDays': '{n} 天后',
 
   // Session header
   'session.title': '文件',

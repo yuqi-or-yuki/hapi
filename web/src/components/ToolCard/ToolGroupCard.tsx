@@ -8,6 +8,7 @@ import { getToolPresentation } from '@/components/ToolCard/knownTools'
 import { formatGroupedHeaderSubtitle, formatGroupedHeaderTitle, formatGroupedRowLabel } from '@/components/ToolCard/groupedPresentation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { openImageLightbox } from '@/components/ImageLightbox'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -215,6 +216,25 @@ export function ToolGroupCard(props: {
     const subtitle = formatGroupedHeaderSubtitle(props.block, t) ?? formatActionSummary(props.block, t)
     const fileCount = props.block.summary.fileTargets.length
 
+    const inlineImages = useMemo(() => {
+        const images: Array<{ blobId: string; mimeType: string }> = []
+        for (const tool of props.block.tools) {
+            const result = tool.tool.result
+            const arr = Array.isArray(result) ? result : (result && typeof result === 'object' && Array.isArray((result as Record<string, unknown>).content) ? (result as Record<string, unknown>).content as unknown[] : null)
+            if (!arr) continue
+            for (const item of arr) {
+                if (item && typeof item === 'object' && (item as Record<string, unknown>).type === 'hapi_image') {
+                    const blobId = (item as Record<string, unknown>).blobId
+                    const mimeType = (item as Record<string, unknown>).mimeType
+                    if (typeof blobId === 'string' && typeof mimeType === 'string') {
+                        images.push({ blobId, mimeType })
+                    }
+                }
+            }
+        }
+        return images
+    }, [props.block.tools])
+
     return (
         <Card className="overflow-hidden rounded-[20px] bg-[var(--app-tool-group-bg)] shadow-none">
             <CardHeader className={cn('space-y-0 p-3', subtitle ? 'pb-2' : null)}>
@@ -270,6 +290,23 @@ export function ToolGroupCard(props: {
                     </div>
                 </button>
             </CardHeader>
+
+            {inlineImages.length > 0 ? (
+                <div className="mx-3 mb-3 flex flex-col gap-2">
+                    {inlineImages.map((img) => {
+                        const url = ctx.api.getBlobUrl(ctx.sessionId, img.blobId)
+                        return (
+                            <img
+                                key={img.blobId}
+                                src={url}
+                                alt="Result"
+                                className="max-h-96 max-w-full rounded-lg object-contain border border-[var(--app-border)] cursor-zoom-in"
+                                onClick={() => openImageLightbox(url, 'Result')}
+                            />
+                        )
+                    })}
+                </div>
+            ) : null}
 
             {open ? (
                 <CardContent className="px-3 pb-3 pt-1">

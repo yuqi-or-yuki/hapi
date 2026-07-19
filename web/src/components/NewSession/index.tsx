@@ -4,6 +4,7 @@ import type { Machine } from '@/types/api'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useMachinePathsExists } from '@/hooks/useMachinePathsExists'
 import { useSpawnSession } from '@/hooks/mutations/useSpawnSession'
+import { useClaudeModels } from '@/hooks/queries/useClaudeModels'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useOpencodeModelsForCwd } from '@/hooks/queries/useOpencodeModelsForCwd'
 import { useSessions } from '@/hooks/queries/useSessions'
@@ -128,6 +129,28 @@ export function NewSession(props: {
         return options
     }, [codexModelsState.models, model])
 
+    const claudeModelsState = useClaudeModels({
+        api: props.api,
+        machineId,
+        enabled: agent === 'claude' && Boolean(machineId)
+    })
+    const claudeModelOptions = useMemo(() => {
+        const options = [{ value: 'auto', label: 'Default' }]
+        for (const claudeModel of claudeModelsState.models) {
+            // Skip the CLI's own "default" entry — the "auto" sentinel above already
+            // covers "no explicit model", and showing both reads as two defaults.
+            if (claudeModel.value === 'default') continue
+            options.push({
+                value: claudeModel.value,
+                label: claudeModel.displayName
+            })
+        }
+        if (model !== 'auto' && !options.some((option) => option.value === model)) {
+            options.splice(1, 0, { value: model, label: model })
+        }
+        return options
+    }, [claudeModelsState.models, model])
+
     const recentPaths = useMemo(
         () => getRecentPaths(machineId),
         [getRecentPaths, machineId]
@@ -145,7 +168,7 @@ export function NewSession(props: {
         [allPaths, deferredDirectory]
     )
 
-    const { pathExistence, checkPathsExists } = useMachinePathsExists(props.api, machineId, pathsToCheck)
+    const { pathExistence, checkPathsExists } = useMachinePathsExists(props.api, selectedMachine?.id ?? null, pathsToCheck)
 
     const verifiedPaths = useMemo(
         () => allPaths.filter((path) => pathExistence[path]),
@@ -297,7 +320,7 @@ export function NewSession(props: {
     }, [chooseFolderCallback, workspaceRootsAvailable, machineId, trimmedDirectory])
 
     async function handleCreate() {
-        if (!machineId || !trimmedDirectory) return
+        if (!selectedMachine || !machineId || !trimmedDirectory) return
 
         setError(null)
         try {
@@ -350,7 +373,7 @@ export function NewSession(props: {
         }
     }
 
-    const canCreate = Boolean(machineId && trimmedDirectory && !isFormDisabled && !missingWorktreeDirectory)
+    const canCreate = Boolean(selectedMachine && trimmedDirectory && !isFormDisabled && !missingWorktreeDirectory)
 
     return (
         <div className="flex flex-col divide-y divide-[var(--app-divider)]">
@@ -411,12 +434,17 @@ export function NewSession(props: {
                 <ModelSelector
                     agent={agent}
                     model={model}
-                    options={agent === 'codex' ? codexModelOptions : undefined}
-                    isDisabled={isFormDisabled || (agent === 'codex' && Boolean(codexModelsState.error))}
-                    isLoading={agent === 'codex' && codexModelsState.isLoading}
+                    options={agent === 'codex' ? codexModelOptions : agent === 'claude' ? claudeModelOptions : undefined}
+                    isDisabled={isFormDisabled
+                        || (agent === 'codex' && Boolean(codexModelsState.error))
+                        || (agent === 'claude' && Boolean(claudeModelsState.error))}
+                    isLoading={(agent === 'codex' && codexModelsState.isLoading)
+                        || (agent === 'claude' && claudeModelsState.isLoading)}
                     error={agent === 'codex' && codexModelsState.error
                         ? `${t('newSession.model.loadFailed')}: ${codexModelsState.error}`
-                        : null}
+                        : agent === 'claude' && claudeModelsState.error
+                            ? `${t('newSession.model.loadFailed')}: ${claudeModelsState.error}`
+                            : null}
                     onModelChange={setModel}
                 />
             )}

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'bun:test'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { Hono } from 'hono'
 import type { Session, SyncEngine } from '../../sync/syncEngine'
+import type { Store } from '../../store'
+import type { ScheduledMessageRow } from '../../store/scheduledMessageStore'
 import type { WebAppEnv } from '../middleware/auth'
 import { createSessionsRoutes } from './sessions'
 
@@ -53,6 +58,7 @@ function createSession(overrides?: Partial<Session>): Session {
 function createApp(session: Session, opts?: {
     resumeSession?: (sessionId: string, namespace: string, resumeOpts?: { permissionMode?: string }) => Promise<{ type: string; sessionId?: string; message?: string; code?: string }>
     listSlashCommands?: SyncEngine['listSlashCommands']
+    pendingScheduledMessages?: Partial<ScheduledMessageRow>[]
 }) {
     const applySessionConfigCalls: Array<[string, Record<string, unknown>]> = []
     const applySessionConfig = async (sessionId: string, config: Record<string, unknown>) => {
@@ -74,6 +80,7 @@ function createApp(session: Session, opts?: {
     })
     const resumeSession = opts?.resumeSession ?? (async (sessionId: string) => ({ type: 'success', sessionId }))
     const engine = {
+        getSessionsByNamespace: () => [session],
         resolveSessionAccess: () => ({ ok: true, sessionId: session.id, session }),
         applySessionConfig,
         listCodexModelsForSession,
@@ -85,17 +92,126 @@ function createApp(session: Session, opts?: {
         }))
     } as Partial<SyncEngine>
 
+    const store = {
+        scheduledMessages: {
+            list: () => (opts?.pendingScheduledMessages ?? []) as ScheduledMessageRow[]
+        }
+    } as unknown as Store
+
     const app = new Hono<WebAppEnv>()
     app.use('*', async (c, next) => {
         c.set('namespace', 'default')
         await next()
     })
-    app.route('/api', createSessionsRoutes(() => engine as SyncEngine))
+    app.route('/api', createSessionsRoutes(() => engine as SyncEngine, store))
 
     return { app, applySessionConfigCalls }
 }
 
 describe('sessions routes', () => {
+
+    it('marks the claiming session debateActive while a debate run is alive', async () => {
+        const projectDir = mkdtempSync(join(tmpdir(), 'hapi-debate-badge-'))
+        try {
+            const debateDir = join(projectDir, '.hapi-debates', 'run-1')
+            mkdirSync(debateDir, { recursive: true })
+            writeFileSync(join(debateDir, 'hapi-session-id'), 'session-1')
+            writeFileSync(join(debateDir, 'state.json'), JSON.stringify({
+                status: 'running',
+                orchestratorPid: process.pid
+            }))
+            const session = createSession({ metadata: { path: projectDir, host: 'localhost', flavor: 'codex' } })
+            const { app } = createApp(session)
+
+            const response = await app.request('/api/sessions')
+
+            expect(response.status).toBe(200)
+            const body = await response.json() as { sessions: Array<{ id: string; debateActive: boolean; loopActive: boolean }> }
+            expect(body.sessions).toEqual([
+                expect.objectContaining({ id: 'session-1', debateActive: true, loopActive: false })
+            ])
+        } finally {
+            rmSync(projectDir, { recursive: true, force: true })
+        }
+    })
+
+    it('clears debateActive for completed debate runs', async () => {
+        const projectDir = mkdtempSync(join(tmpdir(), 'hapi-debate-badge-'))
+        try {
+            const debateDir = join(projectDir, '.hapi-debates', 'run-1')
+            mkdirSync(debateDir, { recursive: true })
+            writeFileSync(join(debateDir, 'hapi-session-id'), 'session-1')
+            writeFileSync(join(debateDir, 'state.json'), JSON.stringify({
+                status: 'complete',
+                orchestratorPid: process.pid
+            }))
+            const session = createSession({ metadata: { path: projectDir, host: 'localhost', flavor: 'codex' } })
+            const { app } = createApp(session)
+
+            const response = await app.request('/api/sessions')
+
+            expect(response.status).toBe(200)
+            const body = await response.json() as { sessions: Array<{ id: string; debateActive: boolean }> }
+            expect(body.sessions).toEqual([
+                expect.objectContaining({ id: 'session-1', debateActive: false })
+            ])
+        } finally {
+            rmSync(projectDir, { recursive: true, force: true })
+        }
+    })
+
+    it('surfaces the due time when a session has a pending enabled scheduled message', async () => {
+        const session = createSession()
+        const { app } = createApp(session, {
+            pendingScheduledMessages: [
+                { id: 'sched-1', sourceSessionId: 'session-1', enabled: true, status: 'pending', dueAt: 5000 }
+            ]
+        })
+
+        const response = await app.request('/api/sessions')
+
+        expect(response.status).toBe(200)
+        const body = await response.json() as { sessions: Array<{ id: string; scheduledDueAts: number[] }> }
+        expect(body.sessions).toEqual([
+            expect.objectContaining({ id: 'session-1', scheduledDueAts: [5000] })
+        ])
+    })
+
+    it('returns every pending scheduled message due time, sorted ascending', async () => {
+        const session = createSession()
+        const { app } = createApp(session, {
+            pendingScheduledMessages: [
+                { id: 'sched-1', sourceSessionId: 'session-1', enabled: true, status: 'pending', dueAt: 9000 },
+                { id: 'sched-2', sourceSessionId: 'session-1', enabled: true, status: 'pending', dueAt: 3000 }
+            ]
+        })
+
+        const response = await app.request('/api/sessions')
+
+        expect(response.status).toBe(200)
+        const body = await response.json() as { sessions: Array<{ id: string; scheduledDueAts: number[] }> }
+        expect(body.sessions).toEqual([
+            expect.objectContaining({ id: 'session-1', scheduledDueAts: [3000, 9000] })
+        ])
+    })
+
+    it('leaves scheduledDueAts empty when the scheduled message is disabled', async () => {
+        const session = createSession()
+        const { app } = createApp(session, {
+            pendingScheduledMessages: [
+                { id: 'sched-1', sourceSessionId: 'session-1', enabled: false, status: 'pending', dueAt: 5000 }
+            ]
+        })
+
+        const response = await app.request('/api/sessions')
+
+        expect(response.status).toBe(200)
+        const body = await response.json() as { sessions: Array<{ id: string; scheduledDueAts: number[] }> }
+        expect(body.sessions).toEqual([
+            expect.objectContaining({ id: 'session-1', scheduledDueAts: [] })
+        ])
+    })
+
     it('rejects collaboration mode changes for local Codex sessions', async () => {
         const session = createSession({
             agentState: {

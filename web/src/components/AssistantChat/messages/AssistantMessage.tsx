@@ -23,6 +23,30 @@ const MESSAGE_PART_COMPONENTS = {
     tools: TOOL_COMPONENTS
 } as const
 
+function formatSentTime(value: Date | number | string | null | undefined): string | null {
+    if (value == null) return null
+    const date = value instanceof Date
+        ? value
+        : new Date(typeof value === 'number' && value < 1_000_000_000_000 ? value * 1000 : value)
+    const ms = date.getTime()
+    if (!Number.isFinite(ms)) return null
+    return date.toLocaleTimeString([], {
+        hour: 'numeric',
+        minute: '2-digit'
+    })
+}
+
+function SentTime({ value }: { value: Date | number | string | null | undefined }) {
+    const label = formatSentTime(value)
+    if (!label) return null
+
+    return (
+        <div className="mt-1 px-0.5 text-right text-[10px] leading-tight text-[var(--app-hint)] opacity-60" title={`Sent ${label}`}>
+            {label}
+        </div>
+    )
+}
+
 export function HappyAssistantMessage() {
     const { copied, copy } = useCopyToClipboard()
     const [showMetadata, setShowMetadata] = useState(false)
@@ -54,6 +78,7 @@ export function HappyAssistantMessage() {
     const durationMs = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.durationMs)
     const usage = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.usage)
     const messageModel = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.model)
+    const createdAt = useAssistantState(({ message }) => message.createdAt)
 
     const hasMetadata = invokedAt != null
         || (typeof durationMs === 'number' && durationMs >= 0)
@@ -79,6 +104,7 @@ export function HappyAssistantMessage() {
                 className="scroll-mt-4 px-1 min-w-0 max-w-full overflow-x-hidden"
             >
                 <CliOutputBlock text={cliText} />
+                <SentTime value={createdAt} />
                 {hasMetadata && (
                     <button
                         type="button"
@@ -109,6 +135,7 @@ export function HappyAssistantMessage() {
                 className={`${rootClass} ${copyText ? 'group/msg' : ''} scroll-mt-4`}
             >
                 <MessagePrimitive.Content components={MESSAGE_PART_COMPONENTS} />
+                <SentTime value={createdAt} />
                 {showMetadata && (
                     <MessageMetadata
                         invokedAt={invokedAt}
@@ -137,6 +164,7 @@ export function HappyAssistantMessage() {
                     aria-expanded={hasMetadata ? showMetadata : undefined}
                 >
                     <MessagePrimitive.Content components={MESSAGE_PART_COMPONENTS} />
+                    <SentTime value={createdAt} />
                     {showMetadata && (
                         <MessageMetadata
                             invokedAt={invokedAt}

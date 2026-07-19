@@ -11,9 +11,15 @@ export type NotificationChannel = {
     sendPermissionRequest: (session: Session) => Promise<void>
     sendTaskNotification: (session: Session, notification: TaskNotification) => Promise<void>
     sendSessionCompletion?: (session: Session, reason: SessionEndReason) => Promise<void>
+    sendAllClear?: (session: Session) => Promise<void>
+}
+
+export type NotificationPreferenceReader = {
+    get: (namespace: string, key: string) => unknown
 }
 
 export type NotificationHubOptions = {
     readyCooldownMs?: number
     permissionDebounceMs?: number
+    preferences?: NotificationPreferenceReader
 }

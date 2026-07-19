@@ -1,6 +1,8 @@
 import type { ToolViewComponent, ToolViewProps } from '@/components/ToolCard/views/_all'
 import type { ReactNode } from 'react'
 import { isObject, safeStringify } from '@hapi/protocol'
+import { useHappyChatContext } from '@/components/AssistantChat/context'
+import { openImageLightbox } from '@/components/ImageLightbox'
 import { CodeBlock } from '@/components/CodeBlock'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
 import { ChecklistList, extractTodoChecklist } from '@/components/ToolCard/checklist'
@@ -13,6 +15,81 @@ import {
     parseCodexSpawnAgentResult,
     parseCodexWaitAgentResult
 } from '@/components/ToolCard/codexAgents'
+
+function extractHapiImages(result: unknown): Array<{ blobId: string; mimeType: string }> {
+    const images: Array<{ blobId: string; mimeType: string }> = []
+    function scanArray(arr: unknown[]): void {
+        for (const item of arr) {
+            if (isObject(item) && item.type === 'hapi_image' && typeof item.blobId === 'string' && typeof item.mimeType === 'string') {
+                images.push({ blobId: item.blobId as string, mimeType: item.mimeType as string })
+            }
+        }
+    }
+    if (Array.isArray(result)) {
+        scanArray(result)
+    } else if (isObject(result) && Array.isArray(result.content)) {
+        scanArray(result.content as unknown[])
+    }
+    return images
+}
+
+function HapiImageBlocks(props: { images: Array<{ blobId: string; mimeType: string }> }) {
+    const ctx = useHappyChatContext()
+    if (props.images.length === 0) return null
+    return (
+        <div className="flex flex-col gap-2 mt-2">
+            {props.images.map((img) => {
+                const url = ctx.api.getBlobUrl(ctx.sessionId, img.blobId)
+                return (
+                    <div key={img.blobId} className="overflow-hidden rounded-lg">
+                        <img
+                            src={url}
+                            alt="Screenshot"
+                            className="max-h-96 max-w-full object-contain rounded-lg border border-[var(--app-border)] cursor-zoom-in"
+                            onClick={() => openImageLightbox(url, 'Screenshot')}
+                        />
+                    </div>
+                )
+            })}
+        </div>
+    )
+}
+
+function extractBase64Images(result: unknown): Array<{ dataUrl: string }> {
+    const images: Array<{ dataUrl: string }> = []
+    function scanBlock(item: unknown): void {
+        if (!isObject(item) || item.type !== 'image') return
+        const source = item.source
+        if (!isObject(source) || source.type !== 'base64') return
+        const mimeType = typeof source.media_type === 'string' ? source.media_type : 'image/png'
+        const data = typeof source.data === 'string' ? source.data : null
+        if (data) images.push({ dataUrl: `data:${mimeType};base64,${data}` })
+    }
+    if (Array.isArray(result)) {
+        result.forEach(scanBlock)
+    } else if (isObject(result) && Array.isArray(result.content)) {
+        (result.content as unknown[]).forEach(scanBlock)
+    }
+    return images
+}
+
+function Base64ImageBlocks(props: { images: Array<{ dataUrl: string }> }) {
+    if (props.images.length === 0) return null
+    return (
+        <div className="flex flex-col gap-2 mt-2">
+            {props.images.map((img, i) => (
+                <div key={i} className="overflow-hidden rounded-lg">
+                    <img
+                        src={img.dataUrl}
+                        alt="Screenshot"
+                        className="max-h-96 max-w-full object-contain rounded-lg border border-[var(--app-border)] cursor-zoom-in"
+                        onClick={() => openImageLightbox(img.dataUrl, 'Screenshot')}
+                    />
+                </div>
+            ))}
+        </div>
+    )
+}
 
 function parseToolUseError(message: string): { isToolUseError: boolean; errorMessage: string | null } {
     const regex = /<tool_use_error>(.*?)<\/tool_use_error>/s
@@ -600,9 +677,29 @@ const LineListResultView: ToolViewComponent = (props: ToolViewProps) => {
 
 const ReadResultView: ToolViewComponent = (props: ToolViewProps) => {
     const result = props.block.tool.result
+    const hapiImages = extractHapiImages(result)
+    const base64Images = extractBase64Images(result)
 
     if (result === undefined || result === null) {
         return <ResultStatusPill text={placeholderForState(props.block.tool.state)} />
+    }
+
+    if (hapiImages.length > 0) {
+        return (
+            <>
+                <HapiImageBlocks images={hapiImages} />
+                <RawJsonDevOnly value={result} surface={props.surface} />
+            </>
+        )
+    }
+
+    if (base64Images.length > 0) {
+        return (
+            <>
+                <Base64ImageBlocks images={base64Images} />
+                <RawJsonDevOnly value={result} surface={props.surface} />
+            </>
+        )
     }
 
     const file = extractReadFileContent(result)
@@ -906,9 +1003,29 @@ const SkillResultView: ToolViewComponent = (props: ToolViewProps) => {
 
 const GenericResultView: ToolViewComponent = (props: ToolViewProps) => {
     const result = props.block.tool.result
+    const hapiImages = extractHapiImages(result)
+    const base64Images = extractBase64Images(result)
 
     if (result === undefined || result === null) {
         return <ResultStatusPill text={placeholderForState(props.block.tool.state)} />
+    }
+
+    if (hapiImages.length > 0) {
+        return (
+            <>
+                <HapiImageBlocks images={hapiImages} />
+                <RawJsonDevOnly value={result} surface={props.surface} />
+            </>
+        )
+    }
+
+    if (base64Images.length > 0) {
+        return (
+            <>
+                <Base64ImageBlocks images={base64Images} />
+                <RawJsonDevOnly value={result} surface={props.surface} />
+            </>
+        )
     }
 
     // Detect codex bash output format and render accordingly

@@ -46,7 +46,8 @@ export const MetadataSchema = z.object({
     archivedBy: z.string().optional(),
     archiveReason: z.string().optional(),
     flavor: z.string().nullish(),
-    worktree: WorktreeMetadataSchema.optional()
+    worktree: WorktreeMetadataSchema.optional(),
+    readyForReview: z.boolean().optional()
 })
 
 export type Metadata = z.infer<typeof MetadataSchema>
@@ -241,6 +242,11 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
     MachineChangedSchema.extend({
         type: z.literal('machine-updated'),
         data: z.unknown().optional()
+    }),
+    SessionEventBaseSchema.extend({
+        type: z.literal('preference-updated'),
+        key: z.string(),
+        value: z.unknown()
     }),
     SessionEventBaseSchema.extend({
         type: z.literal('toast'),

@@ -11,6 +11,9 @@
  * - TELEGRAM_NOTIFICATION: Enable/disable Telegram notifications (default: true)
  * - SERVERCHAN_SENDKEY: Server酱 SendKey/AppKey for push notifications
  * - SERVERCHAN_NOTIFICATION: Enable/disable Server酱 notifications (default: true)
+ * - NTFY_SERVER: ntfy server URL (default: https://ntfy.sh)
+ * - NTFY_TOPIC: ntfy topic for all-clear notifications
+ * - NTFY_NOTIFICATION: Enable/disable ntfy all-clear notifications (default: true)
  * - HAPI_LISTEN_HOST: Host/IP to bind the HTTP service (default: 127.0.0.1)
  * - HAPI_LISTEN_PORT: Port for HTTP service (default: 3006)
  * - HAPI_PUBLIC_URL: Public URL for external access (e.g., Telegram Mini App)
@@ -37,6 +40,9 @@ export interface ConfigSources {
     telegramNotification: ConfigSource
     serverChanSendKey: ConfigSource
     serverChanNotification: ConfigSource
+    ntfyServer: ConfigSource
+    ntfyTopic: ConfigSource
+    ntfyNotification: ConfigSource
     listenHost: ConfigSource
     listenPort: ConfigSource
     publicUrl: ConfigSource
@@ -59,6 +65,15 @@ class Configuration {
 
     /** Server酱 notifications enabled */
     public readonly serverChanNotification: boolean
+
+    /** ntfy server URL */
+    public readonly ntfyServer: string
+
+    /** ntfy topic for all-clear notifications */
+    public readonly ntfyTopic: string | null
+
+    /** ntfy notifications enabled */
+    public readonly ntfyNotification: boolean
 
     /** CLI auth token (shared secret) */
     public cliApiToken: string
@@ -110,6 +125,9 @@ class Configuration {
         this.telegramNotification = serverSettings.telegramNotification
         this.serverChanSendKey = serverSettings.serverChanSendKey
         this.serverChanNotification = serverSettings.serverChanNotification
+        this.ntfyServer = serverSettings.ntfyServer
+        this.ntfyTopic = serverSettings.ntfyTopic
+        this.ntfyNotification = serverSettings.ntfyNotification
         this.listenHost = serverSettings.listenHost
         this.listenPort = serverSettings.listenPort
         this.publicUrl = serverSettings.publicUrl

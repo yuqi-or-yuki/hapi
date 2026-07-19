@@ -1,6 +1,6 @@
 import { useEffect, useRef, useCallback, useState } from 'react'
 import { useConversation } from '@elevenlabs/react'
-import { registerVoiceSession, resetRealtimeSessionState } from './RealtimeSession'
+import { registerVoiceSession, resetRealtimeSessionState, unregisterVoiceSession } from './RealtimeSession'
 import { realtimeClientTools, registerSessionStore } from './realtimeClientTools'
 import { fetchVoiceToken } from '@/api/voice'
 import type { VoiceSession, VoiceSessionConfig, ConversationStatus, StatusCallback } from './types'
@@ -239,6 +239,7 @@ export function RealtimeVoiceSession({
         return () => {
             // Clean up on unmount
             conversationInstance = null
+            unregisterVoiceSession()
         }
     }, [conversation, api])
 

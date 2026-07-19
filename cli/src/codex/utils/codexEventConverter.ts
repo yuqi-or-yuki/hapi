@@ -42,6 +42,12 @@ export type CodexConversionResult = {
     sessionId?: string;
     message?: CodexMessage;
     userMessage?: string;
+    /** Turn boundary signal (task_started / task_complete / task_failed / turn_aborted),
+     *  mirroring the same event vocabulary codexRemoteLauncher uses to drive
+     *  session.onThinkingChange — local mode reads these from the same transcript
+     *  events but previously discarded them, so the UI's thinking/spinner indicator
+     *  never activated for locally-launched Codex sessions. */
+    thinking?: boolean;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -116,6 +122,14 @@ export function convertCodexEvent(rawEvent: unknown): CodexConversionResult | nu
         const eventType = asString(payloadRecord.type);
         if (!eventType) {
             return null;
+        }
+
+        if (eventType === 'task_started') {
+            return { thinking: true };
+        }
+
+        if (eventType === 'task_complete' || eventType === 'task_failed' || eventType === 'turn_aborted') {
+            return { thinking: false };
         }
 
         if (eventType === 'user_message') {

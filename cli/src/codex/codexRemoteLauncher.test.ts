@@ -47,6 +47,8 @@ const harness = vi.hoisted(() => ({
     emitParentSpawnStartWithoutEnd: false,
     emitParentSendInputFailure: false,
     emitParentResumeSuccess: false,
+    emitParentMcpImageResult: false,
+    uploadedBlobs: [] as Array<{ mimeType: string; data: string }>,
     emitRunningChildTurnBeforeSuppressedParent: false,
     emitCompletedChildTurnBeforeSuppressedParent: false,
     emitTurnAbortedOnInterrupt: false,
@@ -272,6 +274,41 @@ vi.mock('./codexAppServerClient', () => {
                 };
                 harness.notifications.push({ method: 'item/completed', params: commandEnd });
                 this.notificationHandler?.('item/completed', commandEnd);
+
+                if (harness.emitParentMcpImageResult) {
+                    const screenshotStart = {
+                        item: {
+                            id: 'screenshot-1',
+                            type: 'mcpToolCall',
+                            server: 'computer-use',
+                            tool: 'screenshot',
+                            arguments: {}
+                        },
+                        threadId,
+                        turnId
+                    };
+                    harness.notifications.push({ method: 'item/started', params: screenshotStart });
+                    this.notificationHandler?.('item/started', screenshotStart);
+
+                    const screenshotEnd = {
+                        item: {
+                            id: 'screenshot-1',
+                            type: 'mcpToolCall',
+                            server: 'computer-use',
+                            tool: 'screenshot',
+                            result: {
+                                content: [
+                                    { type: 'text', text: 'Captured screenshot' },
+                                    { type: 'image', data: 'screen-base64', mimeType: 'image/png' }
+                                ]
+                            }
+                        },
+                        threadId,
+                        turnId
+                    };
+                    harness.notifications.push({ method: 'item/completed', params: screenshotEnd });
+                    this.notificationHandler?.('item/completed', screenshotEnd);
+                }
 
                 if (harness.emitParentUsageEvents) {
                     const parentUsage = {
@@ -771,6 +808,11 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
         sendAgentMessage(message: unknown) {
             codexMessages.push(message);
         },
+        async uploadBlobToHub(mimeType: string, data: string) {
+            const blobId = `blob-${harness.uploadedBlobs.length + 1}`;
+            harness.uploadedBlobs.push({ mimeType, data });
+            return blobId;
+        },
         sendUserMessage(_text: string) {},
         sendClaudeSessionMessage(message: unknown) {
             summaryMessages.push(message);
@@ -890,6 +932,8 @@ describe('codexRemoteLauncher', () => {
         harness.emitParentSpawnStartWithoutEnd = false;
         harness.emitParentSendInputFailure = false;
         harness.emitParentResumeSuccess = false;
+        harness.emitParentMcpImageResult = false;
+        harness.uploadedBlobs = [];
         harness.emitRunningChildTurnBeforeSuppressedParent = false;
         harness.emitCompletedChildTurnBeforeSuppressedParent = false;
         harness.emitTurnAbortedOnInterrupt = false;
@@ -1338,6 +1382,27 @@ describe('codexRemoteLauncher', () => {
             output: expect.objectContaining({
                 output: 'ok\n'
             })
+        }));
+    });
+
+    it('uploads Codex MCP image results so the frontend can render screenshots', async () => {
+        harness.emitParentMcpImageResult = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.uploadedBlobs).toEqual([
+            { mimeType: 'image/png', data: 'screen-base64' }
+        ]);
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call-result',
+            callId: 'screenshot-1',
+            output: {
+                content: [
+                    { type: 'text', text: 'Captured screenshot' },
+                    { type: 'hapi_image', blobId: 'blob-1', mimeType: 'image/png' }
+                ]
+            }
         }));
     });
 
