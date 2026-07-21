@@ -104,9 +104,11 @@ function getPrimaryIntent(block: ToolGroupBlock): GroupedSummaryIntent {
 }
 
 export function formatGroupedHeaderTitle(block: ToolGroupBlock, t: Translator): string {
-    const label = getIntentLabel(getPrimaryIntent(block), t)
-    const extraCount = block.tools.length - 1
-    return extraCount > 0 ? `${label} +${extraCount}` : label
+    const primaryIntent = getPrimaryIntent(block)
+    if (primaryIntent === 'generic-tool') {
+        return t('toolGroup.title')
+    }
+    return getIntentLabel(primaryIntent, t)
 }
 
 export function formatGroupedHeaderSubtitle(block: ToolGroupBlock, t: Translator): string | null {
@@ -127,7 +129,7 @@ export function formatGroupedHeaderSubtitle(block: ToolGroupBlock, t: Translator
     if (block.summary.countsByKind.web > 0) {
         parts.push(t('toolGroup.summary.web', { n: block.summary.countsByKind.web }))
     }
-    if (block.summary.countsByKind.other > 0) {
+    if (block.summary.countsByKind.other > 0 && parts.length > 0) {
         parts.push(t('toolGroup.summary.other', { n: block.summary.countsByKind.other }))
     }
 

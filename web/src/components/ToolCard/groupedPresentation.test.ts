@@ -32,6 +32,8 @@ function makeTool(id: string, name: string, input: unknown = {}): ToolCallBlock 
             createdAt: 1,
             startedAt: 1,
             completedAt: 2,
+            execStartedAt: null,
+            execCompletedAt: null,
             description: null,
             result: null,
             permission: undefined,
@@ -41,6 +43,12 @@ function makeTool(id: string, name: string, input: unknown = {}): ToolCallBlock 
 }
 
 function makeGroup(tools: ToolCallBlock[]): ToolGroupBlock {
+    const read = tools.filter((tool) => tool.tool.name === 'Read').length
+    const search = tools.filter((tool) => tool.tool.name === 'Grep' || tool.tool.name === 'Glob').length
+    const command = tools.filter((tool) => tool.tool.name === 'Bash' || tool.tool.name === 'CodexBash' || tool.tool.name === 'shell_command').length
+    const mutation = tools.filter((tool) => tool.tool.name === 'Edit' || tool.tool.name === 'Write' || tool.tool.name === 'MultiEdit').length
+    const web = tools.filter((tool) => tool.tool.name === 'WebFetch' || tool.tool.name === 'WebSearch').length
+
     return {
         kind: 'tool-group',
         id: 'tool-group:test',
@@ -55,12 +63,12 @@ function makeGroup(tools: ToolCallBlock[]): ToolGroupBlock {
         summary: {
             totalTools: tools.length,
             countsByKind: {
-                read: tools.filter((tool) => tool.tool.name === 'Read').length,
-                search: tools.filter((tool) => tool.tool.name === 'Grep' || tool.tool.name === 'Glob').length,
-                command: tools.filter((tool) => tool.tool.name === 'Bash' || tool.tool.name === 'CodexBash' || tool.tool.name === 'shell_command').length,
-                mutation: tools.filter((tool) => tool.tool.name === 'Edit' || tool.tool.name === 'Write' || tool.tool.name === 'MultiEdit').length,
-                web: tools.filter((tool) => tool.tool.name === 'WebFetch' || tool.tool.name === 'WebSearch').length,
-                other: 0,
+                read,
+                search,
+                command,
+                mutation,
+                web,
+                other: tools.length - read - search - command - mutation - web,
             },
             fileTargets: [],
             commandTargets: [],
@@ -106,7 +114,7 @@ describe('formatGroupedRowLabel', () => {
 })
 
 describe('formatGroupedHeaderTitle', () => {
-    it('adds a +n suffix for grouped file inspection activity', () => {
+    it('uses the primary activity without an inline +n suffix', () => {
         const group = makeGroup([
             makeTool('shell-1', 'shell_command', { command: 'Get-ChildItem src -Recurse' }),
             makeTool('shell-2', 'shell_command', { command: 'Get-Content package.json' }),
@@ -115,7 +123,16 @@ describe('formatGroupedHeaderTitle', () => {
             makeTool('shell-5', 'shell_command', { command: 'cat README.md' }),
         ])
 
-        expect(formatGroupedHeaderTitle(group, tZh)).toBe('检查项目文件 +4')
+        expect(formatGroupedHeaderTitle(group, tZh)).toBe('检查项目文件')
+    })
+
+    it('uses a neutral title for all-generic tool groups', () => {
+        const group = makeGroup([
+            makeTool('tool-1', 'Tool', { name: 'Tool 1' }),
+            makeTool('tool-2', 'Tool', { name: 'Tool 2' }),
+        ])
+
+        expect(formatGroupedHeaderTitle(group, tEn)).toBe('Tool activity')
     })
 })
 
@@ -128,5 +145,14 @@ describe('formatGroupedHeaderSubtitle', () => {
 
         expect(formatGroupedHeaderSubtitle(group, tEn)).toBe('Run 2')
         expect(formatGroupedHeaderSubtitle(group, tZh)).toBe('执行 2')
+    })
+
+    it('omits the aggregate counter line for all-generic tool groups', () => {
+        const group = makeGroup([
+            makeTool('tool-1', 'Tool', { name: 'Tool 1' }),
+            makeTool('tool-2', 'Tool', { name: 'Tool 2' }),
+        ])
+
+        expect(formatGroupedHeaderSubtitle(group, tEn)).toBeNull()
     })
 })

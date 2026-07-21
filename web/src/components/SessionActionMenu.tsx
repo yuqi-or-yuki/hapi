@@ -8,13 +8,18 @@ import {
     type CSSProperties
 } from 'react'
 import { useTranslation } from '@/lib/use-translation'
+import { HoverTooltip } from '@/components/HoverTooltip'
 
 type SessionActionMenuProps = {
     isOpen: boolean
     onClose: () => void
     sessionActive: boolean
     onRename: () => void
+    onExport?: () => void
+    onSyncCodex?: () => void
     onArchive: () => void
+    onReopen?: () => void
+    reopenDisabledReason?: string
     onDelete: () => void
     onClone: () => void
     onSchedule?: () => void
@@ -83,6 +88,27 @@ function CloneIcon(props: { className?: string }) {
     )
 }
 
+function DownloadIcon(props: { className?: string }) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={props.className}
+        >
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+            <polyline points="7 10 12 15 17 10" />
+            <line x1="12" x2="12" y1="15" y2="3" />
+        </svg>
+    )
+}
+
 function ClockIcon(props: { className?: string }) {
     return (
         <svg
@@ -99,6 +125,48 @@ function ClockIcon(props: { className?: string }) {
         >
             <circle cx="12" cy="12" r="10" />
             <path d="M12 6v6l4 2" />
+        </svg>
+    )
+}
+
+function ReopenIcon(props: { className?: string }) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={props.className}
+        >
+            <path d="M3 12a9 9 0 1 0 3-6.7" />
+            <polyline points="3 4 3 10 9 10" />
+        </svg>
+    )
+}
+
+function SyncIcon(props: { className?: string }) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={props.className}
+        >
+            <path d="M3 12a9 9 0 0 1 15.5-6.2" />
+            <path d="M18 3v6h-6" />
+            <path d="M21 12a9 9 0 0 1-15.5 6.2" />
+            <path d="M6 21v-6h6" />
         </svg>
     )
 }
@@ -139,7 +207,11 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         onClose,
         sessionActive,
         onRename,
+        onExport,
+        onSyncCodex,
         onArchive,
+        onReopen,
+        reopenDisabledReason,
         onDelete,
         onClone,
         anchorPoint,
@@ -159,6 +231,21 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
     const handleArchive = () => {
         onClose()
         onArchive()
+    }
+
+    const handleReopen = () => {
+        onClose()
+        onReopen?.()
+    }
+
+    const handleExport = () => {
+        onClose()
+        onExport?.()
+    }
+
+    const handleSyncCodex = () => {
+        onClose()
+        onSyncCodex?.()
     }
 
     const handleDelete = () => {
@@ -314,6 +401,30 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                     </button>
                 ) : null}
 
+                {onExport ? (
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
+                        onClick={handleExport}
+                    >
+                        <DownloadIcon className="text-[var(--app-hint)]" />
+                        {t('session.action.export')}
+                    </button>
+                ) : null}
+
+                {onSyncCodex ? (
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
+                        onClick={handleSyncCodex}
+                    >
+                        <SyncIcon className="text-[var(--app-hint)]" />
+                        {t('session.action.syncCodex')}
+                    </button>
+                ) : null}
+
                 {sessionActive ? (
                     <button
                         type="button"
@@ -325,15 +436,42 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                         {t('session.action.archive')}
                     </button>
                 ) : (
-                    <button
-                        type="button"
-                        role="menuitem"
-                        className={`${baseItemClassName} text-red-500 hover:bg-red-500/10`}
-                        onClick={handleDelete}
-                    >
-                        <TrashIcon className="text-red-500" />
-                        {t('session.action.delete')}
-                    </button>
+                    <>
+                        {onReopen || reopenDisabledReason ? (
+                            <HoverTooltip
+                                id={`${resolvedMenuId}-reopen-tooltip`}
+                                className="w-full [&>span:first-child]:w-full"
+                                align="start"
+                                revealOnParentFocusClass="group-focus-within:opacity-100 group-focus-within:visible"
+                                target={(
+                                    <button
+                                        type="button"
+                                        role="menuitem"
+                                        aria-disabled={reopenDisabledReason ? true : undefined}
+                                        aria-describedby={reopenDisabledReason ? `${resolvedMenuId}-reopen-tooltip` : undefined}
+                                        className={`${baseItemClassName} ${reopenDisabledReason
+                                            ? 'cursor-not-allowed opacity-50'
+                                            : 'hover:bg-[var(--app-subtle-bg)]'}`}
+                                        onClick={reopenDisabledReason ? undefined : handleReopen}
+                                    >
+                                        <ReopenIcon className="text-[var(--app-hint)]" />
+                                        {t('session.action.reopen')}
+                                    </button>
+                                )}
+                            >
+                                {reopenDisabledReason ?? t('session.action.reopen')}
+                            </HoverTooltip>
+                        ) : null}
+                        <button
+                            type="button"
+                            role="menuitem"
+                            className={`${baseItemClassName} text-red-500 hover:bg-red-500/10`}
+                            onClick={handleDelete}
+                        >
+                            <TrashIcon className="text-red-500" />
+                            {t('session.action.delete')}
+                        </button>
+                    </>
                 )}
             </div>
         </div>

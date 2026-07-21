@@ -6,9 +6,12 @@ import {
     clearMessageWindow,
     fetchLatestMessages,
     fetchOlderMessages,
+    getQueuedReconcileCandidateLocalIds,
     getMessageWindowState,
     ingestIncomingMessages,
     markMessagesConsumed,
+    reconcileQueuedAgainstLatest,
+    reconcileQueuedLocalIds,
     removeOptimisticMessage,
     setAtBottom,
     VISIBLE_WINDOW_SIZE,
@@ -214,6 +217,39 @@ describe('message-window-store async generations', () => {
         sessionStorage.clear()
     })
 
+    it('waits for an in-flight latest refresh instead of resolving early', async () => {
+        const request = deferred<Awaited<ReturnType<ApiClient['getMessages']>>>()
+        const api = {
+            getMessages: vi.fn(() => request.promise)
+        } as Pick<ApiClient, 'getMessages'> & {
+            getMessages: ReturnType<typeof vi.fn>
+        }
+
+        const firstLoad = fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+        let secondResolved = false
+        const secondLoad = fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+            .then(() => {
+                secondResolved = true
+            })
+        await Promise.resolve()
+
+        expect(api.getMessages).toHaveBeenCalledTimes(1)
+        expect(secondResolved).toBe(false)
+
+        request.resolve({
+            messages: [],
+            page: {
+                limit: 50,
+                nextBeforeSeq: null,
+                nextBeforeAt: null,
+                hasMore: false
+            }
+        })
+        await Promise.all([firstLoad, secondLoad])
+
+        expect(secondResolved).toBe(true)
+    })
+
     it('does not let a stale failed retry overwrite a newer reset-and-reload state', async () => {
         const firstRequest = deferred<Awaited<ReturnType<ApiClient['getMessages']>>>()
         const api = {
@@ -292,9 +328,9 @@ describe('message-window-store async generations', () => {
             startCreatedAt: 1_700_000_200_000,
         })
         const olderRequest = deferred<Awaited<ReturnType<ApiClient['getMessages']>>>()
-        const callLog: Array<{ beforeAt?: number | null; beforeSeq?: number | null; byPosition?: boolean; limit?: number }> = []
+        const callLog: Array<{ beforeAt?: number | null; beforeSeq?: number | null; limit?: number }> = []
         const api = {
-            getMessages: vi.fn(async (_sessionId: string, options: { beforeAt?: number | null; beforeSeq?: number | null; byPosition?: boolean; limit?: number } = {}) => {
+            getMessages: vi.fn(async (_sessionId: string, options: { beforeAt?: number | null; beforeSeq?: number | null; limit?: number } = {}) => {
                 callLog.push(options)
                 const callIndex = callLog.length
                 if (callIndex === 1 || callIndex === 3) {
@@ -354,11 +390,56 @@ describe('message-window-store async generations', () => {
         const finalState = getMessageWindowState(SESSION_ID)
         expect(finalState.isLoadingMore).toBe(false)
         expect(callLog).toEqual([
-            { byPosition: true, limit: 50 },
-            { byPosition: true, beforeAt: 1_700_000_400_000, beforeSeq: 101, limit: 50 },
-            { byPosition: true, limit: 50 },
-            { byPosition: true, beforeAt: 1_700_000_300_000, beforeSeq: 51, limit: 50 },
+            { limit: 50 },
+            { beforeAt: 1_700_000_400_000, beforeSeq: 101, limit: 50 },
+            { limit: 50 },
+            { beforeAt: 1_700_000_300_000, beforeSeq: 51, limit: 50 },
         ])
+    })
+
+    it('fetchOlder sends the composite cursor pair', async () => {
+        const latestPage = makeAgentMessagePage({
+            idPrefix: 'latest',
+            startSeq: 11,
+            count: 50,
+            startCreatedAt: 1_700_000_500_000,
+        })
+        const calls: Array<{ beforeAt?: number | null; beforeSeq?: number | null; limit?: number }> = []
+        const api = {
+            getMessages: vi.fn(async (_sessionId: string, options: { beforeAt?: number | null; beforeSeq?: number | null; limit?: number } = {}) => {
+                calls.push(options)
+                return calls.length === 1
+                    ? {
+                        messages: latestPage,
+                        page: {
+                            limit: options.limit ?? 50,
+                            nextBeforeSeq: 11,
+                            nextBeforeAt: 1_700_000_500_000,
+                            hasMore: true,
+                        }
+                    }
+                    : {
+                        messages: [],
+                        page: {
+                            limit: options.limit ?? 50,
+                            nextBeforeSeq: null,
+                            nextBeforeAt: null,
+                            hasMore: false,
+                        }
+                    }
+            })
+        } as Pick<ApiClient, 'getMessages'> & {
+            getMessages: ReturnType<typeof vi.fn>
+        }
+
+        await fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+        await fetchOlderMessages(api as unknown as ApiClient, SESSION_ID)
+
+        expect(calls[1]).toEqual({
+            beforeAt: 1_700_000_500_000,
+            beforeSeq: 11,
+            limit: 50,
+        })
     })
 })
 
@@ -403,6 +484,107 @@ describe('message-window-store status updates', () => {
 
         const message = getMessageWindowState(SESSION_ID).messages.find((entry) => entry.id === 'server-queued')
         expect(message?.status).toBe('sent')
+    })
+})
+
+describe('queued-state reconciliation', () => {
+    const CANDIDATE_SESSION_ID = 'session-queued-state-candidates-test'
+    const PERSISTED_SENDING_SESSION_ID = 'session-queued-state-persisted-sending-test'
+    const RECONCILE_SESSION_ID = 'session-queued-state-reconcile-test'
+
+    function makeQueuedUserMessage(props: Parameters<typeof makeUserMessage>[0]): DecryptedMessage {
+        return {
+            ...makeUserMessage(props),
+            invokedAt: null,
+        }
+    }
+
+    function hydrate(sessionId: string, messages: DecryptedMessage[], pending: DecryptedMessage[] = []): void {
+        sessionStorage.setItem(`hapi:message-window:v1:${sessionId}`, JSON.stringify({
+            messages,
+            pending,
+            atBottom: true,
+        }))
+    }
+
+    afterEach(() => {
+        clearMessageWindow(CANDIDATE_SESSION_ID)
+        clearMessageWindow(PERSISTED_SENDING_SESSION_ID)
+        clearMessageWindow(RECONCILE_SESSION_ID)
+    })
+
+    it('deduplicates queued candidates and excludes unsafe optimistic rows', () => {
+        hydrate(CANDIDATE_SESSION_ID, [
+            makeQueuedUserMessage({ id: 'server-echo', localId: 'local-server' }),
+            makeQueuedUserMessage({ id: 'local-queued', localId: 'local-queued', status: 'queued' }),
+            makeQueuedUserMessage({ id: 'local-sent', localId: 'local-sent', status: 'sent' }),
+            makeQueuedUserMessage({ id: 'local-sending', localId: 'local-sending', status: 'queued' }),
+            makeQueuedUserMessage({ id: 'local-failed', localId: 'local-failed', status: 'failed' }),
+            {
+                ...makeQueuedUserMessage({ id: 'local-invoked', localId: 'local-invoked', status: 'sent' }),
+                invokedAt: 1_700_000_000_000,
+            },
+        ], [
+            makeQueuedUserMessage({ id: 'server-echo-duplicate', localId: 'local-server' }),
+        ])
+        updateMessageStatus(CANDIDATE_SESSION_ID, 'local-sending', 'sending')
+
+        expect(getQueuedReconcileCandidateLocalIds(CANDIDATE_SESSION_ID)).toEqual([
+            'local-server',
+            'local-queued',
+            'local-sent',
+        ])
+    })
+
+    it('treats persisted sending rows as queued candidates after reload', () => {
+        hydrate(PERSISTED_SENDING_SESSION_ID, [
+            makeQueuedUserMessage({ id: 'local-sending', localId: 'local-sending', status: 'sending' }),
+        ])
+
+        expect(getQueuedReconcileCandidateLocalIds(PERSISTED_SENDING_SESSION_ID)).toEqual(['local-sending'])
+    })
+
+    it('removes only snapshotted rows that are no longer authoritatively queued', () => {
+        hydrate(RECONCILE_SESSION_ID, [
+            makeQueuedUserMessage({ id: 'stale-message', localId: 'local-stale-message' }),
+            makeQueuedUserMessage({ id: 'queued-message', localId: 'local-queued-message' }),
+            makeQueuedUserMessage({ id: 'new-message', localId: 'local-new-message' }),
+            makeQueuedUserMessage({ id: 'local-retry', localId: 'local-retry', status: 'sending' }),
+            {
+                ...makeQueuedUserMessage({ id: 'invoked-message', localId: 'local-invoked-message' }),
+                invokedAt: 1_700_000_000_000,
+            },
+        ], [
+            makeQueuedUserMessage({ id: 'stale-pending', localId: 'local-stale-pending' }),
+            makeQueuedUserMessage({ id: 'queued-pending', localId: 'local-queued-pending' }),
+            makeQueuedUserMessage({ id: 'new-pending', localId: 'local-new-pending' }),
+        ])
+        updateMessageStatus(RECONCILE_SESSION_ID, 'local-retry', 'sending')
+
+        reconcileQueuedLocalIds(
+            RECONCILE_SESSION_ID,
+            [
+                'local-stale-message',
+                'local-queued-message',
+                'local-retry',
+                'local-invoked-message',
+                'local-stale-pending',
+                'local-queued-pending',
+            ],
+            ['local-queued-message', 'local-queued-pending'],
+        )
+
+        const state = getMessageWindowState(RECONCILE_SESSION_ID)
+        expect(state.messages.map((message) => message.id)).toEqual([
+            'queued-message',
+            'new-message',
+            'local-retry',
+            'invoked-message',
+        ])
+        expect(state.pending.map((message) => message.id)).toEqual([
+            'queued-pending',
+            'new-pending',
+        ])
     })
 })
 
@@ -514,5 +696,124 @@ describe('message-window-store visible trimming', () => {
         })
         expect(state.messages.some((message) => message.id === 'main-user-before-agent-flood')).toBe(true)
         expect(state.messages.filter((message) => message.id.startsWith('agent-run-latest-'))).toHaveLength(50)
+    })
+
+    it('drops a stale queued ghost on at-bottom refresh when the server no longer reports it as queued', async () => {
+        const baseTime = 1_700_000_200_000
+        // A queued row persisted from a prior session: server-echoed (id != localId),
+        // immediate (no scheduledAt), still invokedAt === null locally. The CLI
+        // consumed it while the client was offline, so messages-consumed was missed.
+        const ghost: DecryptedMessage = {
+            id: 'ghost-server-id',
+            seq: 1,
+            localId: 'ghost-local-id',
+            content: { role: 'user', content: { type: 'text', text: 'Ingest 范围' } },
+            createdAt: baseTime,
+            invokedAt: null,
+            status: undefined,
+        } as DecryptedMessage
+        ingestIncomingMessages(SESSION_ID, [ghost])
+        // sanity: the ghost is present and queued before the refresh
+        expect(getMessageWindowState(SESSION_ID).messages.some((m) => m.id === 'ghost-server-id')).toBe(true)
+
+        const api = {
+            getMessages: async (_sessionId: string, options: { limit?: number } = {}) => ({
+                // Latest window does NOT include the ghost (it was invoked long ago,
+                // out of the newest window). Only a fresh agent message comes back.
+                messages: [makeAgentMessage({ id: 'fresh-agent', seq: 99, createdAt: baseTime + 100_000 })],
+                page: { limit: options.limit ?? 50, nextBeforeSeq: null, nextBeforeAt: null, hasMore: false },
+            }),
+        } as Pick<ApiClient, 'getMessages'>
+
+        await fetchLatestMessages(api as ApiClient, SESSION_ID)
+
+        const state = getMessageWindowState(SESSION_ID)
+        expect(state.messages.some((m) => m.id === 'ghost-server-id')).toBe(false)
+        expect(state.pending.some((m) => m.id === 'ghost-server-id')).toBe(false)
+    })
+
+    it('reconcileQueuedAgainstLatest keeps genuine queued, optimistic, and scheduled rows', () => {
+        const base = 1_700_000_200_000
+        const queuedInWindow: DecryptedMessage = {
+            id: 'queued-server-id', seq: 5, localId: 'queued-local',
+            content: { role: 'user', content: { type: 'text', text: 'still queued' } },
+            createdAt: base, invokedAt: null, status: undefined,
+        } as DecryptedMessage
+        const optimistic: DecryptedMessage = {
+            id: 'opt-local', seq: null, localId: 'opt-local',
+            content: { role: 'user', content: { type: 'text', text: 'echo in flight' } },
+            createdAt: base, invokedAt: null, status: 'queued',
+        } as DecryptedMessage
+        const scheduled: DecryptedMessage = {
+            id: 'sched-server-id', seq: 6, localId: 'sched-local',
+            content: { role: 'user', content: { type: 'text', text: 'future' } },
+            createdAt: base, invokedAt: null, scheduledAt: base + 3_600_000, status: undefined,
+        } as DecryptedMessage
+        const ghost: DecryptedMessage = {
+            id: 'ghost-server-id', seq: 1, localId: 'ghost-local',
+            content: { role: 'user', content: { type: 'text', text: 'ghost' } },
+            createdAt: base, invokedAt: null, status: undefined,
+        } as DecryptedMessage
+
+        // A queued row that appeared after the fetch was issued (not in eligibleIds):
+        // must survive even though the older server snapshot can't include it.
+        const freshArrival: DecryptedMessage = {
+            id: 'fresh-server-id', seq: 7, localId: 'fresh-local',
+            content: { role: 'user', content: { type: 'text', text: 'arrived mid-fetch' } },
+            createdAt: base, invokedAt: null, status: undefined,
+        } as DecryptedMessage
+
+        // eligibleIds = the immediate queued rows present when the fetch started.
+        // Server's latest window only confirms the genuinely-queued row.
+        const reconciled = reconcileQueuedAgainstLatest(
+            [queuedInWindow, optimistic, scheduled, ghost, freshArrival],
+            [queuedInWindow],
+            new Set(['queued-server-id', 'ghost-server-id'])
+        )
+        const ids = reconciled.map((m) => m.id)
+        expect(ids).toContain('queued-server-id') // confirmed by server -> kept
+        expect(ids).toContain('opt-local')        // optimistic -> kept (echo may be in flight)
+        expect(ids).toContain('sched-server-id')  // scheduled -> kept (hub omits future rows)
+        expect(ids).toContain('fresh-server-id')  // arrived after fetch start -> kept
+        expect(ids).not.toContain('ghost-server-id') // echoed+immediate+eligible+absent -> dropped
+    })
+
+    it('keeps a queued row that arrives via SSE while the latest fetch is in flight', async () => {
+        const base = 1_700_000_200_000
+        // A pre-existing ghost in the hydrated window (queued when the fetch starts,
+        // server no longer reports it as queued).
+        const ghost: DecryptedMessage = {
+            id: 'ghost-server-id', seq: 1, localId: 'ghost-local',
+            content: { role: 'user', content: { type: 'text', text: 'ghost' } },
+            createdAt: base, invokedAt: null, status: undefined,
+        } as DecryptedMessage
+        ingestIncomingMessages(SESSION_ID, [ghost])
+
+        const httpRequest = deferred<Awaited<ReturnType<ApiClient['getMessages']>>>()
+        const api = { getMessages: vi.fn(async () => httpRequest.promise) } as Pick<ApiClient, 'getMessages'> & {
+            getMessages: ReturnType<typeof vi.fn>
+        }
+
+        const load = fetchLatestMessages(api as unknown as ApiClient, SESSION_ID)
+
+        // While the HTTP request is in flight, a fresh server-echoed queued row lands
+        // via SSE. It is absent from the (older) response snapshot below.
+        const fresh: DecryptedMessage = {
+            id: 'fresh-server-id', seq: 2, localId: 'fresh-local',
+            content: { role: 'user', content: { type: 'text', text: 'fresh queued' } },
+            createdAt: base + 50_000, invokedAt: null, status: undefined,
+        } as DecryptedMessage
+        ingestIncomingMessages(SESSION_ID, [fresh])
+
+        httpRequest.resolve({
+            messages: [makeAgentMessage({ id: 'fresh-agent', seq: 3, createdAt: base + 100_000 })],
+            page: { limit: 50, nextBeforeSeq: null, nextBeforeAt: null, hasMore: false },
+        })
+        await load
+
+        const state = getMessageWindowState(SESSION_ID)
+        const ids = [...state.messages, ...state.pending].map((m) => m.id)
+        expect(ids).not.toContain('ghost-server-id') // queued at fetch start + absent -> dropped
+        expect(ids).toContain('fresh-server-id')      // arrived mid-fetch -> kept
     })
 })

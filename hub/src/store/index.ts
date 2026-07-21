@@ -48,7 +48,8 @@ const REQUIRED_TABLES = [
 
 export class Store {
     private db: Database
-    private readonly dbPath: string
+    private readonly _dbPath: string
+    private closed: boolean = false
 
     readonly sessions: SessionStore
     readonly machines: MachineStore
@@ -60,8 +61,17 @@ export class Store {
     readonly scheduledMessages: ScheduledMessageStore
     readonly skillUsage: SkillUsageStore
 
+    /**
+     * Filesystem path of the underlying SQLite database, or ':memory:' for
+     * in-memory stores. Used by the legacy → ACP migrator (#824) to take a
+     * backup before a bulk run; treat as read-only.
+     */
+    get dbPath(): string {
+        return this._dbPath
+    }
+
     constructor(dbPath: string) {
-        this.dbPath = dbPath
+        this._dbPath = dbPath
         if (dbPath !== ':memory:' && !dbPath.startsWith('file::memory:')) {
             const dir = dirname(dbPath)
             mkdirSync(dir, { recursive: true, mode: 0o700 })
@@ -104,6 +114,20 @@ export class Store {
         this.preferences = new PreferencesStore(this.db)
         this.scheduledMessages = new ScheduledMessageStore(this.db)
         this.skillUsage = new SkillUsageStore(this.db)
+    }
+
+    close(): void {
+        if (this.closed) return
+        this.db.close()
+        this.closed = true
+
+        // Bun's SQLite close uses sqlite3_close_v2 by default, so prepared
+        // statements that are already unreachable may keep the underlying file
+        // handle alive until the next GC cycle. Windows refuses to remove a
+        // directory while those SQLite WAL/SHM handles are still pending.
+        if (process.platform === 'win32') {
+            Bun.gc(true)
+        }
     }
 
     private initSchema(): void {
@@ -168,6 +192,8 @@ export class Store {
 
         this.ensureScheduledMessagesSchema()
         this.ensureSkillUsageSchema()
+        this.ensureMessageScheduledAtColumn()
+        this.ensureSessionServiceTierColumn()
         this.assertRequiredTablesPresent()
     }
 
@@ -187,6 +213,7 @@ export class Store {
                 model TEXT,
                 model_reasoning_effort TEXT,
                 effort TEXT,
+                service_tier TEXT,
                 todos TEXT,
                 todos_updated_at INTEGER,
                 team_state TEXT,
@@ -221,12 +248,16 @@ export class Store {
                 seq INTEGER NOT NULL,
                 local_id TEXT,
                 invoked_at INTEGER,
+                scheduled_at INTEGER,
                 FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
             CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_local_id ON messages(session_id, local_id) WHERE local_id IS NOT NULL;
             CREATE INDEX IF NOT EXISTS idx_messages_session_position
                 ON messages(session_id, COALESCE(invoked_at, created_at) DESC, seq DESC);
+            CREATE INDEX IF NOT EXISTS idx_messages_scheduled_pending
+                ON messages(scheduled_at)
+                WHERE scheduled_at IS NOT NULL AND invoked_at IS NULL;
 
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -487,6 +518,7 @@ export class Store {
             );
             CREATE INDEX IF NOT EXISTS idx_blobs_session ON blobs(session_id);
         `)
+        this.ensureMessageScheduledAtColumn()
     }
 
     private migrateFromV9ToV10(): void {
@@ -500,6 +532,32 @@ export class Store {
             );
         `)
         this.ensureScheduledMessagesSchema()
+        this.ensureSessionServiceTierColumn()
+    }
+
+    private ensureMessageScheduledAtColumn(): void {
+        const columns = this.getMessageColumnNames()
+        if (columns.size === 0) {
+            // No messages table yet — createSchema will build the up-to-date one.
+            return
+        }
+        if (!columns.has('scheduled_at')) {
+            this.db.exec('ALTER TABLE messages ADD COLUMN scheduled_at INTEGER')
+        }
+        // Partial index for efficient mature scheduled message lookup.
+        // Idempotent via IF NOT EXISTS.
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_messages_scheduled_pending
+                ON messages(scheduled_at)
+                WHERE scheduled_at IS NOT NULL AND invoked_at IS NULL
+        `)
+    }
+
+    private ensureSessionServiceTierColumn(): void {
+        const sessionColumns = this.getSessionColumnNames()
+        if (sessionColumns.size > 0 && !sessionColumns.has('service_tier')) {
+            this.db.exec('ALTER TABLE sessions ADD COLUMN service_tier TEXT')
+        }
     }
 
     private migrateFromV10ToV11(): void {
@@ -655,9 +713,9 @@ export class Store {
     }
 
     private buildSchemaMismatchError(currentVersion: number): Error {
-        const location = (this.dbPath === ':memory:' || this.dbPath.startsWith('file::memory:'))
+        const location = (this._dbPath === ':memory:' || this._dbPath.startsWith('file::memory:'))
             ? 'in-memory database'
-            : this.dbPath
+            : this._dbPath
         return new Error(
             `SQLite schema version mismatch for ${location}. ` +
             `Expected ${SCHEMA_VERSION}, found ${currentVersion}. ` +

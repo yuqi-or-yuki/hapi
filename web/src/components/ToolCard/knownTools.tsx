@@ -508,13 +508,13 @@ export const knownTools: Record<string, {
                 ? opts.input.questions : []
             const count = questions.length
             const first = questions[0] ?? null
-            const id = isObject(first) && typeof first.id === 'string'
-                ? first.id.trim() : ''
+            const header = isObject(first) && typeof first.header === 'string'
+                ? first.header.trim() : ''
 
             if (count > 1) {
                 return `${count} Questions`
             }
-            return id.length > 0 ? id : 'Question'
+            return header.length > 0 ? header : 'Question'
         },
         subtitle: (opts) => {
             const questions = isObject(opts.input) && Array.isArray(opts.input.questions)
@@ -564,8 +564,9 @@ export function getToolPresentation(
     const pattern = getInputStringAny(opts.input, ['pattern'])
     const url = getInputStringAny(opts.input, ['url'])
     const query = getInputStringAny(opts.input, ['query'])
+    const name = getInputStringAny(opts.input, ['name'])
 
-    const subtitle = filePath ?? command ?? pattern ?? url ?? query
+    const subtitle = filePath ?? command ?? pattern ?? url ?? query ?? name
 
     // Some ACP agents emit `tool_call.title` as a verbatim argument (the shell
     // command or the file path itself). When it equals the input field,

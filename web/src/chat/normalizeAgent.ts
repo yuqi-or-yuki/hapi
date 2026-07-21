@@ -1,6 +1,7 @@
-import type { AgentEvent, NormalizedAgentContent, NormalizedMessage, ToolResultPermission } from '@/chat/types'
+import type { AgentEvent, CodexReview, CodexReviewFinding, NormalizedAgentContent, NormalizedMessage, ToolResultPermission } from '@/chat/types'
 import { AGENT_MESSAGE_PAYLOAD_TYPE, asNumber, asString, isObject } from '@hapi/protocol'
 import { isClaudeChatVisibleMessage } from '@hapi/protocol/messages'
+import { parseAgentTimestampMs } from '@/chat/agentTimestamp'
 
 function normalizeToolResultPermissions(value: unknown): ToolResultPermission | undefined {
     if (!isObject(value)) return undefined
@@ -88,7 +89,12 @@ function normalizeCodexTokenUsage(value: unknown, data?: Record<string, unknown>
             ?? usageSource.cacheReadInputTokens
             ?? usageSource.cache_read_input_tokens
         ) ?? undefined,
-        context_tokens: inputTokens,
+        context_tokens: asNumber(
+            info.contextTokens
+            ?? info.context_tokens
+            ?? usageSource.contextTokens
+            ?? usageSource.context_tokens
+        ) ?? inputTokens,
         context_window: asNumber(info.modelContextWindow ?? info.model_context_window) ?? undefined,
         thread_id: asString(
             data?.thread_id
@@ -142,6 +148,75 @@ function normalizePlanEntries(value: unknown): Array<{ step: string; status: 'pe
     return plan
 }
 
+function normalizeCodexReviewFinding(value: unknown): CodexReviewFinding | null {
+    if (!isObject(value)) return null
+    const title = asString(value.title)
+    const body = asString(value.body)
+    if (!title || !body) return null
+
+    const codeLocation = isObject(value.code_location)
+        ? value.code_location
+        : isObject(value.codeLocation)
+            ? value.codeLocation
+            : null
+    const lineRange = codeLocation && isObject(codeLocation.line_range)
+        ? codeLocation.line_range
+        : codeLocation && isObject(codeLocation.lineRange)
+            ? codeLocation.lineRange
+            : null
+
+    return {
+        title,
+        body,
+        priority: asNumber(value.priority),
+        confidenceScore: asNumber(value.confidence_score ?? value.confidenceScore),
+        filePath: codeLocation ? asString(codeLocation.absolute_file_path ?? codeLocation.absoluteFilePath ?? codeLocation.path) : null,
+        lineStart: lineRange ? asNumber(lineRange.start) : null,
+        lineEnd: lineRange ? asNumber(lineRange.end) : null
+    }
+}
+
+function normalizeCodexReviewJson(value: unknown): CodexReview | null {
+    if (!isObject(value)) return null
+    const hasReviewMarker = Array.isArray(value.findings)
+        || 'overall_correctness' in value
+        || 'overallCorrectness' in value
+        || 'overall_explanation' in value
+        || 'overallExplanation' in value
+    if (!hasReviewMarker) return null
+
+    const findings = Array.isArray(value.findings)
+        ? value.findings
+            .map(normalizeCodexReviewFinding)
+            .filter((finding): finding is CodexReviewFinding => finding !== null)
+        : []
+
+    const overallCorrectness = asString(value.overall_correctness ?? value.overallCorrectness)
+    const overallExplanation = asString(value.overall_explanation ?? value.overallExplanation)
+    const overallConfidenceScore = asNumber(value.overall_confidence_score ?? value.overallConfidenceScore)
+
+    if (findings.length === 0 && !overallCorrectness && !overallExplanation && overallConfidenceScore === null) {
+        return null
+    }
+
+    return {
+        findings,
+        overallCorrectness,
+        overallExplanation,
+        overallConfidenceScore
+    }
+}
+
+function parseCodexReviewMessage(message: string): CodexReview | null {
+    const trimmed = message.trim()
+    if (!trimmed.startsWith('{') || !trimmed.endsWith('}')) return null
+    try {
+        return normalizeCodexReviewJson(JSON.parse(trimmed) as unknown)
+    } catch {
+        return null
+    }
+}
+
 function normalizeAssistantOutput(
     messageId: string,
     localId: string | null,
@@ -152,6 +227,7 @@ function normalizeAssistantOutput(
     const uuid = asString(data.uuid) ?? messageId
     const parentUUID = asString(data.parentUuid) ?? null
     const isSidechain = Boolean(data.isSidechain)
+    const agentTimestamp = parseAgentTimestampMs(data.timestamp)
 
     const message = isObject(data.message) ? data.message : null
     if (!message) return null
@@ -199,12 +275,14 @@ function normalizeAssistantOutput(
         isSidechain,
         content: blocks,
         meta,
+        agentTimestamp,
         usage: inputTokens !== null && outputTokens !== null ? {
             input_tokens: inputTokens,
             output_tokens: outputTokens,
             cache_creation_input_tokens: asNumber(usage?.cache_creation_input_tokens) ?? undefined,
             cache_read_input_tokens: asNumber(usage?.cache_read_input_tokens) ?? undefined,
-            service_tier: asString(usage?.service_tier) ?? undefined
+            service_tier: asString(usage?.service_tier) ?? undefined,
+            context_window: asNumber(usage?.context_window) ?? undefined
         } : undefined
     }
 }
@@ -219,6 +297,7 @@ function normalizeUserOutput(
     const uuid = asString(data.uuid) ?? messageId
     const parentUUID = asString(data.parentUuid) ?? null
     const isSidechain = Boolean(data.isSidechain)
+    const agentTimestamp = parseAgentTimestampMs(data.timestamp)
 
     const message = isObject(data.message) ? data.message : null
     if (!message) return null
@@ -232,7 +311,8 @@ function normalizeUserOutput(
             createdAt,
             role: 'agent',
             isSidechain: true,
-            content: [{ type: 'sidechain', uuid, parentUUID, prompt: messageContent }]
+            content: [{ type: 'sidechain', uuid, parentUUID, prompt: messageContent }],
+            agentTimestamp
         }
     }
 
@@ -251,7 +331,8 @@ function normalizeUserOutput(
             createdAt,
             role: 'agent',
             isSidechain: true,
-            content: [{ type: 'sidechain', uuid, parentUUID, prompt: messageContent }]
+            content: [{ type: 'sidechain', uuid, parentUUID, prompt: messageContent }],
+            agentTimestamp
         }
     }
 
@@ -270,7 +351,8 @@ function normalizeUserOutput(
                 createdAt,
                 role: 'agent',
                 isSidechain: true,
-                content: [{ type: 'sidechain', uuid, parentUUID, prompt: textParts.join('\n\n') }]
+                content: [{ type: 'sidechain', uuid, parentUUID, prompt: textParts.join('\n\n') }],
+                agentTimestamp
             }
         }
     }
@@ -291,7 +373,8 @@ function normalizeUserOutput(
                 role: 'user',
                 isSidechain: false,
                 content: { type: 'text', text: textParts.join('\n\n') },
-                meta
+                meta,
+                agentTimestamp
             }
         }
     }
@@ -332,7 +415,8 @@ function normalizeUserOutput(
         role: 'agent',
         isSidechain,
         content: blocks,
-        meta
+        meta,
+        agentTimestamp
     }
 }
 
@@ -341,6 +425,10 @@ export function isSkippableAgentContent(content: unknown): boolean {
     const data = isObject(content.data) ? content.data : null
     if (!data) return false
     if (Boolean(data.isMeta) || Boolean(data.isCompactSummary)) return true
+    // A recap with no text is pure noise — drop it here rather than let it reach
+    // the away_summary branch (a bare "recap:" row) or, via a null return, fall
+    // through to the raw-JSON stringify fallback in normalize.ts.
+    if (data.type === 'system' && data.subtype === 'away_summary' && !asString(data.content)?.trim()) return true
     return !isClaudeChatVisibleMessage({ type: data.type, subtype: data.subtype })
 }
 
@@ -409,6 +497,22 @@ export function normalizeAgentRecord(
                     type: 'turn-duration',
                     durationMs: asNumber(data.durationMs) ?? 0,
                     targetMessageId: asString(data.messageId) ?? undefined
+                },
+                isSidechain: false,
+                meta
+            }
+        }
+        if (data.type === 'system' && data.subtype === 'away_summary') {
+            // Recap text lives in `content`. Empty recaps are dropped upstream by
+            // isSkippableAgentContent, so content is a non-empty string here.
+            return {
+                id: messageId,
+                localId,
+                createdAt,
+                role: 'event',
+                content: {
+                    type: 'recap',
+                    text: asString(data.content) ?? ''
                 },
                 isSidechain: false,
                 meta
@@ -484,7 +588,56 @@ export function normalizeAgentRecord(
             }
         }
 
+        if (data.type === 'generated-image') {
+            const imageId = asString(data.imageId ?? data.image_id)
+            if (!imageId) return null
+            const uuid = asString(data.id) ?? messageId
+            return {
+                id: messageId,
+                localId,
+                createdAt,
+                role: 'agent',
+                isSidechain: false,
+                content: [{
+                    type: 'generated-image',
+                    imageId,
+                    fileName: asString(data.fileName ?? data.file_name) ?? 'generated-image',
+                    mimeType: asString(data.mimeType ?? data.mime_type),
+                    uuid,
+                    parentUUID: null
+                }],
+                meta
+            }
+        }
+
+        if (data.type === 'error' && typeof data.message === 'string') {
+            return {
+                id: messageId,
+                localId,
+                createdAt,
+                role: 'event',
+                content: {
+                    type: 'error',
+                    message: data.message
+                },
+                isSidechain: false,
+                meta
+            }
+        }
+
         if (data.type === 'message' && typeof data.message === 'string') {
+            const review = parseCodexReviewMessage(data.message)
+            if (review) {
+                return {
+                    id: messageId,
+                    localId,
+                    createdAt,
+                    role: 'agent',
+                    isSidechain: false,
+                    content: [{ type: 'codex-review', review, uuid: messageId, parentUUID: null }],
+                    meta
+                }
+            }
             return {
                 id: messageId,
                 localId,
@@ -497,13 +650,14 @@ export function normalizeAgentRecord(
         }
 
         if (data.type === 'reasoning' && typeof data.message === 'string') {
+            const streamId = asString(data.id) ?? messageId
             return {
                 id: messageId,
                 localId,
                 createdAt,
                 role: 'agent',
                 isSidechain: false,
-                content: [{ type: 'reasoning', text: data.message, uuid: messageId, parentUUID: null }],
+                content: [{ type: 'reasoning', text: data.message, uuid: messageId, streamId, parentUUID: null }],
                 meta
             }
         }
@@ -612,6 +766,45 @@ export function normalizeAgentRecord(
                     uuid,
                     parentUUID: null
                 }],
+                meta
+            }
+        }
+
+        if (data.type === 'plan') {
+            const plan = normalizePlanEntries(data.entries ?? data.items ?? data)
+            if (plan.length === 0) return null
+            const uuid = asString(data.id) ?? messageId
+            return {
+                id: messageId,
+                localId,
+                createdAt,
+                role: 'agent',
+                isSidechain: false,
+                content: [
+                    {
+                        type: 'tool-call',
+                        id: 'cursor-plan-state',
+                        name: 'update_plan',
+                        input: {
+                            plan,
+                            source: 'cursor'
+                        },
+                        description: null,
+                        uuid,
+                        parentUUID: null
+                    },
+                    {
+                        type: 'tool-result',
+                        tool_use_id: 'cursor-plan-state',
+                        content: {
+                            plan,
+                            source: 'cursor'
+                        },
+                        is_error: false,
+                        uuid,
+                        parentUUID: null
+                    }
+                ],
                 meta
             }
         }

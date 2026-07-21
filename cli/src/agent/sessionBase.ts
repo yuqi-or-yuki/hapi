@@ -21,11 +21,12 @@ export type AgentSessionBaseOptions<Mode> = {
     mode?: 'local' | 'remote';
     sessionLabel: string;
     sessionIdLabel: string;
-    applySessionIdToMetadata: (metadata: Metadata, sessionId: string) => Metadata;
+    applySessionIdToMetadata: (metadata: Metadata, sessionId: string, extras?: Partial<Metadata>) => Metadata;
     permissionMode?: SessionPermissionMode;
     model?: SessionModel;
     modelReasoningEffort?: SessionModelReasoningEffort;
     effort?: SessionEffort;
+    serviceTier?: string | null;
     collaborationMode?: SessionCollaborationMode;
 };
 
@@ -42,7 +43,7 @@ export class AgentSessionBase<Mode> {
     thinking: boolean = false;
 
     private sessionFoundCallbacks: ((sessionId: string) => void)[] = [];
-    private readonly applySessionIdToMetadata: (metadata: Metadata, sessionId: string) => Metadata;
+    private readonly applySessionIdToMetadata: (metadata: Metadata, sessionId: string, extras?: Partial<Metadata>) => Metadata;
     private readonly sessionLabel: string;
     private readonly sessionIdLabel: string;
     private keepAliveInterval: NodeJS.Timeout | null = null;
@@ -50,6 +51,7 @@ export class AgentSessionBase<Mode> {
     protected model?: SessionModel;
     protected modelReasoningEffort?: SessionModelReasoningEffort;
     protected effort?: SessionEffort;
+    protected serviceTier?: string | null;
     protected collaborationMode?: SessionCollaborationMode;
 
     constructor(opts: AgentSessionBaseOptions<Mode>) {
@@ -68,6 +70,7 @@ export class AgentSessionBase<Mode> {
         this.model = opts.model;
         this.modelReasoningEffort = opts.modelReasoningEffort;
         this.effort = opts.effort;
+        this.serviceTier = opts.serviceTier;
         this.collaborationMode = opts.collaborationMode;
 
         this.queue.onBatchConsumed = (localIds) => this.client.emitMessagesConsumed(localIds);
@@ -103,9 +106,9 @@ export class AgentSessionBase<Mode> {
         this._onModeChange(mode);
     };
 
-    onSessionFound = (sessionId: string) => {
+    onSessionFound = (sessionId: string, extras?: Partial<Metadata>) => {
         this.sessionId = sessionId;
-        this.client.updateMetadata((metadata) => this.applySessionIdToMetadata(metadata, sessionId));
+        this.client.updateMetadata((metadata) => this.applySessionIdToMetadata(metadata, sessionId, extras));
         logger.debug(`[${this.sessionLabel}] ${this.sessionIdLabel} session ID ${sessionId} added to metadata`);
 
         for (const callback of this.sessionFoundCallbacks) {
@@ -137,6 +140,7 @@ export class AgentSessionBase<Mode> {
             model?: SessionModel
             modelReasoningEffort?: SessionModelReasoningEffort
             effort?: SessionEffort
+            serviceTier?: string | null
             collaborationMode?: SessionCollaborationMode
         } | undefined {
         if (
@@ -144,6 +148,7 @@ export class AgentSessionBase<Mode> {
             && this.model === undefined
             && this.modelReasoningEffort === undefined
             && this.effort === undefined
+            && this.serviceTier === undefined
             && this.collaborationMode === undefined
         ) {
             return undefined;
@@ -153,6 +158,7 @@ export class AgentSessionBase<Mode> {
             model: this.model,
             modelReasoningEffort: this.modelReasoningEffort,
             effort: this.effort,
+            serviceTier: this.serviceTier,
             collaborationMode: this.collaborationMode
         };
     }
@@ -171,6 +177,14 @@ export class AgentSessionBase<Mode> {
 
     getEffort(): SessionEffort | undefined {
         return this.effort;
+    }
+
+    getServiceTier(): string | null | undefined {
+        return this.serviceTier;
+    }
+
+    setServiceTier(serviceTier: string | null): void {
+        this.serviceTier = serviceTier;
     }
 
     getCollaborationMode(): SessionCollaborationMode | undefined {

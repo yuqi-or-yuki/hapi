@@ -10,9 +10,9 @@ import packageJson from '../../package.json';
 import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { isBunCompiled, projectPath } from '@/projectPath';
-import { isProcessAlive, killProcess } from '@/utils/process';
+import { isProcessAlive, isHapiRunnerProcess, killProcess } from '@/utils/process';
 import { configuration } from '@/configuration';
-import { hashRunnerCliApiToken, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
+import { hashRunnerCliApiToken, hashRunnerExtraHeaders, isRunnerStateCompatibleWithIdentity } from './runnerIdentity';
 
 export function getInstalledCliMtimeMs(): number | undefined {
   if (isBunCompiled()) {
@@ -143,12 +143,12 @@ export async function checkIfRunnerRunningAndCleanupStaleState(): Promise<boolea
     return false;
   }
 
-  // Check if the runner is running
-  if (isProcessAlive(state.pid)) {
+  // Verify PID is alive AND belongs to hapi (not a reused PID from another process)
+  if (isHapiRunnerProcess(state.pid)) {
     return true;
   }
 
-  logger.debug('[RUNNER RUN] Runner PID not running, cleaning up state');
+  logger.debug('[RUNNER RUN] Runner PID not running or not a hapi process, cleaning up state');
   await cleanupRunnerState();
   return false;
 }
@@ -185,24 +185,42 @@ export async function isRunnerRunningCurrentlyInstalledHappyVersion(): Promise<b
   const currentMachineId = settings.machineId;
   
   try {
-    const currentCliMtimeMs = getInstalledCliMtimeMs();
-    if (typeof currentCliMtimeMs === 'number' && typeof state.startedWithCliMtimeMs === 'number') {
-      logger.debug(`[RUNNER CONTROL] Current CLI mtime: ${currentCliMtimeMs}, Runner started with mtime: ${state.startedWithCliMtimeMs}`);
-      if (currentCliMtimeMs !== state.startedWithCliMtimeMs) {
-        return false;
-      }
+    // When HAPI_DISABLE_VERSION_HANDOFF=1 is set on the live runner (operator
+    // owns supervision via systemd/tmux/custom rebuild pipelines), a fresh CLI invocation must NOT
+    // treat the running runner as stale just because source mtimes shifted.
+    // Otherwise `hapi runner start` would kill the live runner mid-rebuild.
+    //
+    // Per Codex review #814 [Major]: the env var is commonly only set on the
+    // supervising service (systemd unit file), NOT on the operator's
+    // interactive shell. To honour the running runner's opt-out from any
+    // caller, OR the live env-var check with the persisted-at-start snapshot
+    // in state.startedWithVersionHandoffDisabled.
+    if (
+      process.env.HAPI_DISABLE_VERSION_HANDOFF === '1'
+      || state.startedWithVersionHandoffDisabled === true
+    ) {
+      logger.debug('[RUNNER CONTROL] Version handoff disabled (env or persisted state), skipping mtime/version drift check');
     } else {
-      const currentCliVersion = packageJson.version;
-      logger.debug(`[RUNNER CONTROL] Current CLI version: ${currentCliVersion}, Runner started with version: ${state.startedWithCliVersion}`);
-      if (currentCliVersion !== state.startedWithCliVersion) {
-        return false;
+      const currentCliMtimeMs = getInstalledCliMtimeMs();
+      if (typeof currentCliMtimeMs === 'number' && typeof state.startedWithCliMtimeMs === 'number') {
+        logger.debug(`[RUNNER CONTROL] Current CLI mtime: ${currentCliMtimeMs}, Runner started with mtime: ${state.startedWithCliMtimeMs}`);
+        if (currentCliMtimeMs !== state.startedWithCliMtimeMs) {
+          return false;
+        }
+      } else {
+        const currentCliVersion = packageJson.version;
+        logger.debug(`[RUNNER CONTROL] Current CLI version: ${currentCliVersion}, Runner started with version: ${state.startedWithCliVersion}`);
+        if (currentCliVersion !== state.startedWithCliVersion) {
+          return false;
+        }
       }
     }
 
     const currentIdentityMatches = isRunnerStateCompatibleWithIdentity(state, {
       apiUrl: currentApiUrl,
       machineId: currentMachineId,
-      cliApiTokenHash: hashRunnerCliApiToken(currentCliApiToken)
+      cliApiTokenHash: hashRunnerCliApiToken(currentCliApiToken),
+      extraHeadersHash: hashRunnerExtraHeaders(configuration.extraHeaders)
     });
     logger.debug(`[RUNNER CONTROL] Runner identity match: ${currentIdentityMatches}`, {
       currentApiUrl,
@@ -211,27 +229,42 @@ export async function isRunnerRunningCurrentlyInstalledHappyVersion(): Promise<b
       runnerStartedWithMachineId: state.startedWithMachineId
     });
     return currentIdentityMatches;
-    
-    // PREVIOUS IMPLEMENTATION - Keeping this commented in case we need it
-    // Kirill does not understand how the upgrade of npm packages happen and whether 
-    // we will get a new path or not when hapi is upgraded globally.
-    // If reading package.json doesn't work correctly after npm upgrades, 
-    // we can revert to spawning a process (but should add timeout and cleanup!)
-    /*
-    const { spawnHappyCLI } = await import('@/utils/spawnHappyCLI');
-    const happyProcess = spawnHappyCLI(['--version'], { stdio: 'pipe' });
-    let version: string | null = null;
-    happyProcess.stdout?.on('data', (data) => {
-      version = data.toString().trim();
-    });
-    await new Promise(resolve => happyProcess.stdout?.on('close', resolve));
-    logger.debug(`[RUNNER CONTROL] Current CLI version: ${version}, Runner started with version: ${state.startedWithCliVersion}`);
-    return version === state.startedWithCliVersion;
-    */
   } catch (error) {
     logger.debug('[RUNNER CONTROL] Error checking runner version', error);
     return false;
   }
+}
+
+/**
+ * Poll the runner state file waiting for a different PID to take ownership.
+ * Used by the self-restart handoff in run.ts so the dying runner does not exit
+ * until its replacement has actually come up and written its own state.
+ *
+ * Returns true when runner.state.json shows a different (and live) PID than
+ * `oldPid`, false on timeout.
+ */
+export async function waitForRunnerHandoff(
+  oldPid: number,
+  options: { timeoutMs?: number; pollIntervalMs?: number } = {}
+): Promise<boolean> {
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 500;
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    try {
+      const state = await readRunnerState();
+      if (state && state.pid !== oldPid && isProcessAlive(state.pid)) {
+        logger.debug(`[RUNNER CONTROL] Handoff confirmed: new runner PID ${state.pid} replaced ${oldPid}`);
+        return true;
+      }
+    } catch (error) {
+      logger.debug('[RUNNER CONTROL] Error polling runner state during handoff wait', error);
+    }
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
+  logger.debug(`[RUNNER CONTROL] Handoff timeout: no replacement runner registered within ${timeoutMs}ms`);
+  return false;
 }
 
 export async function cleanupRunnerState(): Promise<void> {

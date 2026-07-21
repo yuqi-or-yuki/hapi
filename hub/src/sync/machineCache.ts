@@ -1,41 +1,36 @@
-import { z } from 'zod'
+import type { Machine, MachinePatch } from '@hapi/protocol/types'
+import { MachineHealthSchema, MachineMetadataSchema, RunnerStateSchema } from '@hapi/protocol/schemas'
 import type { Store } from '../store'
 import { clampAliveTime } from './aliveTime'
 import { EventPublisher } from './eventPublisher'
 
-const machineMetadataSchema = z.object({
-    host: z.string().optional(),
-    platform: z.string().optional(),
-    happyCliVersion: z.string().optional(),
-    displayName: z.string().optional(),
-    homeDir: z.string().optional(),
-    happyHomeDir: z.string().optional(),
-    happyLibDir: z.string().optional(),
-    workspaceRoot: z.string().optional(),
-    workspaceRoots: z.array(z.string()).optional()
-})
+type MachineAlivePayload = {
+    machineId: string
+    time: number
+    health?: unknown
+}
 
-export interface Machine {
-    id: string
-    namespace: string
-    seq: number
-    createdAt: number
-    updatedAt: number
-    active: boolean
-    activeAt: number
-    metadata: {
-        host: string
-        platform: string
-        happyCliVersion: string
-        displayName?: string
-        homeDir?: string
-        happyHomeDir?: string
-        happyLibDir?: string
-        workspaceRoots?: string[]
-    } | null
-    metadataVersion: number
-    runnerState: unknown | null
-    runnerStateVersion: number
+function parseMachineHealth(value: unknown): Machine['health'] {
+    const parsed = MachineHealthSchema.safeParse(value)
+    return parsed.success ? parsed.data : null
+}
+
+function healthDisplayChanged(
+    before: Machine['health'] | undefined,
+    after: Machine['health'] | null | undefined
+): boolean {
+    if (!before && !after) {
+        return false
+    }
+    if (!before || !after) {
+        return true
+    }
+
+    return before.load1m !== after.load1m
+        || before.cpuPercent !== after.cpuPercent
+        || before.memoryPercent !== after.memoryPercent
+        || before.cpuCount !== after.cpuCount
+        || before.uptimeSeconds !== after.uptimeSeconds
 }
 
 export class MachineCache {
@@ -94,33 +89,22 @@ export class MachineCache {
         const existing = this.machines.get(machineId)
 
         const metadata = (() => {
-            const parsed = machineMetadataSchema.safeParse(stored.metadata)
+            const parsed = MachineMetadataSchema.safeParse(stored.metadata)
             if (!parsed.success) return null
             const data = parsed.data
-            const host = typeof data.host === 'string' ? data.host : 'unknown'
-            const platform = typeof data.platform === 'string' ? data.platform : 'unknown'
-            const happyCliVersion = typeof data.happyCliVersion === 'string' ? data.happyCliVersion : 'unknown'
-            const displayName = typeof data.displayName === 'string' ? data.displayName : undefined
-            const homeDir = typeof data.homeDir === 'string' ? data.homeDir : undefined
-            const happyHomeDir = typeof data.happyHomeDir === 'string' ? data.happyHomeDir : undefined
-            const happyLibDir = typeof data.happyLibDir === 'string' ? data.happyLibDir : undefined
             const workspaceRoots = Array.from(new Set(
-                Array.isArray(data.workspaceRoots)
-                    ? data.workspaceRoots.filter((path): path is string => typeof path === 'string' && path.trim().length > 0)
-                    : typeof data.workspaceRoot === 'string'
-                        ? [data.workspaceRoot]
-                        : []
+                (data.workspaceRoots ?? []).filter((path) => path.trim().length > 0)
             ))
             return {
-                host,
-                platform,
-                happyCliVersion,
-                displayName,
-                homeDir,
-                happyHomeDir,
-                happyLibDir,
+                ...data,
                 workspaceRoots: workspaceRoots.length > 0 ? workspaceRoots : undefined
             }
+        })()
+
+        const runnerState = (() => {
+            if (stored.runnerState == null) return null
+            const parsed = RunnerStateSchema.safeParse(stored.runnerState)
+            return parsed.success ? parsed.data : null
         })()
 
         const storedActiveAt = stored.activeAt ?? stored.createdAt
@@ -137,8 +121,9 @@ export class MachineCache {
             activeAt: useStoredActivity ? storedActiveAt : (existingActiveAt || storedActiveAt),
             metadata,
             metadataVersion: stored.metadataVersion,
-            runnerState: stored.runnerState,
-            runnerStateVersion: stored.runnerStateVersion
+            runnerState,
+            runnerStateVersion: stored.runnerStateVersion,
+            health: existing?.health ?? null
         }
 
         this.machines.set(machineId, machine)
@@ -153,7 +138,7 @@ export class MachineCache {
         }
     }
 
-    handleMachineAlive(payload: { machineId: string; time: number }): void {
+    handleMachineAlive(payload: MachineAlivePayload): void {
         const t = clampAliveTime(payload.time)
         if (!t) return
 
@@ -161,12 +146,21 @@ export class MachineCache {
         if (!machine) return
 
         const wasActive = machine.active
+        const previousHealth = machine.health ?? null
         machine.active = true
         machine.activeAt = Math.max(machine.activeAt, t)
 
+        if (payload.health !== undefined) {
+            machine.health = parseMachineHealth(payload.health)
+        }
+
         const now = Date.now()
         const lastBroadcastAt = this.lastBroadcastAtByMachineId.get(machine.id) ?? 0
-        const shouldBroadcast = (!wasActive && machine.active) || (now - lastBroadcastAt > 10_000)
+        const healthChanged = payload.health !== undefined
+            && healthDisplayChanged(previousHealth, machine.health)
+        const shouldBroadcast = (!wasActive && machine.active)
+            || healthChanged
+            || (now - lastBroadcastAt > 10_000)
         if (shouldBroadcast) {
             this.lastBroadcastAtByMachineId.set(machine.id, now)
             this.publisher.emit({ type: 'machine-updated', machineId: machine.id, data: machine })
@@ -180,7 +174,13 @@ export class MachineCache {
             if (!machine.active) continue
             if (now - machine.activeAt <= machineTimeoutMs) continue
             machine.active = false
-            this.publisher.emit({ type: 'machine-updated', machineId: machine.id, data: { active: false } })
+            this.publisher.emit({
+                type: 'machine-updated',
+                machineId: machine.id,
+                data: { active: false } satisfies MachinePatch
+            })
         }
     }
 }
+
+export type { Machine }

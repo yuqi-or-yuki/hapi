@@ -1,7 +1,32 @@
 import type { Database } from 'bun:sqlite'
 
 import type { StoredMessage } from './types'
-import { addMessage, cancelQueuedMessage, copySessionMessages, deleteQueuedMessageById, lookupQueuedMessage, getMessages, getMessagesAfter, getMessagesByPosition, getUninvokedLocalMessages, markMessagesInvoked, mergeSessionMessages, type CancelQueuedMessageResult, type LookupQueuedMessageResult } from './messages'
+import {
+    addMessage,
+    cancelQueuedMessage,
+    copySessionMessages,
+    deleteQueuedMessageById,
+    lookupQueuedMessage,
+    getMessages,
+    getFirstMessages,
+    getDeliverableMessagesAfter,
+    getMessagesByPosition,
+    getLocalMessageStates,
+    getUninvokedLocalMessages,
+    getMatureScheduledMessages,
+    getImmediateQueuedLocalMessages,
+    countFutureScheduledBySessionIds,
+    countFutureScheduledLocalMessages,
+    minFutureScheduledAtBySessionIds,
+    countMessages,
+    markMessagesInvoked,
+    mergeSessionMessages,
+    copyMessageToSession as copyStoredMessageToSession,
+    getAllMessages,
+    type CancelQueuedMessageResult,
+    type LookupQueuedMessageResult,
+    type LocalMessageState,
+} from './messages'
 
 export class MessageStore {
     private readonly db: Database
@@ -10,24 +35,68 @@ export class MessageStore {
         this.db = db
     }
 
-    addMessage(sessionId: string, content: unknown, localId?: string): StoredMessage {
-        return addMessage(this.db, sessionId, content, localId)
+    addMessage(sessionId: string, content: unknown, localId?: string, scheduledAt?: number | null): StoredMessage {
+        return addMessage(this.db, sessionId, content, localId, scheduledAt)
     }
 
-    getMessages(sessionId: string, limit: number = 200, beforeSeq?: number): StoredMessage[] {
-        return getMessages(this.db, sessionId, limit, beforeSeq)
+    copyMessageToSession(
+        sessionId: string,
+        message: Pick<StoredMessage, 'content' | 'createdAt' | 'localId' | 'invokedAt' | 'scheduledAt'>
+    ): StoredMessage {
+        // 中文注释：重复会话合并时需要保留源消息的时间戳和排队信息，因此走专门的复制入口而不是普通 addMessage。
+        return copyStoredMessageToSession(this.db, sessionId, message)
     }
 
-    getMessagesAfter(sessionId: string, afterSeq: number, limit: number = 200): StoredMessage[] {
-        return getMessagesAfter(this.db, sessionId, afterSeq, limit)
+    getAllMessages(sessionId: string): StoredMessage[] {
+        return getAllMessages(this.db, sessionId)
+    }
+
+    getMessages(sessionId: string, limit: number = 200): StoredMessage[] {
+        return getMessages(this.db, sessionId, limit)
+    }
+
+    getFirstMessages(sessionId: string, limit: number = 50): StoredMessage[] {
+        return getFirstMessages(this.db, sessionId, limit)
+    }
+
+    getDeliverableMessagesAfter(sessionId: string, afterSeq: number, now: number, limit: number = 200): StoredMessage[] {
+        return getDeliverableMessagesAfter(this.db, sessionId, afterSeq, now, limit)
     }
 
     getMessagesByPosition(sessionId: string, limit: number, before?: { at: number; seq: number }): StoredMessage[] {
         return getMessagesByPosition(this.db, sessionId, limit, before)
     }
 
+    getLocalMessageStates(sessionId: string, localIds: string[]): LocalMessageState[] {
+        return getLocalMessageStates(this.db, sessionId, localIds)
+    }
+
     getUninvokedLocalMessages(sessionId: string): StoredMessage[] {
         return getUninvokedLocalMessages(this.db, sessionId)
+    }
+
+    getMatureScheduledMessages(beforeTime: number): StoredMessage[] {
+        return getMatureScheduledMessages(this.db, beforeTime)
+    }
+
+    getImmediateQueuedLocalMessages(sessionId: string): StoredMessage[] {
+        return getImmediateQueuedLocalMessages(this.db, sessionId)
+    }
+
+    countFutureScheduledLocalMessages(sessionId: string, now: number = Date.now()): number {
+        return countFutureScheduledLocalMessages(this.db, sessionId, now)
+    }
+
+    countFutureScheduledBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
+        return countFutureScheduledBySessionIds(this.db, sessionIds, now)
+    }
+
+    minFutureScheduledAtBySessionIds(sessionIds: string[], now: number = Date.now()): Map<string, number> {
+        return minFutureScheduledAtBySessionIds(this.db, sessionIds, now)
+    }
+
+    countMessages(sessionId: string): number {
+        return countMessages(this.db, sessionId)
     }
 
     cancelQueuedMessage(sessionId: string, messageId: string): CancelQueuedMessageResult {

@@ -1,0 +1,314 @@
+/**
+ * Tests for the POST /sessions/:id/messages route.
+ *
+ * Covers:
+ * - #2  server-side scheduledAt upper bound (7-day cap)
+ * - #4  Zod error details exposed in response body (issues field)
+ */
+import { describe, expect, it } from 'bun:test'
+import { Hono } from 'hono'
+import type { SyncEngine } from '../../sync/syncEngine'
+import type { WebAppEnv } from '../middleware/auth'
+import { createMessagesRoutes } from './messages'
+
+// TS note: engine is cast to unknown→SyncEngine so test helpers don't need to
+// satisfy the full SyncEngine shape (only the subset the route under test uses).
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function createApp(opts: {
+    active?: boolean
+    sendMessage?: (sessionId: string, payload: unknown) => Promise<void>
+    getQueuedState?: (sessionId: string, localIds: string[]) => {
+        queuedLocalIds: string[]
+        invokedLocalMessages: Array<{ localId: string; invokedAt: number }>
+    }
+}) {
+    const sentMessages: Array<{ sessionId: string; payload: unknown }> = []
+    const queuedStateCalls: Array<{ sessionId: string; localIds: string[] }> = []
+    const sendMessage = opts.sendMessage ?? (async (sessionId: string, payload: unknown) => {
+        sentMessages.push({ sessionId, payload })
+    })
+    const getQueuedState = opts.getQueuedState ?? ((sessionId: string, localIds: string[]) => {
+        queuedStateCalls.push({ sessionId, localIds })
+        return {
+            queuedLocalIds: localIds.filter((localId) => localId.startsWith('queued-')),
+            invokedLocalMessages: localIds
+                .filter((localId) => localId.startsWith('invoked-'))
+                .map((localId) => ({ localId, invokedAt: 1_000 }))
+        }
+    })
+
+    const engine = {
+        resolveSessionAccess: () => ({
+            ok: true,
+            sessionId: 'session-1',
+            session: { id: 'session-1', active: opts.active !== false }
+        }),
+        sendMessage,
+        getQueuedState,
+        cancelQueuedMessage: async () => ({ status: 'cancelled' }),
+        getMessagesPage: () => ({ messages: [], page: {} }),
+    } as unknown as SyncEngine
+
+    const app = new Hono<WebAppEnv>()
+    app.use('*', async (c, next) => {
+        c.set('namespace', 'default')
+        await next()
+    })
+    app.route('/api', createMessagesRoutes(() => engine as SyncEngine))
+
+    return { app, sentMessages, queuedStateCalls }
+}
+
+// ---------------------------------------------------------------------------
+// #2 server-side scheduledAt upper bound
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/messages — #2 scheduledAt upper bound', () => {
+    it('rejects scheduledAt more than 7 days in the future with 400 and clear message', async () => {
+        const { app } = createApp({})
+
+        const eightDaysMs = Date.now() + 8 * 24 * 60 * 60 * 1000
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'hello', localId: 'local-1', scheduledAt: eightDaysMs })
+        })
+
+        expect(response.status).toBe(400)
+        const body = await response.json() as { error: string; issues?: { _errors?: string[] } }
+        expect(body.error).toBe('Invalid body')
+        // #4: issues field must be present
+        expect(body.issues).toBeDefined()
+        // The 7-day message must appear somewhere in the issues
+        const issuesStr = JSON.stringify(body.issues)
+        expect(issuesStr).toContain('7 days')
+    })
+
+    it('accepts scheduledAt exactly at the 7-day boundary (inclusive)', async () => {
+        const { app, sentMessages } = createApp({})
+
+        // Use slightly less than 7 days to avoid flakiness at the exact boundary
+        const nearlySevenDays = Date.now() + 7 * 24 * 60 * 60 * 1000 - 1000
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'hello', localId: 'local-2', scheduledAt: nearlySevenDays })
+        })
+
+        expect(response.status).toBe(200)
+        expect(sentMessages).toHaveLength(1)
+    })
+
+    it('accepts null scheduledAt (immediate send)', async () => {
+        const { app, sentMessages } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'hello', localId: 'local-3', scheduledAt: null })
+        })
+
+        expect(response.status).toBe(200)
+        expect(sentMessages).toHaveLength(1)
+    })
+
+    it('accepts missing scheduledAt (immediate send)', async () => {
+        const { app, sentMessages } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'hello' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(sentMessages).toHaveLength(1)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// #4 Zod error details in response body
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/messages — #4 Zod error issues in response', () => {
+    it('returns issues when scheduledAt is set but localId is missing', async () => {
+        const { app } = createApp({})
+
+        const futureMs = Date.now() + 60_000
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'hello', scheduledAt: futureMs })
+        })
+
+        expect(response.status).toBe(400)
+        const body = await response.json() as { error: string; issues?: unknown }
+        expect(body.error).toBe('Invalid body')
+        expect(body.issues).toBeDefined()
+        const issuesStr = JSON.stringify(body.issues)
+        expect(issuesStr).toContain('localId')
+    })
+
+    it('returns issues with a non-string text field', async () => {
+        const { app } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 123 })
+        })
+
+        expect(response.status).toBe(400)
+        const body = await response.json() as { error: string; issues?: unknown }
+        expect(body.error).toBe('Invalid body')
+        expect(body.issues).toBeDefined()
+    })
+})
+
+// ---------------------------------------------------------------------------
+// HAPI Bot R3 finding 3: scheduledAt + attachments rejected
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/messages — scheduledAt + attachments rejected', () => {
+    it('rejects scheduledAt combined with non-empty attachments with 400', async () => {
+        const { app, sentMessages } = createApp({})
+
+        const futureMs = Date.now() + 60_000
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                text: 'hello',
+                localId: 'local-att',
+                scheduledAt: futureMs,
+                attachments: [{ id: 'att-1', filename: 'a.png', mimeType: 'image/png', size: 10, path: '/tmp/a.png' }]
+            })
+        })
+
+        expect(response.status).toBe(400)
+        const body = await response.json() as { error: string; issues?: unknown }
+        expect(body.error).toBe('Invalid body')
+        const issuesStr = JSON.stringify(body.issues)
+        expect(issuesStr).toContain('attachments')
+        expect(sentMessages).toHaveLength(0)
+    })
+
+    it('accepts scheduledAt with empty attachments array', async () => {
+        const { app, sentMessages } = createApp({})
+
+        const futureMs = Date.now() + 60_000
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                text: 'hello',
+                localId: 'local-att-2',
+                scheduledAt: futureMs,
+                attachments: []
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(sentMessages).toHaveLength(1)
+    })
+
+    it('accepts immediate send with attachments (no scheduledAt)', async () => {
+        const { app, sentMessages } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                text: 'hello',
+                attachments: [{ id: 'att-2', filename: 'b.png', mimeType: 'image/png', size: 10, path: '/tmp/b.png' }]
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(sentMessages).toHaveLength(1)
+    })
+})
+
+// ---------------------------------------------------------------------------
+// #918: inactive session 409 carries a machine-readable code
+// ---------------------------------------------------------------------------
+
+describe('POST /api/sessions/:id/messages — inactive session response shape', () => {
+    it('returns 409 with code "session_inactive" when sending to an inactive session', async () => {
+        const { app, sentMessages } = createApp({ active: false })
+
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'hello', localId: 'local-inactive' })
+        })
+
+        expect(response.status).toBe(409)
+        const body = await response.json() as { error: string; code: string }
+        expect(body.error).toBe('Session is inactive')
+        // Web client discriminates this branch via `code` without string-matching
+        // the human message; see useSendMessage onError consumer in router.tsx.
+        expect(body.code).toBe('session_inactive')
+        expect(sentMessages).toHaveLength(0)
+    })
+})
+
+describe('POST /api/sessions/:id/messages/queued-state', () => {
+    it('deduplicates local IDs, forwards the session, and works for inactive sessions', async () => {
+        const { app, queuedStateCalls } = createApp({ active: false })
+
+        const response = await app.request('/api/sessions/session-1/messages/queued-state', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                localIds: ['queued-2', 'missing-1', 'queued-2', 'invoked-1', 'queued-1']
+            })
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({
+            queuedLocalIds: ['queued-2', 'queued-1'],
+            invokedLocalMessages: [{ localId: 'invoked-1', invokedAt: 1_000 }]
+        })
+        expect(queuedStateCalls).toEqual([{
+            sessionId: 'session-1',
+            localIds: ['queued-2', 'missing-1', 'invoked-1', 'queued-1']
+        }])
+    })
+
+    it('accepts an empty candidate list as a no-op', async () => {
+        const { app, queuedStateCalls } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages/queued-state', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ localIds: [] })
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ queuedLocalIds: [], invokedLocalMessages: [] })
+        expect(queuedStateCalls).toHaveLength(0)
+    })
+
+    it.each([
+        ['an empty local ID', { localIds: [''] }],
+        ['a non-array localIds value', { localIds: 'queued-1' }],
+        ['more than 1000 local IDs', { localIds: Array.from({ length: 1001 }, (_, i) => `local-${i}`) }]
+    ])('rejects %s', async (_label, body) => {
+        const { app, queuedStateCalls } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages/queued-state', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify(body)
+        })
+
+        expect(response.status).toBe(400)
+        expect(await response.json()).toMatchObject({ error: 'Invalid body' })
+        expect(queuedStateCalls).toHaveLength(0)
+    })
+})

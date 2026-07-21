@@ -4,6 +4,7 @@ import type { EnhancedMode } from './loop';
 
 const harness = vi.hoisted(() => ({
     notifications: [] as Array<{ method: string; params: unknown }>,
+    dispatchNotification: null as ((method: string, params: unknown) => void) | null,
     registerRequestCalls: [] as string[],
     requestHandlers: new Map<string, (params: unknown) => Promise<unknown> | unknown>(),
     initializeCalls: [] as unknown[],
@@ -13,22 +14,34 @@ const harness = vi.hoisted(() => ({
     collaborationModeResponse: { data: [{ mode: 'default' }, { mode: 'plan' }] } as unknown,
     failListCollaborationModes: false,
     startThreadIds: [] as string[],
+    startThreadParams: [] as Array<Record<string, unknown>>,
     resumeThreadIds: [] as string[],
+    resumeThreadParams: [] as Array<Record<string, unknown>>,
     startTurnThreadIds: [] as string[],
     startTurnParams: [] as Array<Record<string, unknown>>,
     startTurnErrors: [] as Error[],
     interruptedTurns: [] as Array<{ threadId: string; turnId: string }>,
+    interruptErrors: [] as Error[],
+    rollbackCalls: [] as Array<{ threadId: string; numTurns: number }>,
+    rollbackErrors: [] as Error[],
     compactThreadIds: [] as string[],
     goalSetCalls: [] as unknown[],
     goalGetCalls: [] as unknown[],
     goalClearCalls: [] as unknown[],
     goal: null as Record<string, unknown> | null,
+    suppressGoalNotifications: false,
     suppressTurnCompletion: false,
     remainingThreadSystemErrors: 0,
+    emitFailedCompletionAfterThreadSystemError: false,
+    emitCyberPolicyAfterThreadSystemError: false,
+    emitSafetyBuffering: false,
+    safetyBufferingFasterModel: null as string | null,
+    emitModelSafetyNotices: false,
     startTurnMessages: [] as string[],
     failResumeThreadIds: [] as string[],
     nextThreadSystemErrorMessage: null as string | null,
     failNextCompact: false,
+    deferCompactCompletion: false,
     deferThreadStatusNotifications: false,
     emitChildThreadEvents: false,
     emitChildUsageEvents: false,
@@ -41,10 +54,14 @@ const harness = vi.hoisted(() => ({
     emitSecondChildMessage: false,
     emitLateChildCommandAfterParentTool: false,
     emitParentUsageEvents: false,
+    emitParentGoalDuplicateEvents: false,
     emitChildNestedAgentTool: false,
     emitParentTitleChange: false,
     emitParentSpawnFailureWithoutAgentId: false,
     emitParentSpawnStartWithoutEnd: false,
+    emitParentSpawnRouterStderrError: false,
+    emitChildTaskStartedAfterParentSpawnStart: false,
+    emitSecondParentSpawnStartWithoutEnd: false,
     emitParentSendInputFailure: false,
     emitParentResumeSuccess: false,
     emitParentMcpImageResult: false,
@@ -58,6 +75,7 @@ const harness = vi.hoisted(() => ({
 vi.mock('./codexAppServerClient', () => {
     class MockCodexAppServerClient {
         private notificationHandler: ((method: string, params: unknown) => void) | null = null;
+        private stderrHandler: ((text: string) => void) | null = null;
 
         async connect(): Promise<void> {}
 
@@ -68,6 +86,11 @@ vi.mock('./codexAppServerClient', () => {
 
         setNotificationHandler(handler: ((method: string, params: unknown) => void) | null): void {
             this.notificationHandler = handler;
+            harness.dispatchNotification = handler;
+        }
+
+        setStderrHandler(handler: ((text: string) => void) | null): void {
+            this.stderrHandler = handler;
         }
 
         async listCollaborationModes(): Promise<unknown> {
@@ -91,15 +114,17 @@ vi.mock('./codexAppServerClient', () => {
             harness.requestHandlers.set(method, handler);
         }
 
-        async startThread(): Promise<{ thread: { id: string }; model: string }> {
+        async startThread(params?: Record<string, unknown>): Promise<{ thread: { id: string }; model: string }> {
             const id = `thread-${harness.startThreadIds.length + 1}`;
             harness.startThreadIds.push(id);
+            harness.startThreadParams.push(params ?? {});
             return { thread: { id }, model: 'gpt-5.4' };
         }
 
-        async resumeThread(params?: { threadId?: string }): Promise<{ thread: { id: string }; model: string }> {
-            const id = params?.threadId ?? 'thread-resumed';
+        async resumeThread(params?: Record<string, unknown>): Promise<{ thread: { id: string }; model: string }> {
+            const id = typeof params?.threadId === 'string' ? params.threadId : 'thread-resumed';
             harness.resumeThreadIds.push(id);
+            harness.resumeThreadParams.push(params ?? {});
             if (harness.failResumeThreadIds.includes(id)) {
                 throw new Error('resume failed');
             }
@@ -112,6 +137,9 @@ vi.mock('./codexAppServerClient', () => {
             if (harness.failNextCompact) {
                 harness.failNextCompact = false;
                 throw new Error('compact failed');
+            }
+            if (harness.deferCompactCompletion) {
+                return {};
             }
             const compacted = { threadId, turnId: `compact-${harness.compactThreadIds.length}` };
             harness.notifications.push({ method: 'thread/compacted', params: compacted });
@@ -133,8 +161,10 @@ vi.mock('./codexAppServerClient', () => {
                 updatedAt: 2
             };
             const notification = { threadId, goal: harness.goal };
-            harness.notifications.push({ method: 'thread/goal/updated', params: notification });
-            this.notificationHandler?.('thread/goal/updated', notification);
+            if (!harness.suppressGoalNotifications) {
+                harness.notifications.push({ method: 'thread/goal/updated', params: notification });
+                this.notificationHandler?.('thread/goal/updated', notification);
+            }
             return { goal: harness.goal };
         }
 
@@ -149,8 +179,10 @@ vi.mock('./codexAppServerClient', () => {
             harness.goal = null;
             if (cleared) {
                 const notification = { threadId: params?.threadId ?? 'thread-unknown' };
-                harness.notifications.push({ method: 'thread/goal/cleared', params: notification });
-                this.notificationHandler?.('thread/goal/cleared', notification);
+                if (!harness.suppressGoalNotifications) {
+                    harness.notifications.push({ method: 'thread/goal/cleared', params: notification });
+                    this.notificationHandler?.('thread/goal/cleared', notification);
+                }
             }
             return { cleared };
         }
@@ -182,7 +214,73 @@ vi.mock('./codexAppServerClient', () => {
                 } else {
                     notify();
                 }
+                if (harness.emitCyberPolicyAfterThreadSystemError) {
+                    const policyError = {
+                        threadId,
+                        turnId,
+                        error: {
+                            message: 'This content was flagged for possible cybersecurity risk.',
+                            codexErrorInfo: 'cyberPolicy'
+                        },
+                        willRetry: false
+                    };
+                    harness.notifications.push({ method: 'error', params: policyError });
+                    this.notificationHandler?.('error', policyError);
+
+                    const completed = {
+                        threadId,
+                        turnId,
+                        turn: { id: turnId, status: 'failed' }
+                    };
+                    harness.notifications.push({ method: 'turn/completed', params: completed });
+                    this.notificationHandler?.('turn/completed', completed);
+                } else if (harness.emitFailedCompletionAfterThreadSystemError) {
+                    const completed = {
+                        threadId,
+                        turnId,
+                        turn: { id: turnId, status: 'failed' }
+                    };
+                    harness.notifications.push({ method: 'turn/completed', params: completed });
+                    this.notificationHandler?.('turn/completed', completed);
+                }
                 return { turn: { id: turnId } };
+            }
+
+            if (harness.emitSafetyBuffering) {
+                harness.emitSafetyBuffering = false;
+                const notification = {
+                    threadId,
+                    turnId,
+                    model: 'gpt-5.4',
+                    useCases: ['cyber'],
+                    reasons: ['review'],
+                    showBufferingUi: true,
+                    fasterModel: harness.safetyBufferingFasterModel
+                };
+                harness.notifications.push({ method: 'model/safetyBuffering/updated', params: notification });
+                this.notificationHandler?.('model/safetyBuffering/updated', notification);
+                return { turn: { id: turnId } };
+            }
+
+            if (harness.emitModelSafetyNotices) {
+                harness.emitModelSafetyNotices = false;
+                const rerouted = {
+                    threadId,
+                    turnId,
+                    fromModel: 'gpt-5.4',
+                    toModel: 'gpt-5.4-codex',
+                    reason: 'highRiskCyberActivity'
+                };
+                harness.notifications.push({ method: 'model/rerouted', params: rerouted });
+                this.notificationHandler?.('model/rerouted', rerouted);
+
+                const verification = {
+                    threadId,
+                    turnId,
+                    verifications: ['trustedAccessForCyber']
+                };
+                harness.notifications.push({ method: 'model/verification', params: verification });
+                this.notificationHandler?.('model/verification', verification);
             }
 
             if (
@@ -217,6 +315,41 @@ vi.mock('./codexAppServerClient', () => {
             }
 
             if (params?.threadId === 'thread-1') {
+                if (harness.emitParentGoalDuplicateEvents) {
+                    const goalBase = {
+                        threadId,
+                        objective: 'keep benchmark work moving',
+                        status: 'active',
+                        tokenBudget: null,
+                        tokensUsed: 0,
+                        timeUsedSeconds: 0,
+                        createdAt: 1
+                    };
+                    for (let index = 0; index < 4; index += 1) {
+                        const notification = {
+                            threadId,
+                            goal: {
+                                ...goalBase,
+                                timeUsedSeconds: index,
+                                updatedAt: 2 + index
+                            }
+                        };
+                        harness.notifications.push({ method: 'thread/goal/updated', params: notification });
+                        this.notificationHandler?.('thread/goal/updated', notification);
+                    }
+                    const pausedNotification = {
+                        threadId,
+                        goal: {
+                            ...goalBase,
+                            status: 'paused',
+                            timeUsedSeconds: 4,
+                            updatedAt: 6
+                        }
+                    };
+                    harness.notifications.push({ method: 'thread/goal/updated', params: pausedNotification });
+                    this.notificationHandler?.('thread/goal/updated', pausedNotification);
+                }
+
                 if (harness.emitParentTitleChange) {
                     const titleStart = {
                         item: {
@@ -346,6 +479,42 @@ vi.mock('./codexAppServerClient', () => {
                     };
                     harness.notifications.push({ method: 'item/started', params: spawnStart });
                     this.notificationHandler?.('item/started', spawnStart);
+
+                    if (harness.emitSecondParentSpawnStartWithoutEnd) {
+                        const secondSpawnStart = {
+                            item: {
+                                id: 'second-spawn',
+                                type: 'collabAgentToolCall',
+                                tool: 'spawnAgent',
+                                prompt: 'do other side work',
+                                senderThreadId: threadId,
+                                receiverThreadIds: []
+                            },
+                            threadId,
+                            turnId
+                        };
+                        harness.notifications.push({ method: 'item/started', params: secondSpawnStart });
+                        this.notificationHandler?.('item/started', secondSpawnStart);
+                    }
+
+                    if (harness.emitParentSpawnRouterStderrError) {
+                        this.stderrHandler?.(
+                            'codex_core::tools::router: error=Full-history forked agents inherit the parent agent type, model, and reasoning effort; ' +
+                            'omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.'
+                        );
+                    }
+
+                    if (harness.emitChildTaskStartedAfterParentSpawnStart) {
+                        const childStarted = {
+                            msg: {
+                                type: 'task_started',
+                                thread_id: 'child-thread',
+                                turn_id: 'child-turn'
+                            }
+                        };
+                        harness.notifications.push({ method: 'codex/event/task_started', params: childStarted });
+                        this.notificationHandler?.('codex/event/task_started', childStarted);
+                    }
 
                     if (harness.emitParentSpawnFailureWithoutAgentId) {
                         const spawnCompleted = {
@@ -724,6 +893,10 @@ vi.mock('./codexAppServerClient', () => {
             const threadId = params?.threadId ?? 'thread-unknown';
             const turnId = params?.turnId ?? 'turn-unknown';
             harness.interruptedTurns.push({ threadId, turnId });
+            const error = harness.interruptErrors.shift();
+            if (error) {
+                throw error;
+            }
             if (harness.emitTurnAbortedOnInterrupt) {
                 const interrupted = {
                     threadId,
@@ -735,6 +908,16 @@ vi.mock('./codexAppServerClient', () => {
                 this.notificationHandler?.('turn/completed', interrupted);
             }
             return {};
+        }
+
+        async rollbackThread(params?: { threadId?: string; numTurns?: number }): Promise<{ thread: { id: string } }> {
+            const threadId = params?.threadId ?? 'thread-unknown';
+            harness.rollbackCalls.push({ threadId, numTurns: params?.numTurns ?? 0 });
+            const error = harness.rollbackErrors.shift();
+            if (error) {
+                throw error;
+            }
+            return { thread: { id: threadId } };
         }
 
         async disconnect(): Promise<void> {}
@@ -770,10 +953,16 @@ function createMode(): EnhancedMode {
     };
 }
 
-function createSessionStub(messages = ['hello from launcher test'], mode = createMode()) {
+function createSessionStub(
+    messages = ['hello from launcher test'],
+    mode = createMode(),
+    isolateMessages = false
+) {
     const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
     messages.forEach((message, index) => {
-        if (index === 0 && messages.length > 1) {
+        if (isolateMessages) {
+            queue.pushIsolated(message, mode);
+        } else if (index === 0 && messages.length > 1) {
             queue.pushIsolateAndClear(message, mode);
         } else {
             queue.push(message, mode);
@@ -788,7 +977,9 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
     const foundSessionIds: string[] = [];
     const resetThreadCalls: string[] = [];
     const collaborationModes: Array<EnhancedMode['collaborationMode'] | undefined> = [];
+    let currentPermissionMode: EnhancedMode['permissionMode'] = mode.permissionMode;
     let currentModel: string | null | undefined = mode.model;
+    let currentModelReasoningEffort = mode.modelReasoningEffort;
     let currentCollaborationMode: EnhancedMode['collaborationMode'] | undefined = mode.collaborationMode;
     let agentState: FakeAgentState = {
         requests: {},
@@ -832,13 +1023,16 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
         sessionId: null as string | null,
         thinking: false,
         getPermissionMode() {
-            return 'default' as const;
+            return currentPermissionMode;
         },
         setModel(nextModel: string | null) {
             currentModel = nextModel;
         },
         getModel() {
             return currentModel;
+        },
+        setModelReasoningEffort(nextEffort: EnhancedMode['modelReasoningEffort']) {
+            currentModelReasoningEffort = nextEffort;
         },
         getCollaborationMode() {
             return currentCollaborationMode;
@@ -879,7 +1073,11 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
         foundSessionIds,
         resetThreadCalls,
         rpcHandlers,
+        setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
+            currentPermissionMode = nextMode;
+        },
         getModel: () => currentModel,
+        getModelReasoningEffort: () => currentModelReasoningEffort,
         getCollaborationMode: () => currentCollaborationMode,
         collaborationModes,
         getAgentState: () => agentState
@@ -889,6 +1087,7 @@ function createSessionStub(messages = ['hello from launcher test'], mode = creat
 describe('codexRemoteLauncher', () => {
     afterEach(() => {
         harness.notifications = [];
+        harness.dispatchNotification = null;
         harness.registerRequestCalls = [];
         harness.requestHandlers = new Map();
         harness.initializeCalls = [];
@@ -898,22 +1097,34 @@ describe('codexRemoteLauncher', () => {
         harness.collaborationModeResponse = { data: [{ mode: 'default' }, { mode: 'plan' }] };
         harness.failListCollaborationModes = false;
         harness.startThreadIds = [];
+        harness.startThreadParams = [];
         harness.resumeThreadIds = [];
+        harness.resumeThreadParams = [];
         harness.startTurnThreadIds = [];
         harness.startTurnParams = [];
         harness.startTurnErrors = [];
         harness.interruptedTurns = [];
+        harness.interruptErrors = [];
+        harness.rollbackCalls = [];
+        harness.rollbackErrors = [];
         harness.compactThreadIds = [];
         harness.goalSetCalls = [];
         harness.goalGetCalls = [];
         harness.goalClearCalls = [];
         harness.goal = null;
+        harness.suppressGoalNotifications = false;
         harness.suppressTurnCompletion = false;
+        harness.emitFailedCompletionAfterThreadSystemError = false;
+        harness.emitCyberPolicyAfterThreadSystemError = false;
+        harness.emitSafetyBuffering = false;
+        harness.safetyBufferingFasterModel = null;
+        harness.emitModelSafetyNotices = false;
         harness.startTurnMessages = [];
         harness.failResumeThreadIds = [];
         harness.remainingThreadSystemErrors = 0;
         harness.nextThreadSystemErrorMessage = null;
         harness.failNextCompact = false;
+        harness.deferCompactCompletion = false;
         harness.deferThreadStatusNotifications = false;
         harness.emitChildThreadEvents = false;
         harness.emitChildUsageEvents = false;
@@ -926,10 +1137,14 @@ describe('codexRemoteLauncher', () => {
         harness.emitSecondChildMessage = false;
         harness.emitLateChildCommandAfterParentTool = false;
         harness.emitParentUsageEvents = false;
+        harness.emitParentGoalDuplicateEvents = false;
         harness.emitChildNestedAgentTool = false;
         harness.emitParentTitleChange = false;
         harness.emitParentSpawnFailureWithoutAgentId = false;
         harness.emitParentSpawnStartWithoutEnd = false;
+        harness.emitParentSpawnRouterStderrError = false;
+        harness.emitChildTaskStartedAfterParentSpawnStart = false;
+        harness.emitSecondParentSpawnStartWithoutEnd = false;
         harness.emitParentSendInputFailure = false;
         harness.emitParentResumeSuccess = false;
         harness.emitParentMcpImageResult = false;
@@ -954,6 +1169,8 @@ describe('codexRemoteLauncher', () => {
         expect(exitReason).toBe('exit');
         expect(foundSessionIds).toContain('thread-1');
         expect(getModel()).toBe('gpt-5.4');
+        expect(harness.startThreadParams).toHaveLength(1);
+        expect(harness.startThreadParams[0]?.threadSource).toBe('user');
         expect(harness.initializeCalls).toEqual([{
             clientInfo: {
                 name: 'hapi-codex-client',
@@ -973,6 +1190,60 @@ describe('codexRemoteLauncher', () => {
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
         expect(thinkingChanges).toContain(true);
         expect(session.thinking).toBe(false);
+    });
+
+    it('routes app-server MCP elicitation through the existing user-input transport', async () => {
+        const { session, codexMessages, rpcHandlers, setPermissionMode } = createSessionStub();
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        const handler = harness.requestHandlers.get('mcpServer/elicitation/request');
+        expect(handler).toBeTypeOf('function');
+        const request = {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            serverName: 'qmd',
+            mode: 'form',
+            message: 'Allow the qmd MCP server to run tool "status"?',
+            _meta: null,
+            requestedSchema: {
+                type: 'object',
+                properties: {
+                    approval: {
+                        type: 'string',
+                        enum: ['allow', 'deny']
+                    }
+                },
+                required: ['approval']
+            }
+        };
+
+        setPermissionMode('yolo');
+        const response = handler?.(request);
+        await vi.waitFor(() => {
+            expect(codexMessages).toContainEqual(expect.objectContaining({
+                type: 'tool-call',
+                name: 'request_user_input'
+            }));
+        });
+        const requestMessage = codexMessages.find((message) => (
+            typeof message === 'object' && message !== null && 'name' in message && message.name === 'request_user_input'
+        )) as { callId: string };
+        await rpcHandlers.get('permission')?.({
+            id: requestMessage.callId,
+            approved: true,
+            answers: { approval: { answers: ['allow'] } }
+        });
+
+        await expect(response).resolves.toEqual({
+            action: 'accept',
+            content: {
+                approval: 'allow'
+            },
+            _meta: null
+        });
+
     });
 
     it('sends Codex plan collaboration mode when the app-server advertises it', async () => {
@@ -1125,6 +1396,8 @@ describe('codexRemoteLauncher', () => {
 
         expect(exitReason).toBe('exit');
         expect(foundSessionIds).toEqual(['thread-1']);
+        expect(harness.startThreadParams).toHaveLength(1);
+        expect(harness.startThreadParams[0]?.threadSource).toBe('user');
         expect(harness.startTurnParams).toHaveLength(0);
         expect(harness.goalSetCalls).toEqual([{
             threadId: 'thread-1',
@@ -1134,6 +1407,9 @@ describe('codexRemoteLauncher', () => {
         expect(sessionEvents).toContainEqual({
             type: 'message',
             message: 'Goal active'
+        });
+        expect(sessionEvents).not.toContainEqual({
+            type: 'ready'
         });
         expect(codexMessages).toEqual(expect.arrayContaining([
             expect.objectContaining({
@@ -1147,18 +1423,60 @@ describe('codexRemoteLauncher', () => {
         ]));
     });
 
-    it('shows unsupported message when goals feature cannot be enabled', async () => {
+    it('still attempts goal RPC when dynamic goals feature enablement is unsupported', async () => {
         harness.failSetFeatureEnablement = true;
         const { session, sessionEvents } = createSessionStub(['/goal improve benchmark coverage']);
 
         const exitReason = await codexRemoteLauncher(session as never);
 
         expect(exitReason).toBe('exit');
-        expect(harness.goalSetCalls).toHaveLength(0);
+        expect(harness.goalSetCalls).toEqual([{
+            threadId: 'thread-1',
+            objective: 'improve benchmark coverage',
+            status: 'active'
+        }]);
         expect(harness.startTurnParams).toHaveLength(0);
         expect(sessionEvents).toContainEqual({
             type: 'message',
-            message: 'Codex goals are not supported by this Codex runtime. Upgrade Codex or enable features.goals.'
+            message: 'Goal active'
+        });
+    });
+
+    it('forwards goal RPC responses when the app-server does not emit goal notifications', async () => {
+        harness.suppressGoalNotifications = true;
+        const { session, codexMessages } = createSessionStub(['/goal improve benchmark coverage']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(codexMessages).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                type: 'thread_goal_updated',
+                thread_id: 'thread-1',
+                goal: expect.objectContaining({
+                    objective: 'improve benchmark coverage',
+                    status: 'active'
+                })
+            })
+        ]));
+    });
+
+    it('does not emit ready when a goal command interrupts an active turn', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.emitTurnAbortedOnInterrupt = true;
+        const { session, sessionEvents } = createSessionStub(['first message', '/goal improve benchmark coverage']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.interruptedTurns).toEqual([{ threadId: 'thread-1', turnId: 'turn-1' }]);
+        expect(harness.goalSetCalls).toEqual([{
+            threadId: 'thread-1',
+            objective: 'improve benchmark coverage',
+            status: 'active'
+        }]);
+        expect(sessionEvents).not.toContainEqual({
+            type: 'ready'
         });
     });
 
@@ -1229,6 +1547,373 @@ describe('codexRemoteLauncher', () => {
             message: 'Task failed: Codex thread entered systemError'
         });
         expect(session.thinking).toBe(false);
+    });
+
+    it('still retries a generic systemError when an empty failed turn completion confirms it', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitFailedCompletionAfterThreadSystemError = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message', 'first message']);
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Task failed: Codex thread entered systemError; retrying same conversation (1/3)'
+        });
+        expect(session.thinking).toBe(false);
+    });
+
+    it('does not retry when a generic systemError is followed by a cyber-policy block', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitCyberPolicyAfterThreadSystemError = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1']);
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        const failureMessages = sessionEvents.filter((event) => event.type === 'message');
+        expect(failureMessages).toHaveLength(1);
+        expect(failureMessages[0]?.message).toContain('This content was flagged for possible cybersecurity risk.');
+        expect(failureMessages[0]?.message).toContain('https://openai.com/form/enterprise-trusted-access-for-cyber/');
+        expect(failureMessages[0]?.message).toContain('https://help.openai.com/en/articles/20001326');
+        expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('does not retry an explicitly non-retryable error even when its text is retryable', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(harness.startTurnMessages).toEqual(['first message']);
+        });
+
+        harness.dispatchNotification?.('error', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            error: { message: 'Selected model is at capacity' },
+            willRetry: false
+        });
+
+        await expect(running).resolves.toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Task failed: Selected model is at capacity'
+        });
+        expect(sessionEvents.some((event) => String(event.message ?? '').includes('retrying same conversation'))).toBe(false);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('retries a safety-buffered turn with the offered faster model only after user opt-in', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        harness.emitTurnAbortedOnInterrupt = true;
+        const {
+            session,
+            rpcHandlers,
+            getAgentState,
+            getModel,
+            getModelReasoningEffort
+        } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+
+        await vi.waitFor(() => {
+            expect(Object.values(getAgentState().requests)).toContainEqual(expect.objectContaining({
+                tool: 'request_user_input'
+            }));
+        });
+        expect(harness.startTurnThreadIds).toEqual(['thread-1']);
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Retry with a faster model']
+                }
+            }
+        });
+
+        await expect(running).resolves.toBe('exit');
+        expect(harness.interruptedTurns).toEqual([{ threadId: 'thread-1', turnId: 'turn-1' }]);
+        expect(harness.rollbackCalls).toEqual([{ threadId: 'thread-1', numTurns: 1 }]);
+        expect(harness.startTurnMessages).toEqual(['first message', 'first message']);
+        expect(harness.startTurnParams[1]).toMatchObject({
+            threadId: 'thread-1',
+            effort: 'low',
+            input: [{ type: 'text', text: 'first message' }],
+            collaborationMode: {
+                mode: 'default',
+                settings: {
+                    model: 'gpt-5.4-mini',
+                    reasoning_effort: 'low'
+                }
+            }
+        });
+        expect(getModel()).toBe('gpt-5.4-mini');
+        expect(getModelReasoningEffort()).toBe('low');
+    });
+
+    it('keeps the original safety-buffered turn running when the user dismisses the retry', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        const { session, rpcHandlers, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Keep waiting']
+                }
+            }
+        });
+
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: true,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(getAgentState().requests).toEqual({});
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: false,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: true,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
+    });
+
+    it('dismisses safety-buffering choices when hidden or when agent output starts', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        const { session, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+        const hiddenRequestId = Object.keys(getAgentState().requests)[0];
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: false,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await vi.waitFor(() => {
+            expect(getAgentState().requests).toEqual({});
+            expect(getAgentState().completedRequests[hiddenRequestId]).toMatchObject({
+                status: 'canceled',
+                reason: 'Safety buffering ended'
+            });
+        });
+
+        harness.dispatchNotification?.('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: true,
+            fasterModel: 'gpt-5.4-mini'
+        });
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+        const outputRequestId = Object.keys(getAgentState().requests)[0];
+        expect(outputRequestId).not.toBe(hiddenRequestId);
+
+        harness.dispatchNotification?.('item/agentMessage/delta', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            itemId: 'message-1',
+            delta: 'Visible response'
+        });
+        await vi.waitFor(() => {
+            expect(getAgentState().requests).toEqual({});
+            expect(getAgentState().completedRequests[outputRequestId]).toMatchObject({
+                status: 'canceled',
+                reason: 'Agent output started'
+            });
+        });
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
+    });
+
+    it('surfaces safety buffering without offering retry when fasterModel is null', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = null;
+        const { session, sessionEvents, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(sessionEvents).toContainEqual({
+                type: 'message',
+                message: 'Codex is taking extra time to review this request. Learn more: https://help.openai.com/en/articles/20001326'
+            });
+        });
+        expect(getAgentState().requests).toEqual({});
+        expect(harness.interruptedTurns).toEqual([]);
+        expect(harness.rollbackCalls).toEqual([]);
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
+    });
+
+    it('does not replay a safety-buffered turn when rollback is unavailable', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        harness.emitTurnAbortedOnInterrupt = true;
+        harness.rollbackErrors.push(new Error('thread/rollback is unsupported'));
+        const { session, sessionEvents, rpcHandlers, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Retry with a faster model']
+                }
+            }
+        });
+
+        await expect(running).resolves.toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(harness.rollbackCalls).toEqual([{ threadId: 'thread-1', numTurns: 1 }]);
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Failed to retry with a faster model: thread/rollback is unsupported'
+        });
+        await vi.waitFor(() => {
+            expect(sessionEvents).toContainEqual({ type: 'ready' });
+        });
+        expect(session.thinking).toBe(false);
+    });
+
+    it('keeps the original turn running when safety-buffering interrupt fails', async () => {
+        harness.emitSafetyBuffering = true;
+        harness.safetyBufferingFasterModel = 'gpt-5.4-mini';
+        harness.interruptErrors.push(new Error('turn/interrupt failed'));
+        const { session, sessionEvents, rpcHandlers, getAgentState } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(Object.keys(getAgentState().requests)).toHaveLength(1);
+        });
+
+        const requestId = Object.keys(getAgentState().requests)[0];
+        await rpcHandlers.get('permission')?.({
+            id: requestId,
+            approved: true,
+            answers: {
+                safety_buffering_action: {
+                    answers: ['Retry with a faster model']
+                }
+            }
+        });
+        await vi.waitFor(() => {
+            expect(sessionEvents).toContainEqual({
+                type: 'message',
+                message: 'Failed to retry with a faster model: turn/interrupt failed'
+            });
+        });
+
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(harness.rollbackCalls).toEqual([]);
+        expect(session.thinking).toBe(true);
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            turn: { id: 'turn-1', status: 'completed' }
+        });
+        await expect(running).resolves.toBe('exit');
+        expect(session.thinking).toBe(false);
+    });
+
+    it('surfaces model reroute and Trusted Access verification notices', async () => {
+        harness.emitModelSafetyNotices = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Codex rerouted the model from gpt-5.4 to gpt-5.4-codex (highRiskCyberActivity).'
+        });
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Your conversations have multiple flags for possible cybersecurity risk. Responses may take longer because extra safety checks are on. To get authorized for security work, join [Trusted Access for Cyber](https://chatgpt.com/cyber).'
+        });
     });
 
     it('compacts the same thread before retrying context-window overflow', async () => {
@@ -1336,12 +2021,14 @@ describe('codexRemoteLauncher', () => {
 
         expect(exitReason).toBe('exit');
         expect(harness.resumeThreadIds).toEqual(['thread-old']);
+        expect(harness.resumeThreadParams).toHaveLength(1);
+        expect(harness.resumeThreadParams[0]?.threadSource).toBeUndefined();
         expect(harness.startThreadIds).toEqual([]);
         expect(harness.startTurnThreadIds).toEqual([]);
         expect(session.sessionId).toBe('thread-old');
         expect(sessionEvents).toContainEqual({
             type: 'message',
-            message: 'Task failed: Codex conversation thread-old could not be resumed; no new conversation was created'
+            message: 'Task failed: Codex conversation thread-old could not be resumed; no new conversation was created. Reason: resume failed'
         });
         expect(session.thinking).toBe(false);
     });
@@ -1714,6 +2401,57 @@ describe('codexRemoteLauncher', () => {
         }));
     });
 
+    it('suppresses duplicate parent goal updates that only change runtime counters', async () => {
+        harness.emitParentGoalDuplicateEvents = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        const goalMessages = codexMessages.filter((message): message is Record<string, unknown> => {
+            return Boolean(message && typeof message === 'object' && (message as Record<string, unknown>).type === 'thread_goal_updated');
+        });
+        expect(goalMessages).toHaveLength(2);
+        expect(goalMessages).toEqual([
+            expect.objectContaining({
+                thread_id: 'thread-1',
+                goal: expect.objectContaining({
+                    status: 'active',
+                    updatedAt: 2
+                })
+            }),
+            expect.objectContaining({
+                thread_id: 'thread-1',
+                goal: expect.objectContaining({
+                    status: 'paused',
+                    updatedAt: 6
+                })
+            })
+        ]);
+    });
+
+    it('suppresses duplicate goal events from repeated show commands', async () => {
+        const { session, codexMessages } = createSessionStub([
+            '/goal keep benchmark work moving',
+            '/goal'
+        ]);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.goalSetCalls).toHaveLength(1);
+        expect(harness.goalGetCalls).toEqual([{ threadId: 'thread-1' }]);
+        const goalMessages = codexMessages.filter((message): message is Record<string, unknown> => {
+            return Boolean(message && typeof message === 'object' && (message as Record<string, unknown>).type === 'thread_goal_updated');
+        });
+        expect(goalMessages).toHaveLength(1);
+        expect(goalMessages[0]).toEqual(expect.objectContaining({
+            thread_id: 'thread-1',
+            goal: expect.objectContaining({
+                objective: 'keep benchmark work moving',
+                status: 'active'
+            })
+        }));
+    });
+
     it('marks parent usage and compact events with parent scope', async () => {
         harness.emitParentUsageEvents = true;
         const { session, codexMessages } = createSessionStub();
@@ -1801,6 +2539,83 @@ describe('codexRemoteLauncher', () => {
                 status: 'failed',
                 error: 'invalid spawn arguments'
             })
+        }));
+    });
+
+    it('marks pending spawn_agent cards failed with the Codex router argument error from stderr', async () => {
+        harness.emitParentSpawnStartWithoutEnd = true;
+        harness.emitParentSpawnRouterStderrError = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'spawn-error:failed-spawn',
+            cardId: 'failed-spawn',
+            status: 'failed',
+            statusText: 'Failed to start',
+            activityKind: 'failed',
+            error: 'Full-history forked agents inherit the parent agent type, model, and reasoning effort; ' +
+                'omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.'
+        }));
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'spawn-error:failed-spawn',
+            cardId: 'failed-spawn',
+            error: 'spawn_agent did not return an agent id before the Codex session ended'
+        }));
+    });
+
+    it('links a lone pending spawn_agent card from the child task_started event', async () => {
+        harness.emitParentSpawnStartWithoutEnd = true;
+        harness.emitChildTaskStartedAfterParentSpawnStart = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'child-thread',
+            cardId: 'failed-spawn',
+            status: 'running',
+            activity: 'Started',
+            activityKind: 'running'
+        }));
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'spawn-error:failed-spawn',
+            cardId: 'failed-spawn'
+        }));
+    });
+
+    it('does not guess a child task_started card when multiple spawn_agent starts are pending', async () => {
+        harness.emitParentSpawnStartWithoutEnd = true;
+        harness.emitSecondParentSpawnStartWithoutEnd = true;
+        harness.emitChildTaskStartedAfterParentSpawnStart = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'child-thread',
+            cardId: 'failed-spawn'
+        }));
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'child-thread',
+            cardId: 'second-spawn'
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'spawn-error:failed-spawn',
+            cardId: 'failed-spawn'
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'spawn-error:second-spawn',
+            cardId: 'second-spawn'
         }));
     });
 
@@ -1951,6 +2766,45 @@ describe('codexRemoteLauncher', () => {
             type: 'message',
             message: 'Compaction started'
         });
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Compaction completed'
+        });
+    });
+
+    it('does not start the next turn until manual compaction finishes', async () => {
+        harness.deferCompactCompletion = true;
+        const { session, sessionEvents } = createSessionStub([
+            'first message',
+            '/compact',
+            'after compact'
+        ], createMode(), true);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(harness.compactThreadIds).toEqual(['thread-1']);
+        });
+
+        expect(harness.startTurnMessages).toEqual(['first message']);
+        expect(sessionEvents).not.toContainEqual({
+            type: 'message',
+            message: 'Compaction completed'
+        });
+
+        harness.dispatchNotification?.('item/completed', {
+            threadId: 'thread-1',
+            turnId: 'compact-1',
+            item: { id: 'compact-item-1', type: 'contextCompaction' }
+        });
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turn: { id: 'compact-1', status: 'completed' }
+        });
+
+        const exitReason = await running;
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnMessages).toEqual(['first message', 'after compact']);
         expect(sessionEvents).toContainEqual({
             type: 'message',
             message: 'Compaction completed'

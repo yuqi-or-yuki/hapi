@@ -4,7 +4,7 @@ import type { SessionMetadataSummary } from '@/types/api'
 import type { ChatToolCall, ToolPermission } from '@/chat/types'
 import { usePlatform } from '@/hooks/usePlatform'
 import { Spinner } from '@/components/Spinner'
-import { isCodexFamilyFlavor } from '@/lib/agentFlavorUtils'
+import { isCodexFamilyFlavor } from '@hapi/protocol'
 import { getInputStringAny } from '@/lib/toolInputUtils'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -24,9 +24,15 @@ function isToolAllowedForSession(toolName: string, toolInput: unknown, allowedTo
 
 function isCodexSession(metadata: SessionMetadataSummary | null, toolName: string): boolean {
     return isCodexFamilyFlavor(metadata?.flavor)
+        || metadata?.flavor === 'cursor'
         || toolName.startsWith('Codex')
         || toolName.startsWith('Gemini')
         || toolName.startsWith('OpenCode')
+        || toolName.startsWith('Cursor')
+}
+
+function isClaudeSession(metadata: SessionMetadataSummary | null): boolean {
+    return metadata?.flavor === 'claude'
 }
 
 function formatPermissionSummary(permission: ToolPermission, toolName: string, toolInput: unknown, codex: boolean, t: (key: string) => string): string {
@@ -43,7 +49,7 @@ function formatPermissionSummary(permission: ToolPermission, toolName: string, t
 
     if (permission.status === 'approved') {
         if (permission.mode === 'acceptEdits') return t('tool.approvedAllowAllEdits')
-        if (isToolAllowedForSession(toolName, toolInput, permission.allowedTools)) return t('tool.approvedForSession')
+        if (permission.decision === 'approved_for_session' || isToolAllowedForSession(toolName, toolInput, permission.allowedTools)) return t('tool.approvedForSession')
         return t('tool.approved')
     }
 
@@ -106,6 +112,7 @@ export function PermissionFooter(props: {
     const [error, setError] = useState<string | null>(null)
 
     const codex = useMemo(() => isCodexSession(props.metadata, props.tool.name), [props.metadata, props.tool.name])
+    const claude = useMemo(() => isClaudeSession(props.metadata), [props.metadata])
 
     if (!permission) return null
 
@@ -136,9 +143,10 @@ export function PermissionFooter(props: {
         || toolName === 'NotebookEdit'
         || toolName === 'exit_plan_mode'
         || toolName === 'ExitPlanMode'
+        || toolName === 'CursorCreatePlan'
 
     const canAllowForSession = !codex && isPending && !hideAllowForSession
-    const canAllowAllEdits = !codex && isPending && isEditTool
+    const canAllowAllEdits = claude && isPending && isEditTool
 
     const approve = async () => {
         if (!isPending || loading || loadingAllEdits || loadingForSession) return
@@ -157,9 +165,13 @@ export function PermissionFooter(props: {
     const approveForSession = async () => {
         if (!canAllowForSession || loading || loadingAllEdits || loadingForSession) return
         setLoadingForSession(true)
-        const command = toolName === 'Bash' ? getInputStringAny(props.tool.input, ['command', 'cmd']) : null
-        const toolIdentifier = toolName === 'Bash' && command ? `Bash(${command})` : toolName
-        await run(() => props.api.approvePermission(props.sessionId, permission.id, { allowTools: [toolIdentifier] }), 'success')
+        if (claude) {
+            const command = toolName === 'Bash' ? getInputStringAny(props.tool.input, ['command', 'cmd']) : null
+            const toolIdentifier = toolName === 'Bash' && command ? `Bash(${command})` : toolName
+            await run(() => props.api.approvePermission(props.sessionId, permission.id, { allowTools: [toolIdentifier] }), 'success')
+        } else {
+            await run(() => props.api.approvePermission(props.sessionId, permission.id, { decision: 'approved_for_session' }), 'success')
+        }
         setLoadingForSession(false)
     }
 

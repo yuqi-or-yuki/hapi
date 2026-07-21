@@ -1,12 +1,11 @@
-import type { ToolCallBlock } from '@/chat/types'
+import type { ChatBlock, ToolCallBlock } from '@/chat/types'
 import type { ApiClient } from '@/api/client'
 import type { SessionMetadataSummary } from '@/types/api'
-import { memo, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { isObject, safeStringify } from '@hapi/protocol'
+import { memo, useEffect, useMemo, useState, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react'
+import { getClaudeModelLabel, isObject, safeStringify } from '@hapi/protocol'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { CodeBlock } from '@/components/CodeBlock'
 import { MarkdownRenderer } from '@/components/MarkdownRenderer'
-import { DiffView } from '@/components/DiffView'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { PermissionFooter } from '@/components/ToolCard/PermissionFooter'
 import { AskUserQuestionFooter } from '@/components/ToolCard/AskUserQuestionFooter'
@@ -17,9 +16,11 @@ import { getToolPresentation } from '@/components/ToolCard/knownTools'
 import { getToolFullViewComponent, getToolViewComponent } from '@/components/ToolCard/views/_all'
 import { getToolResultViewComponent } from '@/components/ToolCard/views/_results'
 import { formatTaskChildLabel, TaskStateIcon } from '@/components/ToolCard/helpers'
+import { toolDurationMs } from '@/components/ToolCard/toolDuration'
+import { formatDuration } from '@/chat/presentation'
 import type { TerminalToolDisplayMode } from '@/hooks/useTerminalToolDisplayMode'
 import { usePointerFocusRing } from '@/hooks/usePointerFocusRing'
-import { getInputString, getInputStringAny, truncate } from '@/lib/toolInputUtils'
+import { getInputStringAny, truncate } from '@/lib/toolInputUtils'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 import { TraceSection } from '@/components/ToolCard/trace'
@@ -64,6 +65,62 @@ function ElapsedView(props: { from: number; active: boolean }) {
             {elapsed.toFixed(1)}s
         </span>
     )
+}
+
+// Matches the full SDK model ids Claude Code echoes back for subagents
+// (e.g. `claude-sonnet-4-5-20250929`, `claude-opus-4-8`) — a lowercase name,
+// a major/minor version, and an optional 8-digit date suffix to discard.
+const CLAUDE_SDK_MODEL_ID_PATTERN = /^claude-([a-z]+)-(\d+)-(\d+)(?:-\d{8})?$/
+
+/**
+ * Formats a raw model id for compact display in the subagent badge.
+ *
+ * Reuses this repo's existing "friendly label, else raw fallback" idiom
+ * (see `getClaudeComposerModelOptions` in claudeModelOptions.ts, which does
+ * `getClaudeModelLabel(model) ?? model`): `getClaudeModelLabel` only maps the
+ * short preset aliases ('sonnet'/'opus'/'fable'), not the full SDK model ids
+ * a subagent's own `model` field actually carries, so this adds a second,
+ * narrow fallback that extracts just the name + version from the SDK id
+ * shape and drops the date suffix. Anything that matches neither (Gemini,
+ * Codex, OpenCode, or any future format) is returned as-is — this
+ * deliberately doesn't try to parse formats it doesn't recognize.
+ */
+export function formatSubagentModelLabel(model: string): string {
+    const presetLabel = getClaudeModelLabel(model)
+    if (presetLabel) return presetLabel
+
+    const match = model.match(CLAUDE_SDK_MODEL_ID_PATTERN)
+    if (match) {
+        const [, name, major, minor] = match
+        return `${name.charAt(0).toUpperCase()}${name.slice(1)} ${major}.${minor}`
+    }
+
+    return model
+}
+
+/**
+ * Derives the model(s) a subagent (Task/Agent tool call) actually executed
+ * under, from its own child blocks — not from the parent `ToolCallBlock.model`,
+ * which reflects the *calling* session's model and would misattribute the
+ * subagent's model if used directly (see reducerTimeline.ts sidechain handling).
+ *
+ * Every child block produced by reducing the subagent's sidechain carries the
+ * `model` of the assistant message it came from. A subagent run can switch
+ * models mid-run (e.g. `--fallback-model` kicking in under overload), so this
+ * collects the distinct non-null/non-empty raw values in first-seen order —
+ * the same "seenModels" pattern `aggregateResponseGroups`
+ * (web/src/lib/assistant-runtime.ts) already uses for top-level multi-turn
+ * message metadata, reused here rather than inventing a new convention — then
+ * formats each for display and joins them.
+ */
+export function getSubagentModel(children: ChatBlock[]): string | null {
+    const seenModels: string[] = []
+    for (const child of children) {
+        if ('model' in child && child.model && !seenModels.includes(child.model)) {
+            seenModels.push(child.model)
+        }
+    }
+    return seenModels.length > 0 ? seenModels.map(formatSubagentModelLabel).join(', ') : null
 }
 
 function getTaskSummaryChildren(block: ToolCallBlock): { visible: ToolCallBlock[]; remaining: number } | null {
@@ -115,29 +172,6 @@ function renderTaskSummary(
     )
 }
 
-function renderEditInput(input: unknown): ReactNode | null {
-    if (!isObject(input)) return null
-    const filePath = getInputStringAny(input, ['file_path', 'path']) ?? undefined
-    const oldString = getInputString(input, 'old_string')
-    const newString = getInputString(input, 'new_string')
-    if (oldString === null || newString === null) return null
-
-    return (
-        <DiffView
-            oldString={oldString}
-            newString={newString}
-            filePath={filePath}
-        />
-    )
-}
-
-function renderExitPlanModeInput(input: unknown): ReactNode | null {
-    if (!isObject(input)) return null
-    const plan = getInputString(input, 'plan')
-    if (!plan) return null
-    return <MarkdownRenderer content={plan} />
-}
-
 function renderToolInput(block: ToolCallBlock, surface: 'inline' | 'dialog' = 'inline'): ReactNode {
     const collapseLongContent = surface === 'inline'
     const codeBlockSurfaceProps = surface === 'dialog'
@@ -148,69 +182,6 @@ function renderToolInput(block: ToolCallBlock, surface: 'inline' | 'dialog' = 'i
 
     if (isSubagentToolName(toolName) && isObject(input) && typeof input.prompt === 'string') {
         return <MarkdownRenderer content={input.prompt} />
-    }
-
-    if (toolName === 'Edit') {
-        const diff = renderEditInput(input)
-        if (diff) return diff
-    }
-
-    if (toolName === 'MultiEdit' && isObject(input)) {
-        const filePath = getInputStringAny(input, ['file_path', 'path']) ?? undefined
-        const edits = Array.isArray(input.edits) ? input.edits : null
-        if (edits && edits.length > 0) {
-            const rendered = edits
-                .slice(0, 3)
-                .map((edit, idx) => {
-                    if (!isObject(edit)) return null
-                    const oldString = getInputString(edit, 'old_string')
-                    const newString = getInputString(edit, 'new_string')
-                    if (oldString === null || newString === null) return null
-                    return (
-                        <div key={idx}>
-                            <DiffView oldString={oldString} newString={newString} filePath={filePath} />
-                        </div>
-                    )
-                })
-                .filter(Boolean)
-
-            if (rendered.length > 0) {
-                return (
-                    <div className="flex flex-col gap-2">
-                        {rendered}
-                        {edits.length > 3 ? (
-                            <div className="text-xs text-[var(--app-hint)]">
-                                (+{edits.length - 3} more edits)
-                            </div>
-                        ) : null}
-                    </div>
-                )
-            }
-        }
-    }
-
-    if (toolName === 'Write' && isObject(input)) {
-        const filePath = getInputStringAny(input, ['file_path', 'path'])
-        const content = getInputStringAny(input, ['content', 'text'])
-        if (filePath && content !== null) {
-            return (
-                <div className="flex flex-col gap-2">
-                    <div className="text-xs text-[var(--app-hint)] font-mono break-all">
-                        {filePath}
-                    </div>
-                    <CodeBlock code={content} language="text" title="Draft" collapseLongContent={collapseLongContent} {...codeBlockSurfaceProps} />
-                </div>
-            )
-        }
-    }
-
-    if (toolName === 'CodexDiff' && isObject(input) && typeof input.unified_diff === 'string') {
-        return <CodeBlock code={input.unified_diff} language="diff" title="Patch" collapseLongContent={collapseLongContent} {...codeBlockSurfaceProps} />
-    }
-
-    if (toolName === 'ExitPlanMode' || toolName === 'exit_plan_mode') {
-        const plan = renderExitPlanModeInput(input)
-        if (plan) return plan
     }
 
     const commandArray = isObject(input) && Array.isArray(input.command) ? input.command : null
@@ -274,6 +245,16 @@ function DetailsIcon() {
     )
 }
 
+const INLINE_PREVIEW_INTERACTIVE_SELECTOR = 'a, button, input, textarea, select, summary, [role="button"], [contenteditable="true"]'
+
+function isNestedInteractiveElement(event: MouseEvent<HTMLElement> | KeyboardEvent<HTMLElement>): boolean {
+    if (event.target === event.currentTarget) return false
+    if (!(event.target instanceof Element)) return false
+
+    const interactive = event.target.closest(INLINE_PREVIEW_INTERACTIVE_SELECTOR)
+    return interactive !== null && interactive !== event.currentTarget
+}
+
 type ToolCardProps = {
     api: ApiClient
     sessionId: string
@@ -299,9 +280,16 @@ export function ToolDetailDialogContent(props: {
     const isQuestionToolWithAnswers = isQuestionTool
         && permission?.answers
         && Object.keys(permission.answers).length > 0
+    const durationMs = toolDurationMs(props.block.tool)
 
     return (
         <div className="mt-3 flex max-h-[75vh] flex-col gap-4 overflow-auto">
+            {durationMs != null ? (
+                <div className="flex items-center gap-2 text-xs">
+                    <span className="font-medium text-[var(--app-hint)]">{t('tool.duration')}</span>
+                    <span className="font-mono text-[var(--app-hint)]">{formatDuration(durationMs)}</span>
+                </div>
+            ) : null}
             <div>
                 <div className="mb-1 text-xs font-medium text-[var(--app-hint)]">
                     {isQuestionToolWithAnswers ? t('tool.questionsAnswers') : t('tool.input')}
@@ -325,6 +313,7 @@ export function ToolDetailDialogContent(props: {
 
 function ToolCardInner(props: ToolCardProps) {
     const { t } = useTranslation()
+    const [detailsOpen, setDetailsOpen] = useState(false)
     const presentation = useMemo(() => getToolPresentation({
         toolName: props.block.tool.name,
         input: props.block.tool.input,
@@ -346,6 +335,7 @@ function ToolCardInner(props: ToolCardProps) {
     const toolTitle = presentation.title
     const subtitle = presentation.subtitle ?? props.block.tool.description
     const taskSummary = renderTaskSummary(props.block, props.metadata, t)
+    const subagentModel = isSubagentToolName(toolName) ? getSubagentModel(props.block.children) : null
     const runningFrom = props.block.tool.startedAt ?? props.block.tool.createdAt
     const isCodexAgentCard = toolName === 'CodexAgent'
     const useCompactTerminalCard = shouldUseCompactTerminalToolCard(toolName, props.terminalToolDisplayMode)
@@ -363,6 +353,18 @@ function ToolCardInner(props: ToolCardProps) {
     const hasBody = showInline || taskSummary !== null || showsPermissionFooter
     const stateColor = toolStatusColorClass(props.block.tool.state)
     const { suppressFocusRing, onTriggerPointerDown, onTriggerKeyDown, onTriggerBlur } = usePointerFocusRing()
+    const openDetails = () => setDetailsOpen(true)
+    const openDetailsFromInlinePreview = (event: MouseEvent<HTMLElement>) => {
+        if (isNestedInteractiveElement(event)) return
+        openDetails()
+    }
+    const openDetailsFromInlinePreviewKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+        if (isNestedInteractiveElement(event)) return
+        if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault()
+            openDetails()
+        }
+    }
 
     const header = (
         <div className="flex items-center justify-between gap-3">
@@ -393,6 +395,14 @@ function ToolCardInner(props: ToolCardProps) {
                 'flex shrink-0 items-center gap-2 self-center text-[var(--app-hint)]',
                 subtitle ? '-translate-y-0.5' : null
             )}>
+                {subagentModel ? (
+                    <span
+                        className="inline-block max-w-28 truncate rounded-full bg-[var(--app-subtle-bg)] px-1.5 py-px font-mono text-[10px] leading-tight text-[var(--app-hint)] sm:max-w-40"
+                        title={subagentModel}
+                    >
+                        {subagentModel}
+                    </span>
+                ) : null}
                 <ElapsedView from={runningFrom} active={props.block.tool.state === 'running'} />
                 <span className={stateColor}>
                     <ToolStatusIcon state={props.block.tool.state} />
@@ -407,7 +417,7 @@ function ToolCardInner(props: ToolCardProps) {
     return (
         <Card className="overflow-hidden rounded-[20px] bg-[var(--app-tool-card-bg)] shadow-none">
             <CardHeader className={cn('space-y-0 p-3', subtitle ? 'pb-2' : null)}>
-                <Dialog>
+                <Dialog open={detailsOpen} onOpenChange={setDetailsOpen}>
                     <DialogTrigger asChild>
                         <button
                             type="button"
@@ -441,16 +451,34 @@ function ToolCardInner(props: ToolCardProps) {
 
                     {showInline ? (
                         CompactToolView ? (
-                            <div className="mt-3">
+                            <div
+                                className="mt-3 cursor-pointer rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                                role="button"
+                                tabIndex={0}
+                                onClick={openDetailsFromInlinePreview}
+                                onKeyDown={openDetailsFromInlinePreviewKeyDown}
+                            >
                                 <CompactToolView block={props.block} metadata={props.metadata} surface="inline" />
                             </div>
                         ) : (
                             <div className="mt-3 flex flex-col gap-3">
-                                <div>
+                                <div
+                                    className="cursor-pointer rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={openDetailsFromInlinePreview}
+                                    onKeyDown={openDetailsFromInlinePreviewKeyDown}
+                                >
                                     <div className="mb-1 text-xs font-medium text-[var(--app-hint)]">{t('tool.input')}</div>
                                     {renderToolInput(props.block, 'inline')}
                                 </div>
-                                <div>
+                                <div
+                                    className="cursor-pointer rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--app-link)]"
+                                    role="button"
+                                    tabIndex={0}
+                                    onClick={openDetailsFromInlinePreview}
+                                    onKeyDown={openDetailsFromInlinePreviewKeyDown}
+                                >
                                     <div className="mb-1 text-xs font-medium text-[var(--app-hint)]">{t('tool.result')}</div>
                                     <ResultToolView block={props.block} metadata={props.metadata} surface="inline" />
                                 </div>

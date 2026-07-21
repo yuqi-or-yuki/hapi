@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { AgentStateSchema, MetadataSchema, TeamStateSchema } from '@hapi/protocol/schemas'
-import type { CodexCollaborationMode, PermissionMode, Session } from '@hapi/protocol/types'
+import type { CodexCollaborationMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store } from '../store'
 import { clampAliveTime } from './aliveTime'
 import { EventPublisher } from './eventPublisher'
@@ -8,6 +8,12 @@ import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
 import { extractBackgroundTaskDelta } from './backgroundTasks'
 
 const QUEUED_MESSAGE_THINKING_GRACE_MS = 15_000
+// tiann/hapi#919: metadata writers (renameSession, clearSessionArchiveMetadata,
+// restoreSessionArchiveMetadata) retry on version-mismatch with a fresh cache
+// snapshot. Cap retries so genuine concurrent contention still surfaces to the
+// HTTP caller as 409 instead of spinning forever.
+const METADATA_RETRY_ATTEMPTS = 5
+type RuntimeConfigKey = 'permissionMode' | 'model' | 'modelReasoningEffort' | 'effort' | 'serviceTier' | 'collaborationMode'
 
 export class SessionCache {
     private readonly sessions: Map<string, Session> = new Map()
@@ -16,6 +22,7 @@ export class SessionCache {
     private readonly deduplicateInProgress: Set<string> = new Set()
     private readonly deduplicatePending: Set<string> = new Set()
     private readonly pendingThinkingUntilBySessionId: Map<string, number> = new Map()
+    private readonly runtimeConfigUpdatedAtBySessionId: Map<string, Partial<Record<RuntimeConfigKey, number>>> = new Map()
 
     constructor(
         private readonly store: Store,
@@ -69,9 +76,19 @@ export class SessionCache {
         namespace: string,
         model?: string,
         effort?: string,
-        modelReasoningEffort?: string
+        modelReasoningEffort?: string,
+        requestedId?: string
     ): Session {
-        const stored = this.store.sessions.getOrCreateSession(tag, metadata, agentState, namespace, model, effort, modelReasoningEffort)
+        const stored = this.store.sessions.getOrCreateSession(
+            tag,
+            metadata,
+            agentState,
+            namespace,
+            model,
+            effort,
+            modelReasoningEffort,
+            requestedId
+        )
         return this.refreshSession(stored.id) ?? (() => { throw new Error('Failed to load session') })()
     }
 
@@ -80,6 +97,7 @@ export class SessionCache {
         if (!stored) {
             const existed = this.sessions.delete(sessionId)
             this.pendingThinkingUntilBySessionId.delete(sessionId)
+            this.runtimeConfigUpdatedAtBySessionId.delete(sessionId)
             if (existed) {
                 this.publisher.emit({ type: 'session-removed', sessionId })
             }
@@ -134,7 +152,13 @@ export class SessionCache {
             createdAt: stored.createdAt,
             updatedAt: stored.updatedAt,
             active: existing?.active ?? stored.active,
-            activeAt: existing?.activeAt ?? (stored.activeAt ?? stored.createdAt),
+            // Legacy / idle rows may still have active_at NULL in SQLite.
+            // Public Session.activeAt is always a number for CLI Zod parse.
+            activeAt: existing?.activeAt
+                ?? stored.activeAt
+                ?? stored.updatedAt
+                ?? stored.createdAt
+                ?? 0,
             metadata,
             metadataVersion: stored.metadataVersion,
             agentState,
@@ -147,7 +171,8 @@ export class SessionCache {
             model: stored.model,
             modelReasoningEffort: stored.modelReasoningEffort,
             effort: stored.effort,
-            permissionMode: existing?.permissionMode,
+            serviceTier: stored.serviceTier,
+            permissionMode: existing?.permissionMode ?? metadata?.preferredPermissionMode,
             collaborationMode: existing?.collaborationMode
         }
 
@@ -163,6 +188,32 @@ export class SessionCache {
         }
     }
 
+    markSessionActive(sessionId: string, time: number = Date.now()): void {
+        const t = clampAliveTime(time) ?? Date.now()
+        const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+        if (!session) return
+
+        const wasActive = session.active
+        session.active = true
+        session.activeAt = Math.max(session.activeAt, t)
+
+        this.lastBroadcastAtBySessionId.set(session.id, Date.now())
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId: session.id,
+            namespace: session.namespace,
+            data: {
+                active: true,
+                activeAt: session.activeAt,
+                thinking: session.thinking
+            } satisfies SessionPatch
+        })
+
+        if (!wasActive) {
+            this.refreshSession(sessionId)
+        }
+    }
+
     handleSessionAlive(payload: {
         sid: string
         time: number
@@ -172,6 +223,7 @@ export class SessionCache {
         model?: string | null
         modelReasoningEffort?: string | null
         effort?: string | null
+        serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
     }): void {
         const t = clampAliveTime(payload.time)
@@ -186,6 +238,7 @@ export class SessionCache {
         const previousModel = session.model
         const previousModelReasoningEffort = session.modelReasoningEffort
         const previousEffort = session.effort
+        const previousServiceTier = session.serviceTier
         const previousCollaborationMode = session.collaborationMode
         const pendingThinkingUntil = this.pendingThinkingUntilBySessionId.get(session.id) ?? 0
         const requestedThinking = Boolean(payload.thinking)
@@ -199,10 +252,11 @@ export class SessionCache {
         if (requestedThinking || pendingThinkingUntil <= hubNow) {
             this.pendingThinkingUntilBySessionId.delete(session.id)
         }
-        if (payload.permissionMode !== undefined) {
+        if (payload.permissionMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'permissionMode', t)) {
             session.permissionMode = payload.permissionMode
+            this.persistPreferredPermissionMode(session, payload.permissionMode)
         }
-        if (payload.model !== undefined) {
+        if (payload.model !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'model', t)) {
             if (payload.model !== session.model) {
                 this.store.sessions.setSessionModel(payload.sid, payload.model, session.namespace, {
                     touchUpdatedAt: false
@@ -210,7 +264,7 @@ export class SessionCache {
             }
             session.model = payload.model
         }
-        if (payload.modelReasoningEffort !== undefined) {
+        if (payload.modelReasoningEffort !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'modelReasoningEffort', t)) {
             if (payload.modelReasoningEffort !== session.modelReasoningEffort) {
                 this.store.sessions.setSessionModelReasoningEffort(payload.sid, payload.modelReasoningEffort, session.namespace, {
                     touchUpdatedAt: false
@@ -218,7 +272,7 @@ export class SessionCache {
             }
             session.modelReasoningEffort = payload.modelReasoningEffort
         }
-        if (payload.effort !== undefined) {
+        if (payload.effort !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'effort', t)) {
             if (payload.effort !== session.effort) {
                 this.store.sessions.setSessionEffort(payload.sid, payload.effort, session.namespace, {
                     touchUpdatedAt: false
@@ -226,7 +280,15 @@ export class SessionCache {
             }
             session.effort = payload.effort
         }
-        if (payload.collaborationMode !== undefined) {
+        if (payload.serviceTier !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'serviceTier', t)) {
+            if (payload.serviceTier !== session.serviceTier) {
+                this.store.sessions.setSessionServiceTier(payload.sid, payload.serviceTier, session.namespace, {
+                    touchUpdatedAt: false
+                })
+            }
+            session.serviceTier = payload.serviceTier
+        }
+        if (payload.collaborationMode !== undefined && !this.isStaleRuntimeKeepAlive(session.id, 'collaborationMode', t)) {
             session.collaborationMode = payload.collaborationMode
         }
 
@@ -236,6 +298,7 @@ export class SessionCache {
             || previousModel !== session.model
             || previousModelReasoningEffort !== session.modelReasoningEffort
             || previousEffort !== session.effort
+            || previousServiceTier !== session.serviceTier
             || previousCollaborationMode !== session.collaborationMode
         const shouldBroadcast = (!wasActive && session.active)
             || (wasThinking !== session.thinking)
@@ -255,10 +318,27 @@ export class SessionCache {
                     model: session.model,
                     modelReasoningEffort: session.modelReasoningEffort,
                     effort: session.effort,
+                    serviceTier: session.serviceTier,
                     collaborationMode: session.collaborationMode
-                }
+                } satisfies SessionPatch
             })
         }
+    }
+
+    /**
+     * Drop the queued-message thinking grace timer for a session.
+     *
+     * `markMessageQueued` sets a 15s grace during which we keep `thinking=true`
+     * even if the CLI sends `keepAlive(thinking=false)` — that grace exists to
+     * cover the gap between the user POSTing a prompt and the CLI starting to
+     * stream. Sessions that handle the message synchronously (e.g. slash
+     * commands intercepted in `onUserMessage`) never call onThinkingChange and
+     * would otherwise leave the spinner stuck for the full grace window. The
+     * messages-consumed socket event signals the CLI has finished its
+     * synchronous handling, so it's safe to drop the grace.
+     */
+    clearQueuedThinkingGrace(sessionId: string): void {
+        this.pendingThinkingUntilBySessionId.delete(sessionId)
     }
 
     markMessageQueued(sessionId: string, time: number = Date.now()): void {
@@ -283,7 +363,7 @@ export class SessionCache {
                 data: {
                     thinking: true,
                     updatedAt: session.updatedAt
-                }
+                } satisfies SessionPatch
             })
         }
     }
@@ -300,7 +380,7 @@ export class SessionCache {
         this.publisher.emit({
             type: 'session-updated',
             sessionId,
-            data: { backgroundTaskCount: next }
+            data: { backgroundTaskCount: next } satisfies SessionPatch
         })
     }
 
@@ -334,7 +414,7 @@ export class SessionCache {
             type: 'session-updated',
             sessionId,
             namespace: session.namespace,
-            data: { updatedAt: session.updatedAt }
+            data: { updatedAt: session.updatedAt } satisfies SessionPatch
         })
     }
 
@@ -349,12 +429,17 @@ export class SessionCache {
         }
 
         session.active = false
+        this.store.sessions.setSessionActive(session.id, false, t, session.namespace)
         session.thinking = false
         session.thinkingAt = t
         session.backgroundTaskCount = 0
         this.pendingThinkingUntilBySessionId.delete(session.id)
 
-        this.publisher.emit({ type: 'session-updated', sessionId: session.id, data: { active: false, thinking: false, backgroundTaskCount: 0 } })
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId: session.id,
+            data: { active: false, thinking: false, backgroundTaskCount: 0 } satisfies SessionPatch
+        })
     }
 
     expireInactive(now: number = Date.now()): string[] {
@@ -365,10 +450,15 @@ export class SessionCache {
             if (!session.active) continue
             if (now - session.activeAt <= sessionTimeoutMs) continue
             session.active = false
+            this.store.sessions.setSessionActive(session.id, false, now, session.namespace)
             session.thinking = false
             this.pendingThinkingUntilBySessionId.delete(session.id)
             expired.push(session.id)
-            this.publisher.emit({ type: 'session-updated', sessionId: session.id, data: { active: false } })
+            this.publisher.emit({
+                type: 'session-updated',
+                sessionId: session.id,
+                data: { active: false } satisfies SessionPatch
+            })
         }
 
         return expired
@@ -378,9 +468,10 @@ export class SessionCache {
         sessionId: string,
         config: {
             permissionMode?: PermissionMode
-            model?: string | null
+            model?: { provider: string; modelId: string } | string | null
             modelReasoningEffort?: string | null
             effort?: string | null
+            serviceTier?: string | null
             collaborationMode?: CodexCollaborationMode
         }
     ): void {
@@ -389,19 +480,35 @@ export class SessionCache {
             return
         }
 
+        const appliedAt = Date.now()
         if (config.permissionMode !== undefined) {
             session.permissionMode = config.permissionMode
+            this.persistPreferredPermissionMode(session, config.permissionMode)
+            this.markRuntimeConfigUpdated(sessionId, 'permissionMode', appliedAt)
         }
         if (config.model !== undefined) {
-            if (config.model !== session.model) {
-                const updated = this.store.sessions.setSessionModel(sessionId, config.model, session.namespace, {
+            const modelValue = config.model
+            // Normalize object form { provider, modelId } to plain string for DB storage
+            const piModelObject = modelValue !== null && typeof modelValue === 'object'
+                ? modelValue
+                : null
+            const normalizedModel: string | null = piModelObject ? piModelObject.modelId : modelValue as string | null
+            if (normalizedModel !== session.model) {
+                const updated = this.store.sessions.setSessionModel(sessionId, normalizedModel, session.namespace, {
                     touchUpdatedAt: false
                 })
                 if (!updated) {
                     throw new Error('Failed to update session model')
                 }
             }
-            session.model = config.model
+            session.model = normalizedModel
+            // Pi requires provider + modelId to uniquely identify a model.
+            // Persist the provider-qualified form in metadata so web can
+            // resolve the exact model even when two providers share a modelId.
+            if (session.metadata?.flavor === 'pi') {
+                this.persistPiSelectedModel(session, piModelObject)
+            }
+            this.markRuntimeConfigUpdated(sessionId, 'model', appliedAt)
         }
         if (config.modelReasoningEffort !== undefined) {
             if (config.modelReasoningEffort !== session.modelReasoningEffort) {
@@ -413,6 +520,7 @@ export class SessionCache {
                 }
             }
             session.modelReasoningEffort = config.modelReasoningEffort
+            this.markRuntimeConfigUpdated(sessionId, 'modelReasoningEffort', appliedAt)
         }
         if (config.effort !== undefined) {
             if (config.effort !== session.effort) {
@@ -424,40 +532,290 @@ export class SessionCache {
                 }
             }
             session.effort = config.effort
+            this.markRuntimeConfigUpdated(sessionId, 'effort', appliedAt)
+        }
+        if (config.serviceTier !== undefined) {
+            if (config.serviceTier !== session.serviceTier) {
+                const updated = this.store.sessions.setSessionServiceTier(sessionId, config.serviceTier, session.namespace, {
+                    touchUpdatedAt: false
+                })
+                if (!updated) {
+                    throw new Error('Failed to update session service tier')
+                }
+            }
+            session.serviceTier = config.serviceTier
+            this.markRuntimeConfigUpdated(sessionId, 'serviceTier', appliedAt)
         }
         if (config.collaborationMode !== undefined) {
             session.collaborationMode = config.collaborationMode
+            this.markRuntimeConfigUpdated(sessionId, 'collaborationMode', appliedAt)
         }
 
         this.publisher.emit({ type: 'session-updated', sessionId, data: session })
     }
 
+    private markRuntimeConfigUpdated(
+        sessionId: string,
+        key: RuntimeConfigKey,
+        at: number
+    ): void {
+        const existing = this.runtimeConfigUpdatedAtBySessionId.get(sessionId) ?? {}
+        existing[key] = at
+        this.runtimeConfigUpdatedAtBySessionId.set(sessionId, existing)
+    }
+
+    private isStaleRuntimeKeepAlive(
+        sessionId: string,
+        key: RuntimeConfigKey,
+        payloadTime: number
+    ): boolean {
+        const updatedAt = this.runtimeConfigUpdatedAtBySessionId.get(sessionId)?.[key]
+        return updatedAt !== undefined && payloadTime < updatedAt
+    }
+
+    /**
+     * tiann/hapi#916: hub-side write of the archive-metadata fields normally
+     * authored by the CLI's `archiveAndClose`. Called by `syncEngine.archiveSession`
+     * when the kill-RPC fails because the CLI is unreachable (e.g. the
+     * hub-restart cascade already killed it). Without this, the route would
+     * either 500 (pre-fix) or silently return ok=true while leaving
+     * `lifecycleState=running` on disk — both confuse the operator.
+     *
+     * Idempotent: if `lifecycleState` is already `archived` we return without
+     * touching the row to avoid resetting `lifecycleStateSince`. Best-effort:
+     * if every retry hits `version-mismatch` (genuine contention) the original
+     * `archiveSession` flow still marks the session inactive in cache via
+     * `handleSessionEnd`, just without flipping the persisted lifecycle.
+     */
+    markSessionArchivedFromHub(sessionId: string, reason: string): void {
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) return
+            const current = session.metadata
+            if (!current) return
+            if (current.lifecycleState === 'archived') {
+                return
+            }
+
+            const next: Record<string, unknown> = {
+                ...current,
+                lifecycleState: 'archived',
+                lifecycleStateSince: Date.now(),
+                archivedBy: 'hub',
+                archiveReason: reason
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                next,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                // tiann/hapi#916 review feedback: persistence failure must
+                // surface so the route returns 5xx. Silently returning here
+                // would let `/archive` claim success while the row stays
+                // unarchived in the DB.
+                throw new Error('Failed to archive session metadata from hub')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+
+            this.refreshSession(sessionId)
+        }
+
+        // tiann/hapi#916 review feedback: exhausted retries means we never
+        // got a successful write. Match the renameSession / mergeSessions
+        // contract and surface this as an error so non-RPC failures stay
+        // 5xx per the issue's acceptance criteria.
+        throw new Error('Session was modified concurrently while archiving from hub')
+    }
+
     async renameSession(sessionId: string, name: string): Promise<void> {
-        const session = this.sessions.get(sessionId)
-        if (!session) {
-            throw new Error('Session not found')
+        // tiann/hapi#919: retry-with-refresh on version-mismatch instead of
+        // throwing on the first contention. Mirrors the good pattern in
+        // mergeSessions (~L780) and in syncEngine's metadata helpers. Without
+        // this, a stale cache snapshot produces forever-409 on PATCH /sessions/:id
+        // until some unrelated event triggers a refresh.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                throw new Error('Session not found')
+            }
+
+            const currentMetadata = session.metadata ?? { path: '', host: '' }
+            const newMetadata = { ...currentMetadata, name }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                newMetadata,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                throw new Error('Failed to update session metadata')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+
+            this.refreshSession(sessionId)
         }
 
-        const currentMetadata = session.metadata ?? { path: '', host: '' }
-        const newMetadata = { ...currentMetadata, name }
+        throw new Error('Session was modified concurrently. Please try again.')
+    }
 
-        const result = this.store.sessions.updateSessionMetadata(
-            sessionId,
-            newMetadata,
-            session.metadataVersion,
-            session.namespace,
-            { touchUpdatedAt: false }
-        )
+    /**
+     * Clear archive-related metadata on an archived session so it can be resumed.
+     * - Removes `lifecycleState`, `archivedBy`, `archiveReason`, and stamps
+     *   `lifecycleStateSince` so subsequent CLI lifecycle writes still win on time.
+     * - For Cursor sessions that pre-date #799 (no `cursorSessionProtocol` set, but a
+     *   `cursorSessionId` exists) defaults the protocol to `stream-json` so routing
+     *   reaches the legacy launcher instead of the new ACP path.
+     *
+     * Returns the protocol that was applied (or already present) for cursor sessions,
+     * or `undefined` for other flavors. Throws on version mismatch / store error.
+     * No-op when metadata is null (callers should pre-check).
+     */
+    async clearSessionArchiveMetadata(sessionId: string): Promise<{ cursorSessionProtocol?: 'acp' | 'stream-json' }> {
+        // tiann/hapi#919: retry-with-refresh on version-mismatch. The reopen
+        // flow runs this on every archived-session resume — a stale snapshot
+        // here used to forever-409 the only reopen affordance.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) {
+                throw new Error('Session not found')
+            }
 
-        if (result.result === 'error') {
-            throw new Error('Failed to update session metadata')
+            const currentMetadata = session.metadata
+            if (!currentMetadata) {
+                throw new Error('Session metadata missing')
+            }
+
+            const next: Record<string, unknown> = { ...currentMetadata }
+            delete next.lifecycleState
+            delete next.archivedBy
+            delete next.archiveReason
+            next.lifecycleStateSince = Date.now()
+
+            let cursorSessionProtocol: 'acp' | 'stream-json' | undefined
+            if (currentMetadata.flavor === 'cursor') {
+                const existing = currentMetadata.cursorSessionProtocol
+                if (existing === 'acp' || existing === 'stream-json') {
+                    cursorSessionProtocol = existing
+                } else if (currentMetadata.cursorSessionId) {
+                    // Pre-#799 default: presence of cursorSessionId without protocol means stream-json.
+                    cursorSessionProtocol = 'stream-json'
+                    next.cursorSessionProtocol = 'stream-json'
+                }
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                next,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                throw new Error('Failed to update session metadata')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return cursorSessionProtocol ? { cursorSessionProtocol } : {}
+            }
+
+            this.refreshSession(sessionId)
         }
 
-        if (result.result === 'version-mismatch') {
-            throw new Error('Session was modified concurrently. Please try again.')
+        throw new Error('Session was modified concurrently. Please try again.')
+    }
+
+    /**
+     * Restore archive-related metadata fields that were captured before a reopen attempt.
+     * Used when `resumeSession` fails after `clearSessionArchiveMetadata` already ran so the
+     * session does not drift into a "not archived, not active" zombie state.
+     *
+     * Restores the four archive fields **exactly**: if a field was present in the snapshot
+     * it is written, if it was absent it is deleted (covering the case where
+     * `clearSessionArchiveMetadata` stamped a fresh `lifecycleStateSince` on a row that did
+     * not have one originally). Other concurrent edits (e.g. a rename in flight) are
+     * preserved. Returns silently if the session is gone or its metadata is unset; throws
+     * on version mismatch so the caller can decide whether to retry.
+     */
+    async restoreSessionArchiveMetadata(
+        sessionId: string,
+        snapshot: {
+            lifecycleState?: string
+            archivedBy?: string
+            archiveReason?: string
+            lifecycleStateSince?: number
+        }
+    ): Promise<void> {
+        // tiann/hapi#919: retry-with-refresh on version-mismatch. This is the
+        // /reopen rollback path — if it fails the session is left in a
+        // half-cleared archive state, so making it robust to a stale snapshot
+        // matters more here than for the other two.
+        for (let attempt = 0; attempt < METADATA_RETRY_ATTEMPTS; attempt += 1) {
+            const session = this.sessions.get(sessionId) ?? this.refreshSession(sessionId)
+            if (!session) return
+            const current = session.metadata
+            if (!current) return
+
+            const next: Record<string, unknown> = { ...current }
+            if (snapshot.lifecycleState !== undefined) {
+                next.lifecycleState = snapshot.lifecycleState
+            } else {
+                delete next.lifecycleState
+            }
+            if (snapshot.archivedBy !== undefined) {
+                next.archivedBy = snapshot.archivedBy
+            } else {
+                delete next.archivedBy
+            }
+            if (snapshot.archiveReason !== undefined) {
+                next.archiveReason = snapshot.archiveReason
+            } else {
+                delete next.archiveReason
+            }
+            if (snapshot.lifecycleStateSince !== undefined) {
+                next.lifecycleStateSince = snapshot.lifecycleStateSince
+            } else {
+                delete next.lifecycleStateSince
+            }
+
+            const result = this.store.sessions.updateSessionMetadata(
+                sessionId,
+                next,
+                session.metadataVersion,
+                session.namespace,
+                { touchUpdatedAt: false }
+            )
+
+            if (result.result === 'error') {
+                throw new Error('Failed to restore archive metadata')
+            }
+
+            if (result.result === 'success') {
+                this.refreshSession(sessionId)
+                return
+            }
+
+            this.refreshSession(sessionId)
         }
 
-        this.refreshSession(sessionId)
+        throw new Error('Session was modified concurrently during reopen rollback')
     }
 
     async setSessionReadyForReview(sessionId: string, readyForReview: boolean): Promise<void> {
@@ -654,6 +1012,15 @@ export class SessionCache {
             }
         }
 
+        if (newStored.serviceTier === null && oldStored.serviceTier !== null) {
+            const updated = this.store.sessions.setSessionServiceTier(newSessionId, oldStored.serviceTier, namespace, {
+                touchUpdatedAt: false
+            })
+            if (!updated) {
+                throw new Error('Failed to preserve session service tier during merge')
+            }
+        }
+
         if (oldStored.todos !== null && oldStored.todosUpdatedAt !== null) {
             this.store.sessions.setSessionTodos(
                 newSessionId,
@@ -755,8 +1122,68 @@ export class SessionCache {
             merged.host = oldObj.host
             changed = true
         }
+        if (typeof oldObj.preferredPermissionMode === 'string' && typeof newObj.preferredPermissionMode !== 'string') {
+            merged.preferredPermissionMode = oldObj.preferredPermissionMode
+            changed = true
+        }
 
         return changed ? merged : newMetadata
+    }
+
+    private persistPreferredPermissionMode(session: Session, permissionMode: PermissionMode): void {
+        const currentMetadata = session.metadata
+        if (!currentMetadata || currentMetadata.preferredPermissionMode === permissionMode) {
+            return
+        }
+
+        const nextMetadata = { ...currentMetadata, preferredPermissionMode: permissionMode }
+        const result = this.store.sessions.updateSessionMetadata(
+            session.id,
+            nextMetadata,
+            session.metadataVersion,
+            session.namespace,
+            { touchUpdatedAt: false }
+        )
+
+        if (result.result === 'error') {
+            return
+        }
+
+        const parsed = MetadataSchema.safeParse(result.value)
+        if (!parsed.success) {
+            return
+        }
+
+        session.metadata = parsed.data
+        session.metadataVersion = result.version
+    }
+
+    private persistPiSelectedModel(session: Session, piSelected: { provider: string; modelId: string } | null): void {
+        const currentMetadata = session.metadata
+        if (!currentMetadata || currentMetadata.piSelectedModel === piSelected) {
+            return
+        }
+
+        const nextMetadata = { ...currentMetadata, piSelectedModel: piSelected }
+        const result = this.store.sessions.updateSessionMetadata(
+            session.id,
+            nextMetadata,
+            session.metadataVersion,
+            session.namespace,
+            { touchUpdatedAt: false }
+        )
+
+        if (result.result === 'error') {
+            return
+        }
+
+        const parsed = MetadataSchema.safeParse(result.value)
+        if (!parsed.success) {
+            return
+        }
+
+        session.metadata = parsed.data
+        session.metadataVersion = result.version
     }
 
     private mergeAgentState(oldState: unknown | null, newState: unknown | null): unknown | null {
@@ -784,12 +1211,14 @@ export class SessionCache {
 
     private extractAgentSessionId(
         metadata: NonNullable<Session['metadata']>
-    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'cursorSessionId'; value: string } | null {
+    ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId'; value: string } | null {
         if (metadata.codexSessionId) return { field: 'codexSessionId', value: metadata.codexSessionId }
         if (metadata.claudeSessionId) return { field: 'claudeSessionId', value: metadata.claudeSessionId }
         if (metadata.geminiSessionId) return { field: 'geminiSessionId', value: metadata.geminiSessionId }
         if (metadata.opencodeSessionId) return { field: 'opencodeSessionId', value: metadata.opencodeSessionId }
+        if (metadata.grokSessionId) return { field: 'grokSessionId', value: metadata.grokSessionId }
         if (metadata.cursorSessionId) return { field: 'cursorSessionId', value: metadata.cursorSessionId }
+        if (metadata.piSessionId) return { field: 'piSessionId', value: metadata.piSessionId }
         return null
     }
 

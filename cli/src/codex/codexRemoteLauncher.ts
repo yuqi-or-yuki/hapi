@@ -1,5 +1,6 @@
 import React from 'react';
 import { randomUUID } from 'node:crypto';
+import { lstat, readFile } from 'node:fs/promises';
 
 import { CodexAppServerClient } from './codexAppServerClient';
 import { CodexPermissionHandler } from './utils/permissionHandler';
@@ -13,17 +14,48 @@ import type { CodexSession } from './session';
 import type { EnhancedMode } from './loop';
 import { hasCodexCliOverrides } from './utils/codexCliOverrides';
 import { AppServerEventConverter } from './utils/appServerEventConverter';
+import { detectImageMimeType, registerGeneratedImage } from '@/modules/common/generatedImages';
 import { registerAppServerPermissionHandlers } from './utils/appServerPermissionAdapter';
 import { buildThreadStartParams, buildTurnStartParams } from './utils/appServerConfig';
 import type { ThreadGoal, ThreadGoalStatus } from './appServerTypes';
 import { shouldIgnoreTerminalEvent } from './utils/terminalEventGuard';
 import { parseCodexSpecialCommand } from './codexSpecialCommands';
 import { uploadImagesInCodexOutput } from './utils/imageUpload';
+import { extractErrorInfo } from '@/utils/errorUtils';
 import {
     RemoteLauncherBase,
     type RemoteLauncherDisplayContext,
     type RemoteLauncherExitReason
 } from '@/modules/common/remote/RemoteLauncherBase';
+
+
+async function registerGeneratedImageFromPath(args: { id: string; path: string; fileName?: string | null }): Promise<ReturnType<typeof registerGeneratedImage> | null> {
+    try {
+        const info = await lstat(args.path);
+        if (!info.isFile()) {
+            throw new Error('Path is not a regular file');
+        }
+        const maxImageBytes = 25 * 1024 * 1024;
+        if (info.size > maxImageBytes) {
+            throw new Error('Image is too large to display inline');
+        }
+        const bytes = await readFile(args.path);
+        const mimeType = detectImageMimeType(bytes);
+        if (!mimeType) {
+            throw new Error('Unsupported image content');
+        }
+        return registerGeneratedImage({
+            id: args.id,
+            path: args.path,
+            fileName: args.fileName,
+            mimeType,
+            bytes
+        });
+    } catch (error) {
+        logger.debug('[CodexRemoteLauncher] Failed to register generated image:', error instanceof Error ? error.message : String(error));
+        return null;
+    }
+}
 
 type HappyServer = Awaited<ReturnType<typeof buildHapiMcpBridge>>['server'];
 type QueuedMessage = { message: string; mode: EnhancedMode; isolate: boolean; hash: string };
@@ -46,6 +78,20 @@ type ChildAgentRuntime = {
 const AGENT_RUN_UPDATE_THROTTLE_MS = 300;
 const AGENT_RUN_START_TIMEOUT_MS = 30 * 1000;
 const THROTTLED_AGENT_RUN_ACTIVITY_KINDS = new Set(['thinking']);
+const CODEX_SPAWN_AGENT_FULL_HISTORY_ARGUMENT_ERROR =
+    'Full-history forked agents inherit the parent agent type, model, and reasoning effort; ' +
+    'omit agent_type, model, and reasoning_effort, or spawn without a full-history fork.';
+
+function formatCodexResumeError(error: unknown): string {
+    const info = extractErrorInfo(error);
+    const message = info.message && info.message !== 'Unknown error' ? info.message : '';
+    const record = error && typeof error === 'object' ? error as Record<string, unknown> : null;
+    const name = error instanceof Error && error.name && error.name !== 'Error' ? error.name : '';
+    const cause = record?.cause instanceof Error ? record.cause.message : typeof record?.cause === 'string' ? record.cause : '';
+    const code = typeof record?.code === 'string' ? record.code : '';
+    const parts = [name, code, message, cause].filter((part) => part.trim().length > 0);
+    return parts.length > 0 ? Array.from(new Set(parts)).join(': ') : 'unknown resume error';
+}
 
 const SAME_THREAD_RETRYABLE_ERROR_PATTERNS = [
     'selected model is at capacity',
@@ -59,8 +105,47 @@ const CONTEXT_COMPACT_RETRYABLE_ERROR_PATTERNS = [
 const SAME_THREAD_MAX_RETRIES = 3;
 const SAME_THREAD_MAX_COMPACT_RETRIES = 1;
 const SAME_THREAD_COMPACT_TIMEOUT_MS = 10 * 60 * 1000;
+const THREAD_STATUS_FAILURE_GRACE_MS = 250;
+const SAFETY_BUFFERING_LEARN_MORE_URL = 'https://help.openai.com/en/articles/20001326';
+const TRUSTED_ACCESS_FOR_CYBER_URL = 'https://chatgpt.com/cyber';
+const CYBER_POLICY_TRUSTED_ACCESS_URL = 'https://openai.com/form/enterprise-trusted-access-for-cyber/';
 const CODEX_GOALS_UNSUPPORTED_MESSAGE = 'Codex goals are not supported by this Codex runtime. Upgrade Codex or enable features.goals.';
 const MAX_CODEX_GOAL_OBJECTIVE_CHARS = 4_000;
+const HAPI_TOP_LEVEL_THREAD_SOURCE = 'user';
+
+type GoalForwardSignature = {
+    objective: string | null;
+    status: string | null;
+    tokenBudget: number | null;
+    tokenBucket: number | null;
+};
+
+function goalNumber(value: unknown): number | null {
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+}
+
+function goalString(value: unknown): string | null {
+    return typeof value === 'string' ? value : null;
+}
+
+function buildGoalForwardSignature(goal: Record<string, unknown>): GoalForwardSignature {
+    const tokenBudget = goalNumber(goal.tokenBudget ?? goal.token_budget);
+    const tokensUsed = goalNumber(goal.tokensUsed ?? goal.tokens_used) ?? 0;
+    const tokenBucket = tokenBudget !== null && tokenBudget > 0
+        ? Math.floor(Math.min(tokensUsed, tokenBudget) / Math.max(1, tokenBudget * 0.05))
+        : null;
+
+    return {
+        objective: goalString(goal.objective),
+        status: goalString(goal.status),
+        tokenBudget,
+        tokenBucket
+    };
+}
+
+function goalForwardSignatureKey(signature: GoalForwardSignature): string {
+    return JSON.stringify(signature);
+}
 
 function isSameThreadRetryableCodexError(error: string | null): boolean {
     if (!error) {
@@ -68,6 +153,30 @@ function isSameThreadRetryableCodexError(error: string | null): boolean {
     }
     const normalized = error.toLowerCase();
     return SAME_THREAD_RETRYABLE_ERROR_PATTERNS.some((pattern) => normalized.includes(pattern));
+}
+
+function normalizePolicyToken(value: unknown): string {
+    return typeof value === 'string'
+        ? value.toLowerCase().replace(/[^a-z0-9]/g, '')
+        : '';
+}
+
+function isPolicyBlockedCodexFailure(msg: Record<string, unknown>, error: string | null): boolean {
+    if (normalizePolicyToken(msg.codex_error_info ?? msg.codexErrorInfo) === 'cyberpolicy') {
+        return true;
+    }
+
+    const normalizedError = error?.toLowerCase() ?? '';
+    return normalizedError.includes('flagged for possible cybersecurity risk')
+        || normalizedError.includes('flagged for potentially high-risk cyber activity')
+        || normalizedError.includes('cyber policy')
+        || normalizedError.includes('cyberpolicy')
+        || normalizedError.includes('limited access to this content for safety reasons')
+        || normalizedError.includes("this content can't be shown");
+}
+
+function isGenericThreadSystemError(error: string | null): boolean {
+    return error?.trim().toLowerCase() === 'codex thread entered systemerror';
 }
 
 function isContextCompactRetryableCodexError(error: string | null): boolean {
@@ -101,6 +210,10 @@ function formatGoalUsage(goal: ThreadGoal): string {
         parts.push(`${goal.tokensUsed} tokens`);
     }
     return parts.join(' · ');
+}
+
+function stripAnsi(value: string): string {
+    return value.replace(/\u001b\[[0-9;]*m/g, '');
 }
 
 class CodexRemoteLauncher extends RemoteLauncherBase {
@@ -343,6 +456,13 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 });
         };
 
+        const extractSpawnAgentStartErrorFromStderr = (text: string): string | null => {
+            const cleanText = stripAnsi(text);
+            return cleanText.includes(CODEX_SPAWN_AGENT_FULL_HISTORY_ARGUMENT_ERROR)
+                ? CODEX_SPAWN_AGENT_FULL_HISTORY_ARGUMENT_ERROR
+                : null;
+        };
+
         const isExitPlanModeTool = (toolName: string): boolean => {
             return toolName === 'exit_plan_mode' || toolName === 'ExitPlanMode';
         };
@@ -546,12 +666,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             return `${match[1]}.${match[2]}`;
         };
 
-        const permissionHandler = new CodexPermissionHandler(session.client, () => {
+        const getCurrentCodexPermissionMode = () => {
             const mode = session.getPermissionMode();
             return mode === 'default' || mode === 'read-only' || mode === 'safe-yolo' || mode === 'yolo'
                 ? mode
                 : undefined;
-        }, {
+        };
+
+        const permissionHandler = new CodexPermissionHandler(session.client, getCurrentCodexPermissionMode, {
             onRequest: ({ id, toolName, input }) => {
                 if (toolName === 'request_user_input') {
                     session.sendAgentMessage({
@@ -803,6 +925,38 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             flushPendingAgentTraces(agentId);
         };
 
+        const getOnlyPendingAgentStartCardId = (): string | null => {
+            if (pendingAgentStartCardIds.size !== 1) return null;
+            return pendingAgentStartCardIds.values().next().value ?? null;
+        };
+
+        const linkPendingAgentStartFromChildTask = (agentId: string): void => {
+            if (agentCardByAgentId.has(agentId)) {
+                return;
+            }
+
+            const cardId = getOnlyPendingAgentStartCardId();
+            if (!cardId) {
+                if (pendingAgentStartCardIds.size > 1) {
+                    logger.debug(
+                        `[Codex] Child task_started while ${pendingAgentStartCardIds.size} spawn_agent cards are pending; ` +
+                        `not linking automatically; agentId=${agentId}`
+                    );
+                }
+                return;
+            }
+
+            logger.debug(`[Codex] Linking pending spawn_agent card from child task_started; cardId=${cardId}, agentId=${agentId}`);
+            linkAgentToCard(agentId, cardId);
+            emitAgentRunUpdate(agentId, {
+                status: 'running',
+                statusText: 'Running',
+                activity: 'Started',
+                activityKind: 'running'
+            }, cardId);
+            flushPendingAgentUpdates(agentId);
+        };
+
         const flushPendingAgentUpdates = (agentId: string): void => {
             const updates = pendingAgentUpdatesByAgentId.get(agentId);
             if (!updates || updates.length === 0) return;
@@ -1004,6 +1158,56 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             for (const cardId of Array.from(pendingAgentStartCardIds)) {
                 failAgentStartCard(cardId, error);
             }
+        };
+
+        const isPresentSpawnOption = (value: unknown): boolean => {
+            if (value === undefined || value === null) return false;
+            return typeof value !== 'string' || value.trim().length > 0;
+        };
+
+        const isFullHistorySpawnWithInheritedOverrides = (input: unknown): boolean => {
+            const record = asRecord(input);
+            if (!record) return false;
+
+            const forkContext = record.fork_context ?? record.forkContext;
+            if (forkContext === false) {
+                return false;
+            }
+
+            return [
+                record.agent_type,
+                record.agentType,
+                record.subagent_type,
+                record.subagentType,
+                record.model,
+                record.reasoning_effort,
+                record.reasoningEffort
+            ].some(isPresentSpawnOption);
+        };
+
+        const failPendingAgentStartsForSpawnArgumentError = (error: unknown): void => {
+            const matchingCardIds = Array.from(pendingAgentStartCardIds).filter((cardId) => {
+                return isFullHistorySpawnWithInheritedOverrides(
+                    pendingAgentToolInputByCallId.get(cardId)?.input
+                );
+            });
+
+            if (matchingCardIds.length > 0) {
+                for (const cardId of matchingCardIds) {
+                    failAgentStartCard(cardId, error);
+                }
+                return;
+            }
+
+            if (pendingAgentStartCardIds.size === 1) {
+                failPendingAgentStarts(error);
+                return;
+            }
+
+            logger.debug(
+                `[Codex] Ignoring spawn_agent argument stderr error for ${pendingAgentStartCardIds.size} ` +
+                'pending starts because none have detectable inherited-override args'
+            );
         };
 
         const emitAgentRunTraceMessage = (agentId: string, message: unknown): void => {
@@ -1705,10 +1909,36 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         let sameThreadRetryAttempt = 0;
         let sameThreadCompactAttempt = 0;
         let recoveryInFlight = false;
+        let lastFinalizedTurnId: string | null = null;
+        let deferredThreadStatusFailure: {
+            event: Record<string, unknown>;
+            threadId: string;
+            turnId: string;
+            timer: ReturnType<typeof setTimeout>;
+        } | null = null;
+        let activeSafetyBufferingRequest: {
+            requestId: string;
+            threadId: string;
+            turnId: string;
+            fasterModel: string;
+            message: QueuedMessage;
+        } | null = null;
+        const dismissedSafetyBufferingKeys = new Set<string>();
+        let agentMessageStartedForTurn = false;
         let compactRecovery: {
             threadId: string;
             message: QueuedMessage;
             timeout: ReturnType<typeof setTimeout> | null;
+        } | null = null;
+        let manualCompact: {
+            threadId: string;
+            turnId: string | null;
+            compacted: boolean;
+            terminal: { type: 'complete' | 'failed'; turnId: string; error?: string } | null;
+            timeout: ReturnType<typeof setTimeout> | null;
+            abortHandler: (() => void) | null;
+            resolve: () => void;
+            reject: (error: Error) => void;
         } | null = null;
         let loopWakeWaiter: (() => void) | null = null;
 
@@ -1813,7 +2043,387 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 });
         };
 
-        const handleCodexEvent = (msg: Record<string, unknown>) => {
+        const clearManualCompact = (compact: typeof manualCompact) => {
+            if (!compact) {
+                return;
+            }
+            if (compact.timeout) {
+                clearTimeout(compact.timeout);
+                compact.timeout = null;
+            }
+            if (compact.abortHandler) {
+                this.abortController.signal.removeEventListener('abort', compact.abortHandler);
+                compact.abortHandler = null;
+            }
+            if (manualCompact === compact) {
+                manualCompact = null;
+            }
+        };
+
+        const settleManualCompact = (
+            compact: typeof manualCompact,
+            error?: Error
+        ) => {
+            if (!compact || manualCompact !== compact) {
+                return;
+            }
+            clearManualCompact(compact);
+            if (error) {
+                compact.reject(error);
+            } else {
+                compact.resolve();
+            }
+        };
+
+        const beginManualCompact = (threadId: string): Promise<void> => {
+            if (manualCompact) {
+                settleManualCompact(manualCompact, new Error('Compaction superseded'));
+            }
+
+            return new Promise<void>((resolve, reject) => {
+                const compact = {
+                    threadId,
+                    turnId: null as string | null,
+                    compacted: false,
+                    terminal: null as { type: 'complete' | 'failed'; turnId: string; error?: string } | null,
+                    timeout: null as ReturnType<typeof setTimeout> | null,
+                    abortHandler: null as (() => void) | null,
+                    resolve,
+                    reject
+                };
+                manualCompact = compact;
+                compact.timeout = setTimeout(() => {
+                    settleManualCompact(compact, new Error('timed out waiting for Codex compaction to finish'));
+                }, SAME_THREAD_COMPACT_TIMEOUT_MS);
+                compact.timeout.unref?.();
+                compact.abortHandler = () => {
+                    settleManualCompact(compact, new Error('compaction interrupted'));
+                };
+                this.abortController.signal.addEventListener('abort', compact.abortHandler, { once: true });
+            });
+        };
+
+        const recordManualCompactStarted = (threadId: string | null, turnId: string | null) => {
+            const compact = manualCompact;
+            if (!compact || !turnId || (threadId && threadId !== compact.threadId)) {
+                return;
+            }
+            compact.turnId ??= turnId;
+        };
+
+        const recordManualCompactCompleted = (
+            threadId: string | null,
+            turnId: string | null,
+            awaitTurnCompletion: boolean
+        ) => {
+            const compact = manualCompact;
+            if (!compact || threadId !== compact.threadId) {
+                return;
+            }
+            if (!awaitTurnCompletion) {
+                settleManualCompact(compact);
+                return;
+            }
+            if (!turnId && !compact.turnId) {
+                settleManualCompact(compact);
+                return;
+            }
+            if (turnId && compact.turnId && turnId !== compact.turnId) {
+                return;
+            }
+            compact.turnId ??= turnId;
+            compact.compacted = true;
+            if (!compact.turnId) {
+                settleManualCompact(compact);
+                return;
+            }
+            if (compact.terminal?.turnId === compact.turnId) {
+                settleManualCompact(
+                    compact,
+                    compact.terminal.type === 'failed'
+                        ? new Error(compact.terminal.error ?? 'Codex compaction failed')
+                        : undefined
+                );
+            }
+        };
+
+        const recordManualCompactTerminal = (
+            type: 'complete' | 'failed',
+            threadId: string | null,
+            turnId: string | null,
+            error?: string
+        ) => {
+            const compact = manualCompact;
+            if (!compact || !turnId || (threadId && threadId !== compact.threadId)) {
+                return;
+            }
+            if (!compact.turnId || turnId !== compact.turnId) {
+                return;
+            }
+            compact.terminal = { type, turnId, ...(error ? { error } : {}) };
+            if (type === 'failed' || compact.compacted) {
+                settleManualCompact(
+                    compact,
+                    type === 'failed' ? new Error(error ?? 'Codex compaction failed') : undefined
+                );
+            }
+        };
+
+        const forwardedGoalSignaturesByThreadId = new Map<string, string>();
+        const forwardedGoalClearsByThreadId = new Set<string>();
+        const adminInterruptedTurnIds = new Set<string>();
+        const adminInterruptedTurnTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+        const suppressReadyForInterruptedTurn = (turnId: string | null) => {
+            if (!turnId) {
+                return;
+            }
+            adminInterruptedTurnIds.add(turnId);
+            const previousTimer = adminInterruptedTurnTimers.get(turnId);
+            if (previousTimer) {
+                clearTimeout(previousTimer);
+            }
+            const timer = setTimeout(() => {
+                adminInterruptedTurnIds.delete(turnId);
+                adminInterruptedTurnTimers.delete(turnId);
+            }, 30_000);
+            timer.unref?.();
+            adminInterruptedTurnTimers.set(turnId, timer);
+        };
+
+        const consumeInterruptedTurnReadySuppression = (turnId: string | null): boolean => {
+            if (!turnId || !adminInterruptedTurnIds.has(turnId)) {
+                return false;
+            }
+            adminInterruptedTurnIds.delete(turnId);
+            const timer = adminInterruptedTurnTimers.get(turnId);
+            if (timer) {
+                clearTimeout(timer);
+                adminInterruptedTurnTimers.delete(turnId);
+            }
+            return true;
+        };
+
+        const clearDeferredThreadStatusFailure = () => {
+            if (!deferredThreadStatusFailure) {
+                return;
+            }
+            clearTimeout(deferredThreadStatusFailure.timer);
+            deferredThreadStatusFailure = null;
+            recoveryInFlight = false;
+        };
+
+        const cancelSafetyBufferingRequest = (reason: string) => {
+            const request = activeSafetyBufferingRequest;
+            if (!request) {
+                return;
+            }
+            activeSafetyBufferingRequest = null;
+            permissionHandler.cancelUserInputRequest(request.requestId, reason);
+        };
+
+        const safetyBufferingTurnKey = (threadId: string, turnId: string) => `${threadId}\u0000${turnId}`;
+        const safetyBufferingKey = (threadId: string, turnId: string, fasterModel: string) => {
+            return `${safetyBufferingTurnKey(threadId, turnId)}\u0000${fasterModel}`;
+        };
+        const clearDismissedSafetyBufferingForTurn = (threadId: string | null, turnId: string | null) => {
+            if (!threadId || !turnId) {
+                return;
+            }
+            const prefix = `${safetyBufferingTurnKey(threadId, turnId)}\u0000`;
+            for (const key of dismissedSafetyBufferingKeys) {
+                if (key.startsWith(prefix)) {
+                    dismissedSafetyBufferingKeys.delete(key);
+                }
+            }
+        };
+
+        const safetyBufferingChoice = (answers: unknown): string | null => {
+            const answersRecord = asRecord(answers);
+            const action = asRecord(answersRecord?.safety_buffering_action);
+            const values = action?.answers ?? answersRecord?.safety_buffering_action;
+            if (!Array.isArray(values)) {
+                return null;
+            }
+            return values.find((value): value is string => typeof value === 'string') ?? null;
+        };
+
+        const retrySafetyBufferedTurn = async (request: NonNullable<typeof activeSafetyBufferingRequest>) => {
+            if (
+                this.currentThreadId !== request.threadId
+                || this.currentTurnId !== request.turnId
+                || !turnInFlight
+                || agentMessageStartedForTurn
+            ) {
+                return;
+            }
+
+            recoveryInFlight = true;
+            suppressReadyForInterruptedTurn(request.turnId);
+            clearReadyAfterTurnTimer?.();
+            let interrupted = false;
+            try {
+                await appServerClient.interruptTurn({
+                    threadId: request.threadId,
+                    turnId: request.turnId
+                });
+                interrupted = true;
+                await appServerClient.rollbackThread({
+                    threadId: request.threadId,
+                    numTurns: 1
+                });
+
+                lastFinalizedTurnId = request.turnId;
+                turnInFlight = false;
+                allowAnonymousTerminalEvent = false;
+                this.currentTurnId = null;
+                sameThreadRetryAttempt = 0;
+                sameThreadCompactAttempt = 0;
+
+                const retryMode: EnhancedMode = {
+                    ...request.message.mode,
+                    model: request.fasterModel,
+                    modelReasoningEffort: 'low'
+                };
+                session.setModel(request.fasterModel);
+                session.setModelReasoningEffort('low');
+                pending = {
+                    ...request.message,
+                    mode: retryMode
+                };
+                const message = `Retrying with the faster model ${request.fasterModel}.`;
+                messageBuffer.addMessage(message, 'status');
+                session.sendSessionEvent({ type: 'message', message });
+            } catch (error) {
+                if (interrupted) {
+                    lastFinalizedTurnId = request.turnId;
+                    turnInFlight = false;
+                    allowAnonymousTerminalEvent = false;
+                    this.currentTurnId = null;
+                    activeMessage = null;
+                } else {
+                    consumeInterruptedTurnReadySuppression(request.turnId);
+                }
+                const message = `Failed to retry with a faster model: ${errorMessage(error)}`;
+                messageBuffer.addMessage(message, 'status');
+                session.sendSessionEvent({ type: 'message', message });
+            } finally {
+                recoveryInFlight = false;
+                wakeLoop();
+                if (interrupted && !pending) {
+                    scheduleReadyAfterTurn?.();
+                }
+            }
+        };
+
+        const showSafetyBufferingRequest = (args: {
+            threadId: string;
+            turnId: string;
+            fasterModel: string;
+        }) => {
+            if (!activeMessage || agentMessageStartedForTurn) {
+                return;
+            }
+            if (dismissedSafetyBufferingKeys.has(safetyBufferingKey(args.threadId, args.turnId, args.fasterModel))) {
+                return;
+            }
+            if (
+                activeSafetyBufferingRequest?.threadId === args.threadId
+                && activeSafetyBufferingRequest.turnId === args.turnId
+                && activeSafetyBufferingRequest.fasterModel === args.fasterModel
+            ) {
+                return;
+            }
+
+            cancelSafetyBufferingRequest('Safety buffering prompt replaced');
+            const request = {
+                requestId: `codex-safety-buffering:${args.threadId}:${args.turnId}:${randomUUID()}`,
+                ...args,
+                message: activeMessage
+            };
+            activeSafetyBufferingRequest = request;
+
+            void permissionHandler.handleUserInputRequest(request.requestId, {
+                questions: [{
+                    id: 'safety_buffering_action',
+                    question: 'Codex is taking extra time to review this request. What would you like to do?',
+                    options: [
+                        {
+                            label: 'Retry with a faster model',
+                            description: `Interrupt this turn and retry with ${args.fasterModel} using low reasoning effort.`
+                        },
+                        {
+                            label: 'Keep waiting',
+                            description: 'Dismiss this choice and let the current turn continue.'
+                        },
+                        {
+                            label: 'Learn more',
+                            description: `[Read about safety checks](${SAFETY_BUFFERING_LEARN_MORE_URL}); the current turn will keep waiting.`
+                        }
+                    ]
+                }]
+            }).then((answers) => {
+                if (activeSafetyBufferingRequest !== request) {
+                    return;
+                }
+                activeSafetyBufferingRequest = null;
+                const choice = safetyBufferingChoice(answers);
+                if (choice === 'Retry with a faster model') {
+                    void retrySafetyBufferedTurn(request);
+                } else if (choice === 'Keep waiting' || choice === 'Learn more') {
+                    dismissedSafetyBufferingKeys.add(
+                        safetyBufferingKey(request.threadId, request.turnId, request.fasterModel)
+                    );
+                    if (choice === 'Learn more') {
+                        const message = `Learn more about Codex safety checks: ${SAFETY_BUFFERING_LEARN_MORE_URL}`;
+                        messageBuffer.addMessage(message, 'status');
+                        session.sendSessionEvent({ type: 'message', message });
+                    }
+                }
+            }).catch((error) => {
+                if (activeSafetyBufferingRequest === request) {
+                    activeSafetyBufferingRequest = null;
+                }
+                logger.debug(`[Codex] Safety buffering choice dismissed: ${errorMessage(error)}`);
+            });
+        };
+
+        const shouldForwardGoalUpdate = (msg: Record<string, unknown>, threadId: string | null): boolean => {
+            const goal = asRecord(msg.goal);
+            const scopedThreadId = threadId
+                ?? asString(goal?.threadId ?? goal?.thread_id)
+                ?? this.currentThreadId;
+            if (!goal || !scopedThreadId) {
+                return true;
+            }
+
+            const signature = goalForwardSignatureKey(buildGoalForwardSignature(goal));
+            if (forwardedGoalSignaturesByThreadId.get(scopedThreadId) === signature) {
+                logger.debug(`[Codex] Suppressing duplicate thread goal update; threadId=${scopedThreadId}`);
+                return false;
+            }
+
+            forwardedGoalClearsByThreadId.delete(scopedThreadId);
+            forwardedGoalSignaturesByThreadId.set(scopedThreadId, signature);
+            return true;
+        };
+
+        const shouldForwardGoalClear = (threadId: string | null): boolean => {
+            if (!threadId) {
+                return true;
+            }
+            if (forwardedGoalClearsByThreadId.has(threadId)) {
+                logger.debug(`[Codex] Suppressing duplicate thread goal clear; threadId=${threadId}`);
+                return false;
+            }
+            forwardedGoalClearsByThreadId.add(threadId);
+            forwardedGoalSignaturesByThreadId.delete(threadId);
+            return true;
+        };
+
+        let codexEventQueue: Promise<void> | null = null;
+
+        const handleCodexEvent = async (msg: Record<string, unknown>): Promise<void> => {
             const msgType = asString(msg.type);
             if (!msgType) return;
             const eventTurnId = asString(msg.turn_id ?? msg.turnId);
@@ -1837,8 +2447,30 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
 
             if (msgType === 'thread_compacted') {
+                recordManualCompactCompleted(
+                    eventThreadId,
+                    eventTurnId,
+                    msg.await_turn_completion === true
+                );
                 completeCompactRecovery(eventThreadId);
                 return;
+            }
+
+            if (msgType === 'task_started') {
+                recordManualCompactStarted(eventThreadId ?? this.currentThreadId, eventTurnId);
+            } else if (msgType === 'task_complete') {
+                recordManualCompactTerminal(
+                    'complete',
+                    eventThreadId ?? this.currentThreadId,
+                    eventTurnId
+                );
+            } else if (msgType === 'task_failed' || msgType === 'turn_aborted') {
+                recordManualCompactTerminal(
+                    'failed',
+                    eventThreadId ?? this.currentThreadId,
+                    eventTurnId,
+                    asString(msg.error) ?? (msgType === 'turn_aborted' ? 'Codex compaction was aborted' : undefined)
+                );
             }
 
             if (eventThreadId && this.currentThreadId && eventThreadId !== this.currentThreadId) {
@@ -1852,6 +2484,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     } else {
                         logger.debug(`[Codex] Child task_started missing turn id; threadId=${eventThreadId}`);
                     }
+                    linkPendingAgentStartFromChildTask(eventThreadId);
                 } else if (isTerminalEvent) {
                     this.activeChildTurns.delete(eventThreadId);
                 }
@@ -1868,6 +2501,19 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
 
             if (msgType === 'thread_goal_updated') {
+                if (shouldForwardGoalUpdate(msg, eventThreadId)) {
+                    session.sendAgentMessage({
+                        ...addCodexEventScope(msg, 'parent', eventThreadId ?? this.currentThreadId),
+                        id: randomUUID()
+                    });
+                }
+                return;
+            }
+
+            if (msgType === 'thread_goal_cleared') {
+                if (!shouldForwardGoalClear(eventThreadId ?? this.currentThreadId)) {
+                    return;
+                }
                 session.sendAgentMessage({
                     ...addCodexEventScope(msg, 'parent', eventThreadId ?? this.currentThreadId),
                     id: randomUUID()
@@ -1875,16 +2521,15 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 return;
             }
 
-            if (msgType === 'thread_goal_cleared') {
-                session.sendAgentMessage({
-                    ...addCodexEventScope(msg, 'parent', eventThreadId ?? this.currentThreadId),
-                    id: randomUUID()
-                });
+            if (isTerminalEvent && eventTurnId && eventTurnId === lastFinalizedTurnId) {
+                logger.debug(`[Codex] Ignoring duplicate terminal event for turn ${eventTurnId}`);
                 return;
             }
 
             if (msgType === 'task_started') {
                 const turnId = eventTurnId;
+                agentMessageStartedForTurn = false;
+                dismissedSafetyBufferingKeys.clear();
                 if (turnId) {
                     this.currentTurnId = turnId;
                     allowAnonymousTerminalEvent = false;
@@ -1893,19 +2538,166 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 }
             }
 
+            if (msgType === 'agent_message_delta') {
+                agentMessageStartedForTurn = true;
+                if (
+                    activeSafetyBufferingRequest
+                    && (!eventTurnId || activeSafetyBufferingRequest.turnId === eventTurnId)
+                ) {
+                    cancelSafetyBufferingRequest('Agent output started');
+                }
+                return;
+            }
+
+            if (msgType === 'model_safety_buffering') {
+                const showBufferingUi = msg.show_buffering_ui === true;
+                if (!showBufferingUi) {
+                    clearDismissedSafetyBufferingForTurn(
+                        eventThreadId ?? this.currentThreadId,
+                        eventTurnId ?? this.currentTurnId
+                    );
+                    if (
+                        activeSafetyBufferingRequest
+                        && (!eventTurnId || activeSafetyBufferingRequest.turnId === eventTurnId)
+                    ) {
+                        cancelSafetyBufferingRequest('Safety buffering ended');
+                    }
+                    return;
+                }
+
+                const fasterModel = asString(msg.faster_model ?? msg.fasterModel);
+                if (
+                    fasterModel
+                    && eventThreadId
+                    && eventTurnId
+                    && eventThreadId === this.currentThreadId
+                    && eventTurnId === this.currentTurnId
+                    && turnInFlight
+                ) {
+                    showSafetyBufferingRequest({
+                        threadId: eventThreadId,
+                        turnId: eventTurnId,
+                        fasterModel
+                    });
+                } else if (!fasterModel) {
+                    const message = `Codex is taking extra time to review this request. Learn more: ${SAFETY_BUFFERING_LEARN_MORE_URL}`;
+                    messageBuffer.addMessage(message, 'status');
+                    session.sendSessionEvent({ type: 'message', message });
+                }
+                return;
+            }
+
+            if (msgType === 'model_rerouted') {
+                const fromModel = asString(msg.from_model ?? msg.fromModel);
+                const toModel = asString(msg.to_model ?? msg.toModel);
+                const reason = asString(msg.reason);
+                if (fromModel && toModel) {
+                    const message = `Codex rerouted the model from ${fromModel} to ${toModel}${reason ? ` (${reason})` : ''}.`;
+                    messageBuffer.addMessage(message, 'status');
+                    session.sendSessionEvent({ type: 'message', message });
+                }
+                return;
+            }
+
+            if (msgType === 'model_verification') {
+                const verifications = Array.isArray(msg.verifications) ? msg.verifications : [];
+                if (verifications.includes('trustedAccessForCyber')) {
+                    const message = 'Your conversations have multiple flags for possible cybersecurity risk. ' +
+                        'Responses may take longer because extra safety checks are on. To get authorized for ' +
+                        `security work, join [Trusted Access for Cyber](${TRUSTED_ACCESS_FOR_CYBER_URL}).`;
+                    messageBuffer.addMessage(message, 'status');
+                    session.sendSessionEvent({ type: 'message', message });
+                }
+                return;
+            }
+
             const isThreadStatusFailure = msgType === 'task_failed' && msg.terminal_source === 'thread_status';
             const error = msgType === 'task_failed' ? asString(msg.error) : null;
+            const explicitlyNonRetryable = msgType === 'task_failed'
+                && (msg.retryable === false || isPolicyBlockedCodexFailure(msg, error));
+
+            if (deferredThreadStatusFailure && isTerminalEvent && !isThreadStatusFailure) {
+                const sameThread = !eventThreadId || eventThreadId === deferredThreadStatusFailure.threadId;
+                const sameTurn = !eventTurnId || eventTurnId === deferredThreadStatusFailure.turnId;
+                if (sameThread && sameTurn) {
+                    if (
+                        msgType === 'task_failed'
+                        && msg.terminal_source === 'turn_completed'
+                        && !error
+                        && !explicitlyNonRetryable
+                    ) {
+                        const deferred = deferredThreadStatusFailure;
+                        clearDeferredThreadStatusFailure();
+                        await handleCodexEvent({
+                            ...deferred.event,
+                            turn_id: deferred.turnId,
+                            deferred_thread_status: true
+                        });
+                        return;
+                    }
+                    clearDeferredThreadStatusFailure();
+                }
+            }
+
+            if (
+                isThreadStatusFailure
+                && isGenericThreadSystemError(error)
+                && msg.deferred_thread_status !== true
+            ) {
+                if (shouldIgnoreTerminalEvent({
+                    eventTurnId,
+                    currentTurnId: this.currentTurnId,
+                    turnInFlight,
+                    allowAnonymousTerminalEvent,
+                    eventThreadId,
+                    currentThreadId: this.currentThreadId,
+                    allowMatchingThreadIdTerminalEvent: true
+                })) {
+                    return;
+                }
+                const threadId = eventThreadId ?? this.currentThreadId;
+                const turnId = eventTurnId ?? this.currentTurnId;
+                if (!threadId || !turnId) {
+                    return;
+                }
+                clearDeferredThreadStatusFailure();
+                const event = { ...msg };
+                const timer = setTimeout(() => {
+                    if (deferredThreadStatusFailure?.event !== event) {
+                        return;
+                    }
+                    deferredThreadStatusFailure = null;
+                    recoveryInFlight = false;
+                    void handleCodexEvent({
+                        ...event,
+                        turn_id: turnId,
+                        deferred_thread_status: true
+                    }).catch((deferredError) => {
+                        logger.debug(`[Codex] Failed to handle deferred thread status: ${errorMessage(deferredError)}`);
+                    });
+                }, THREAD_STATUS_FAILURE_GRACE_MS);
+                deferredThreadStatusFailure = { event, threadId, turnId, timer };
+                recoveryInFlight = true;
+                return;
+            }
+
             const shouldCompactAndRetrySameThread = msgType === 'task_failed'
+                && !explicitlyNonRetryable
                 && isContextCompactRetryableCodexError(error)
                 && Boolean(activeMessage)
                 && Boolean(this.currentThreadId)
                 && sameThreadCompactAttempt < SAME_THREAD_MAX_COMPACT_RETRIES;
             const shouldRetrySameThread = msgType === 'task_failed'
+                && !explicitlyNonRetryable
                 && !shouldCompactAndRetrySameThread
                 && isSameThreadRetryableCodexError(error)
                 && Boolean(activeMessage)
                 && Boolean(this.currentThreadId)
                 && sameThreadRetryAttempt < SAME_THREAD_MAX_RETRIES;
+
+            const suppressReadyForThisTerminalEvent = isTerminalEvent
+                ? consumeInterruptedTurnReadySuppression(eventTurnId)
+                : false;
 
             if (isTerminalEvent) {
                 if (shouldIgnoreTerminalEvent({
@@ -1924,6 +2716,20 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                         `turnInFlight=${turnInFlight}, allowAnonymous=${allowAnonymousTerminalEvent}`
                     );
                     return;
+                }
+                const finalizedTurnId = eventTurnId ?? this.currentTurnId;
+                if (finalizedTurnId) {
+                    lastFinalizedTurnId = finalizedTurnId;
+                }
+                clearDismissedSafetyBufferingForTurn(
+                    eventThreadId ?? this.currentThreadId,
+                    finalizedTurnId
+                );
+                if (
+                    activeSafetyBufferingRequest
+                    && (!finalizedTurnId || activeSafetyBufferingRequest.turnId === finalizedTurnId)
+                ) {
+                    cancelSafetyBufferingRequest('Turn completed');
                 }
                 if (shouldCompactAndRetrySameThread) {
                     const threadId = this.currentThreadId;
@@ -1987,7 +2793,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     messageBuffer.addMessage(retryMessage, 'status');
                     session.sendSessionEvent({ type: 'message', message: retryMessage });
                 } else {
-                    const message = error ? `Task failed: ${error}` : 'Task failed';
+                    const visibleError = error && isPolicyBlockedCodexFailure(msg, error)
+                        ? `${error}\n\nTrusted Access: ${CYBER_POLICY_TRUSTED_ACCESS_URL}\nLearn more: ${SAFETY_BUFFERING_LEARN_MORE_URL}`
+                        : error;
+                    const message = visibleError ? `Task failed: ${visibleError}` : 'Task failed';
                     messageBuffer.addMessage(message, 'status');
                     session.sendSessionEvent({ type: 'message', message });
                 }
@@ -2019,9 +2828,18 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 wakeLoop();
             }
 
-            if (isTerminalEvent && !turnInFlight) {
-                scheduleReadyAfterTurn?.();
-            } else if (readyAfterTurnTimer && msgType !== 'task_started') {
+            if (isTerminalEvent && !turnInFlight && !suppressReadyForThisTerminalEvent) {
+                if (msg.deferred_thread_status === true) {
+                    emitReadyIfIdle({
+                        pending: pending ?? (recoveryInFlight ? activeMessage : null),
+                        queueSize: () => session.queue.size(),
+                        shouldExit: this.shouldExit,
+                        sendReady
+                    });
+                } else {
+                    scheduleReadyAfterTurn?.();
+                }
+            } else if (readyAfterTurnTimer && msgType !== 'task_started' && !suppressReadyForThisTerminalEvent) {
                 scheduleReadyAfterTurn?.();
             }
 
@@ -2052,6 +2870,29 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 const message = asString(msg.message);
                 if (message) {
                     sendAgentTextMessage(message);
+                }
+            }
+            if (msgType === 'generated_image') {
+                const sourceImageId = asString(msg.image_id ?? msg.imageId ?? msg.id);
+                const imageId = randomUUID();
+                const savedPath = asString(msg.saved_path ?? msg.savedPath);
+                if (savedPath) {
+                    const image = await registerGeneratedImageFromPath({
+                        id: imageId,
+                        path: savedPath,
+                        fileName: asString(msg.file_name ?? msg.fileName)
+                    });
+                    if (!image) return;
+
+                    messageBuffer.addMessage(`Generated image: ${image.fileName}`, 'assistant');
+                    session.sendAgentMessage({
+                        type: 'generated-image',
+                        imageId: image.id,
+                        sourceImageId,
+                        fileName: image.fileName,
+                        mimeType: image.mimeType,
+                        id: randomUUID()
+                    });
                 }
             }
             if (msgType === 'exec_command_begin' || msgType === 'exec_approval_request') {
@@ -2299,6 +3140,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         registerAppServerPermissionHandlers({
             client: appServerClient,
             permissionHandler,
+            getPermissionMode: getCurrentCodexPermissionMode,
             onUserInputRequest: async ({ id, input }) => {
                 try {
                     const answers = await permissionHandler.handleUserInputRequest(id, input);
@@ -2320,8 +3162,38 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             const events = appServerEventConverter.handleNotification(method, params);
             for (const event of events) {
                 const eventRecord = asRecord(event) ?? { type: undefined };
-                handleCodexEvent(eventRecord);
+                const msgType = asString(eventRecord.type);
+                const hasGeneratedImagePath = msgType === 'generated_image' && Boolean(asString(eventRecord.saved_path ?? eventRecord.savedPath));
+
+                if (codexEventQueue || hasGeneratedImagePath) {
+                    const previousQueue = codexEventQueue ?? Promise.resolve();
+                    const nextQueue = previousQueue
+                        .then(() => handleCodexEvent(eventRecord))
+                        .catch((error) => logger.debug('[Codex] Failed to handle app-server event:', error instanceof Error ? error.message : String(error)));
+                    const queued = nextQueue.finally(() => {
+                        if (codexEventQueue === queued) {
+                            codexEventQueue = null;
+                        }
+                    });
+                    codexEventQueue = queued;
+                } else {
+                    void handleCodexEvent(eventRecord).catch((error) => {
+                        logger.debug('[Codex] Failed to handle app-server event:', error instanceof Error ? error.message : String(error));
+                    });
+                }
             }
+        });
+
+        appServerClient.setStderrHandler((text) => {
+            const spawnAgentError = extractSpawnAgentStartErrorFromStderr(text);
+            if (!spawnAgentError || pendingAgentStartCardIds.size === 0) {
+                return;
+            }
+            logger.debug(
+                `[Codex] Failing ${pendingAgentStartCardIds.size} pending spawn_agent start(s) ` +
+                `from app-server stderr: ${spawnAgentError}`
+            );
+            failPendingAgentStartsForSpawnArgumentError(spawnAgentError);
         });
 
         const { server: happyServer, mcpServers } = await buildHapiMcpBridge(session.client, {
@@ -2371,8 +3243,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             await appServerClient.setExperimentalFeatureEnablement({ enablement: { goals: true } });
             logger.debug('[Codex] goals feature enabled');
         } catch (error) {
-            supportsGoals = false;
-            logger.debug(`[Codex] failed to enable goals feature: ${errorMessage(error)}`);
+            logger.debug(`[Codex] failed to enable goals feature: ${errorMessage(error)}; will rely on configured feature state`);
         }
         try {
             const response = await appServerClient.listCollaborationModes();
@@ -2387,6 +3258,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
         let hasThread = false;
         let pending: QueuedMessage | null = null;
+        let suppressReadyForAdminCommand = false;
 
         clearReadyAfterTurnTimer = () => {
             if (!readyAfterTurnTimer) {
@@ -2398,8 +3270,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
         scheduleReadyAfterTurn = () => {
             clearReadyAfterTurnTimer?.();
+            if (suppressReadyForAdminCommand) {
+                return;
+            }
             readyAfterTurnTimer = setTimeout(() => {
                 readyAfterTurnTimer = null;
+                if (suppressReadyForAdminCommand) {
+                    return;
+                }
                 emitReadyIfIdle({
                     pending: pending ?? (recoveryInFlight ? activeMessage : null),
                     queueSize: () => session.queue.size(),
@@ -2416,6 +3294,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         const sendGoalEvent = (event: Record<string, unknown>) => {
+            const threadId = asString(event.thread_id ?? event.threadId) ?? this.currentThreadId;
+            if (event.type === 'thread_goal_cleared') {
+                if (!shouldForwardGoalClear(threadId)) {
+                    return;
+                }
+            } else if (event.type === 'thread_goal_updated' && !shouldForwardGoalUpdate(event, threadId)) {
+                return;
+            }
             session.sendAgentMessage({
                 ...addCodexEventScope(event, 'parent', this.currentThreadId),
                 id: randomUUID()
@@ -2423,6 +3309,8 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         const resetCurrentTurnState = () => {
+            clearDeferredThreadStatusFailure();
+            cancelSafetyBufferingRequest('Session reset');
             turnInFlight = false;
             allowAnonymousTerminalEvent = false;
             this.currentTurnId = null;
@@ -2434,6 +3322,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
         };
 
         const interruptActiveTurn = async () => {
+            suppressReadyForInterruptedTurn(this.currentTurnId);
             await this.interruptActiveTurns('slash command');
         };
 
@@ -2548,7 +3437,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     mcpServers,
                     cliOverrides: session.codexCliOverrides
                 });
-                const threadResponse = await appServerClient.startThread(threadParams, {
+                const threadResponse = await appServerClient.startThread({
+                    ...threadParams,
+                    threadSource: HAPI_TOP_LEVEL_THREAD_SOURCE
+                }, {
                     signal: this.abortController.signal
                 });
                 const threadRecord = asRecord(threadResponse);
@@ -2636,6 +3528,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     } else {
                         sendVisibleStatus('No goal to clear');
                     }
+                    sendGoalEvent({ type: 'thread_goal_cleared', thread_id: threadId });
                     return true;
                 }
 
@@ -2649,6 +3542,7 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 });
                 const goal = normalizeGoal(response.goal);
                 sendVisibleStatus(formatGoalUsage(goal));
+                sendGoalEvent({ type: 'thread_goal_updated', thread_id: threadId, goal });
             } catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
                 if (/goals feature is disabled|unsupported remote app-server request|method not found/i.test(detail)) {
@@ -2694,24 +3588,42 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             }
 
             sendVisibleStatus('Compaction started');
+            const compactCompletion = beginManualCompact(threadId);
+            void compactCompletion.catch(() => {});
             try {
                 await appServerClient.compactThread({ threadId }, {
                     signal: this.abortController.signal
                 });
+                await compactCompletion;
                 sendVisibleStatus('Compaction completed');
             } catch (error) {
                 const detail = error instanceof Error ? error.message : String(error);
                 sendVisibleStatus(`Compaction failed: ${detail}`);
+            } finally {
+                if (manualCompact?.threadId === threadId) {
+                    const compact = manualCompact;
+                    clearManualCompact(compact);
+                    compact.resolve();
+                }
             }
             return true;
         };
 
         while (!this.shouldExit) {
             logActiveHandles('loop-top');
-            if (!pending && (turnInFlight || recoveryInFlight) && session.queue.size() === 0) {
+            if (!pending && recoveryInFlight) {
                 await waitForTurnOrRecovery(this.abortController.signal);
                 if (this.abortController.signal.aborted && !this.shouldExit) {
-                    logger.debug('[codex]: Internal wait aborted while turn/recovery was active; continuing');
+                    logger.debug('[codex]: Internal wait aborted while recovery was active; continuing');
+                    continue;
+                }
+                continue;
+            }
+
+            if (!pending && turnInFlight && session.queue.size() === 0) {
+                await waitForTurnOrRecovery(this.abortController.signal);
+                if (this.abortController.signal.aborted && !this.shouldExit) {
+                    logger.debug('[codex]: Internal wait aborted while turn was active; continuing');
                     continue;
                 }
                 continue;
@@ -2745,6 +3657,12 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                 messageBuffer.addMessage(message.message, 'user');
             }
             activeMessage = message;
+            const isGoalCommand = parseGoalCommand(message.message) !== null;
+            let suppressReadyAfterMessage = isGoalCommand;
+            if (isGoalCommand) {
+                suppressReadyForAdminCommand = true;
+                clearReadyAfterTurnTimer?.();
+            }
 
             try {
                 if (await handleGoalCommand(message)) {
@@ -2768,20 +3686,34 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
                     if (resumeCandidate) {
                         try {
-                            const resumeResponse = await appServerClient.resumeThread({
-                                threadId: resumeCandidate,
-                                ...threadParams
-                            }, {
-                                signal: this.abortController.signal
-                            });
-                            const resumeRecord = asRecord(resumeResponse);
-                            const resumeThread = resumeRecord ? asRecord(resumeRecord.thread) : null;
-                            threadId = asString(resumeThread?.id) ?? resumeCandidate;
-                            applyResolvedModel(resumeRecord?.model);
-                            logger.debug(`[Codex] Resumed app-server thread ${threadId}`);
+                            const shouldForkImportedSource = Boolean(
+                                session.sourceSessionId
+                                && resumeCandidate === session.sourceSessionId
+                            );
+                            const response = shouldForkImportedSource
+                                ? await appServerClient.forkThread({
+                                    threadId: resumeCandidate,
+                                    ...threadParams
+                                }, {
+                                    signal: this.abortController.signal
+                                })
+                                : await appServerClient.resumeThread({
+                                    threadId: resumeCandidate,
+                                    ...threadParams
+                                }, {
+                                    signal: this.abortController.signal
+                                });
+                            const responseRecord = asRecord(response);
+                            const responseThread = responseRecord ? asRecord(responseRecord.thread) : null;
+                            threadId = asString(responseThread?.id) ?? resumeCandidate;
+                            applyResolvedModel(responseRecord?.model);
+                            logger.debug(shouldForkImportedSource
+                                ? `[Codex] Forked imported app-server thread ${resumeCandidate} -> ${threadId}`
+                                : `[Codex] Resumed app-server thread ${threadId}`);
                         } catch (error) {
-                            logger.warn(`[Codex] Failed to resume app-server thread ${resumeCandidate}; preserving old conversation boundary`, error);
-                            const failureMessage = `Task failed: Codex conversation ${resumeCandidate} could not be resumed; no new conversation was created`;
+                            const resumeError = formatCodexResumeError(error);
+                            logger.warn(`[Codex] Failed to resume app-server thread ${resumeCandidate}; preserving old conversation boundary: ${resumeError}`, error);
+                            const failureMessage = `Task failed: Codex conversation ${resumeCandidate} could not be resumed; no new conversation was created. Reason: ${resumeError}`;
                             messageBuffer.addMessage(failureMessage, 'status');
                             session.sendSessionEvent({ type: 'message', message: failureMessage });
                             pending = null;
@@ -2790,7 +3722,10 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     }
 
                     if (!threadId) {
-                        const threadResponse = await appServerClient.startThread(threadParams, {
+                        const threadResponse = await appServerClient.startThread({
+                            ...threadParams,
+                            threadSource: HAPI_TOP_LEVEL_THREAD_SOURCE
+                        }, {
                             signal: this.abortController.signal
                         });
                         const threadRecord = asRecord(threadResponse);
@@ -2906,12 +3841,17 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     childAgentRuntimeById.clear();
                     session.onThinkingChange(false);
                     clearReadyAfterTurnTimer?.();
-                    emitReadyIfIdle({
-                        pending: pending ?? (recoveryInFlight ? activeMessage : null),
-                        queueSize: () => session.queue.size(),
-                        shouldExit: this.shouldExit,
-                        sendReady
-                    });
+                    if (!suppressReadyAfterMessage) {
+                        emitReadyIfIdle({
+                            pending: pending ?? (recoveryInFlight ? activeMessage : null),
+                            queueSize: () => session.queue.size(),
+                            shouldExit: this.shouldExit,
+                            sendReady
+                        });
+                    }
+                }
+                if (suppressReadyAfterMessage) {
+                    suppressReadyForAdminCommand = false;
                 }
                 logActiveHandles('after-turn');
             }
@@ -2919,11 +3859,14 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
 
         await imageUploadChain;
         failPendingAgentStarts('spawn_agent did not return an agent id before the Codex session ended');
+        clearDeferredThreadStatusFailure();
+        cancelSafetyBufferingRequest('Session ended');
         cancelAllPendingThrottledAgentRunUpdates();
     }
 
     protected async cleanup(): Promise<void> {
         logger.debug('[codex-remote]: cleanup start');
+        this.appServerClient.setStderrHandler(null);
         try {
             await this.appServerClient.disconnect();
         } catch (error) {

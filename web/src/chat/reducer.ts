@@ -5,6 +5,7 @@ import { traceMessages, type TracedMessage } from '@/chat/tracer'
 import { dedupeAgentEvents, foldApiErrorEvents } from '@/chat/reducerEvents'
 import { collectTitleChanges, collectToolIdsFromMessages, ensureToolBlock, getPermissions } from '@/chat/reducerTools'
 import { reduceTimeline } from '@/chat/reducerTimeline'
+import { isRedundantGoalStatusMessageText } from '@hapi/protocol/messages'
 
 // Calculate context size from usage data
 function calculateContextSize(usage: UsageData): number {
@@ -28,22 +29,70 @@ export type LatestUsage = {
     timestamp: number
 }
 
+export type ReduceChatBlocksOptions = {
+    goalStateMessages?: NormalizedMessage[]
+}
+
 function getLatestThreadGoal(normalized: NormalizedMessage[]): ThreadGoal | null {
+    let sawNewerNonGoalUserMessage = false
     for (let i = normalized.length - 1; i >= 0; i--) {
         const msg = normalized[i]
+        if (msg.role === 'user') {
+            if (!/^\s*\/goal(?:\s|$)/i.test(msg.content.text)) {
+                sawNewerNonGoalUserMessage = true
+            }
+            continue
+        }
         if (msg.role !== 'event') continue
         const event = msg.content as AgentEvent
         if (event.type === 'thread-goal-cleared') return null
         if (event.type === 'thread-goal-updated') {
-            return (event as { goal?: ThreadGoal }).goal ?? null
+            const goal = (event as { goal?: ThreadGoal }).goal ?? null
+            if (goal?.status === 'complete' && sawNewerNonGoalUserMessage) {
+                return null
+            }
+            return goal
         }
     }
     return null
 }
 
+function isRedundantGoalStatusMessage(event: AgentEvent): boolean {
+    if (event.type !== 'message') return false
+    return isRedundantGoalStatusMessageText(event.message)
+}
+
+function isSilentGoalEventBlock(block: ChatBlock): boolean {
+    return block.kind === 'agent-event'
+        && (
+            block.event.type === 'thread-goal-updated'
+            || block.event.type === 'thread-goal-cleared'
+            || isRedundantGoalStatusMessage(block.event)
+        )
+}
+
+function filterSilentGoalBlocks(blocks: ChatBlock[]): ChatBlock[] {
+    const filtered: ChatBlock[] = []
+
+    for (const block of blocks) {
+        if (isSilentGoalEventBlock(block)) continue
+        if (block.kind === 'tool-call' && block.children.length > 0) {
+            filtered.push({
+                ...block,
+                children: filterSilentGoalBlocks(block.children)
+            })
+            continue
+        }
+        filtered.push(block)
+    }
+
+    return filtered
+}
+
 export function reduceChatBlocks(
     normalized: NormalizedMessage[],
-    agentState: AgentState | null | undefined
+    agentState: AgentState | null | undefined,
+    options: ReduceChatBlocksOptions = {}
 ): { blocks: ChatBlock[]; hasReadyEvent: boolean; latestUsage: LatestUsage | null; latestGoal: ThreadGoal | null } {
     const permissionsById = getPermissions(agentState)
     const toolIdsInMessages = collectToolIdsFromMessages(normalized)
@@ -69,14 +118,23 @@ export function reduceChatBlocks(
     const rootResult = reduceTimeline(root, reducerContext)
     let hasReadyEvent = rootResult.hasReadyEvent
 
-    // Only create permission-only tool cards when there is no tool call/result in the transcript.
-    // Also skip if the permission is older than the oldest message in the current view,
-    // to avoid mixing old tool cards with newer messages when paginating.
+    // Synthesize a tool card only for a *pending* permission that has no tool
+    // call/result in the transcript — so the user can still answer it when its
+    // tool_use message hasn't loaded. A resolved request (approved/denied/
+    // canceled) is history: agentState keeps it in completedRequests, but
+    // synthesizing it here appends a card to the end of the timeline (there is
+    // no chronological re-sort), pinning a stale "answered" card above the
+    // composer forever. Resolved requests render only via their own message,
+    // when it is in the window.
+    // Also skip if the permission is older than the oldest message in the
+    // current view, to avoid mixing old tool cards with newer messages when
+    // paginating.
     const oldestMessageTime = normalized.length > 0
         ? Math.min(...normalized.map(m => m.createdAt))
         : null
 
     for (const [id, entry] of permissionsById) {
+        if (entry.permission.status !== 'pending') continue
         if (toolIdsInMessages.has(id)) continue
         if (rootResult.toolBlocksById.has(id)) continue
 
@@ -88,7 +146,7 @@ export function reduceChatBlocks(
             continue
         }
 
-        const block = ensureToolBlock(rootResult.blocks, rootResult.toolBlocksById, id, {
+        ensureToolBlock(rootResult.blocks, rootResult.toolBlocksById, id, {
             createdAt,
             localId: null,
             name: entry.toolName,
@@ -96,20 +154,6 @@ export function reduceChatBlocks(
             description: null,
             permission: entry.permission
         })
-
-        if (entry.permission.status === 'approved') {
-            block.tool.state = 'completed'
-            block.tool.completedAt = entry.permission.completedAt ?? createdAt
-            if (block.tool.result === undefined) {
-                block.tool.result = 'Approved'
-            }
-        } else if (entry.permission.status === 'denied' || entry.permission.status === 'canceled') {
-            block.tool.state = 'error'
-            block.tool.completedAt = entry.permission.completedAt ?? createdAt
-            if (block.tool.result === undefined && entry.permission.reason) {
-                block.tool.result = { error: entry.permission.reason }
-            }
-        }
     }
 
     // Calculate latest usage from messages (find the most recent message with usage data)
@@ -131,9 +175,9 @@ export function reduceChatBlocks(
     }
 
     return {
-        blocks: dedupeAgentEvents(foldApiErrorEvents(rootResult.blocks)),
+        blocks: filterSilentGoalBlocks(dedupeAgentEvents(foldApiErrorEvents(rootResult.blocks))),
         hasReadyEvent,
         latestUsage,
-        latestGoal: getLatestThreadGoal(normalized)
+        latestGoal: getLatestThreadGoal(options.goalStateMessages ?? normalized)
     }
 }

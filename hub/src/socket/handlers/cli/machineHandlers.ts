@@ -9,6 +9,7 @@ import type { AccessErrorReason, AccessResult } from './types'
 type MachineAlivePayload = {
     machineId: string
     time: number
+    health?: unknown
 }
 
 type ResolveMachineAccess = (machineId: string) => AccessResult<StoredMachine>
@@ -89,7 +90,7 @@ export function registerMachineHandlers(socket: CliSocketWithData, deps: Machine
                 }
             }
             socket.to(`machine:${id}`).emit('update', update)
-            onWebappEvent?.({ type: 'machine-updated', machineId: id, data: { id } })
+            onWebappEvent?.({ type: 'machine-updated', machineId: id })
         }
     }
 
@@ -134,7 +135,7 @@ export function registerMachineHandlers(socket: CliSocketWithData, deps: Machine
                 }
             }
             socket.to(`machine:${id}`).emit('update', update)
-            onWebappEvent?.({ type: 'machine-updated', machineId: id, data: { id } })
+            onWebappEvent?.({ type: 'machine-updated', machineId: id })
         }
     }
 

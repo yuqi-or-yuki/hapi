@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import { logger } from '@/ui/logger';
 import { AppServerEventConverter } from './appServerEventConverter';
 
 describe('AppServerEventConverter', () => {
@@ -71,7 +72,12 @@ describe('AppServerEventConverter', () => {
         expect(interrupted).toEqual([{ type: 'turn_aborted', turn_id: 'turn-1' }]);
 
         const failed = converter.handleNotification('turn/completed', { turn: { id: 'turn-1' }, status: 'Failed', message: 'boom' });
-        expect(failed).toEqual([{ type: 'task_failed', turn_id: 'turn-1', error: 'boom' }]);
+        expect(failed).toEqual([{
+            type: 'task_failed',
+            turn_id: 'turn-1',
+            terminal_source: 'turn_completed',
+            error: 'boom'
+        }]);
     });
 
     it('accumulates agent message deltas', () => {
@@ -692,6 +698,120 @@ describe('AppServerEventConverter', () => {
         expect(events).toEqual([{ type: 'task_failed', error: 'fatal' }]);
     });
 
+    it('preserves typed non-retryable cyber-policy errors', () => {
+        const converter = new AppServerEventConverter();
+
+        const events = converter.handleNotification('error', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            error: {
+                message: 'This content was flagged for possible cybersecurity risk.',
+                codexErrorInfo: 'cyberPolicy'
+            },
+            willRetry: false
+        });
+
+        expect(events).toEqual([{
+            type: 'task_failed',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            terminal_source: 'error',
+            retryable: false,
+            codex_error_info: 'cyberPolicy',
+            error: 'This content was flagged for possible cybersecurity risk.'
+        }]);
+    });
+
+    it('preserves cyber-policy metadata from wrapped and completed-turn errors', () => {
+        const converter = new AppServerEventConverter();
+
+        expect(converter.handleNotification('codex/event/error', {
+            msg: {
+                type: 'error',
+                thread_id: 'thread-1',
+                turn_id: 'turn-1',
+                message: 'wrapped policy failure',
+                codex_error_info: 'cyber_policy',
+                will_retry: false
+            }
+        })).toEqual([{
+            type: 'task_failed',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            retryable: false,
+            codex_error_info: 'cyber_policy',
+            error: 'wrapped policy failure'
+        }]);
+
+        expect(converter.handleNotification('turn/completed', {
+            threadId: 'thread-1',
+            turn: {
+                id: 'turn-1',
+                status: 'failed',
+                error: {
+                    message: 'completed policy failure',
+                    codexErrorInfo: 'CyberPolicy'
+                }
+            }
+        })).toEqual([{
+            type: 'task_failed',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            terminal_source: 'turn_completed',
+            codex_error_info: 'CyberPolicy',
+            error: 'completed policy failure'
+        }]);
+    });
+
+    it('maps Codex model safety notifications', () => {
+        const converter = new AppServerEventConverter();
+
+        expect(converter.handleNotification('model/safetyBuffering/updated', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            model: 'gpt-5.4',
+            useCases: ['cyber'],
+            reasons: ['review'],
+            showBufferingUi: true,
+            fasterModel: 'gpt-5.4-mini'
+        })).toEqual([{
+            type: 'model_safety_buffering',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            model: 'gpt-5.4',
+            use_cases: ['cyber'],
+            reasons: ['review'],
+            show_buffering_ui: true,
+            faster_model: 'gpt-5.4-mini'
+        }]);
+
+        expect(converter.handleNotification('model/rerouted', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            fromModel: 'gpt-5.4',
+            toModel: 'gpt-5.4-codex',
+            reason: 'highRiskCyberActivity'
+        })).toEqual([{
+            type: 'model_rerouted',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            from_model: 'gpt-5.4',
+            to_model: 'gpt-5.4-codex',
+            reason: 'highRiskCyberActivity'
+        }]);
+
+        expect(converter.handleNotification('model/verification', {
+            threadId: 'thread-1',
+            turnId: 'turn-1',
+            verifications: ['trustedAccessForCyber']
+        })).toEqual([{
+            type: 'model_verification',
+            thread_id: 'thread-1',
+            turn_id: 'turn-1',
+            verifications: ['trustedAccessForCyber']
+        }]);
+    });
+
     it('maps thread/compacted notifications', () => {
         const converter = new AppServerEventConverter();
         const events = converter.handleNotification('thread/compacted', {
@@ -704,6 +824,29 @@ describe('AppServerEventConverter', () => {
                 type: 'thread_compacted',
                 thread_id: 'thread-1',
                 turn_id: 'turn-compact'
+            },
+            {
+                type: 'context_compacted',
+                thread_id: 'thread-1',
+                turn_id: 'turn-compact'
+            }
+        ]);
+    });
+
+    it('maps completed contextCompaction items and preserves the turn boundary', () => {
+        const converter = new AppServerEventConverter();
+        const events = converter.handleNotification('item/completed', {
+            threadId: 'thread-1',
+            turnId: 'turn-compact',
+            item: { id: 'compact-item-1', type: 'contextCompaction' }
+        });
+
+        expect(events).toEqual([
+            {
+                type: 'thread_compacted',
+                thread_id: 'thread-1',
+                turn_id: 'turn-compact',
+                await_turn_completion: true
             },
             {
                 type: 'context_compacted',
@@ -742,4 +885,51 @@ describe('AppServerEventConverter', () => {
         ]);
     });
 
+    it('converts completed image generation items without including large result payloads', () => {
+        const converter = new AppServerEventConverter();
+        const largeImageResult = 'a'.repeat(4096);
+
+        const events = converter.handleNotification('item/completed', {
+            item: {
+                id: 'image-1',
+                type: 'imageGeneration',
+                result: largeImageResult,
+                savedPath: '/tmp/image.png',
+                mimeType: 'image/png'
+            }
+        });
+
+        expect(events).toEqual([{
+            type: 'generated_image',
+            image_id: 'image-1',
+            saved_path: '/tmp/image.png',
+            file_name: 'image.png',
+            mime_type: 'image/png'
+        }]);
+        expect(JSON.stringify(events)).not.toContain(largeImageResult);
+    });
+
+    it('truncates large unhandled notification payloads before logging', () => {
+        const converter = new AppServerEventConverter();
+        const debug = vi.spyOn(logger, 'debug').mockImplementation(() => undefined);
+        const largeResult = 'a'.repeat(4096);
+
+        const events = converter.handleNotification('item/completed', {
+            item: {
+                id: 'unknown-1',
+                type: 'unknownLargePayload',
+                result: largeResult,
+                savedPath: '/tmp/image.png'
+            }
+        });
+
+        expect(events).toEqual([]);
+        expect(debug).toHaveBeenCalledTimes(1);
+        const logged = debug.mock.calls[0]?.[1] as { params?: { item?: { result?: string; savedPath?: string } } };
+        expect(logged.params?.item?.result).not.toBe(largeResult);
+        expect(logged.params?.item?.result).toContain('[truncated 3584 chars for logs]');
+        expect(logged.params?.item?.savedPath).toBe('/tmp/image.png');
+
+        debug.mockRestore();
+    });
 });

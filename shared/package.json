@@ -7,14 +7,23 @@
     "types": "./src/index.ts",
     "exports": {
         ".": "./src/index.ts",
+        "./apiTypes": "./src/apiTypes.ts",
         "./messages": "./src/messages.ts",
-        "./modes": "./src/modes.ts",
-        "./schemas": "./src/schemas.ts",
         "./slashCommands": "./src/slashCommands.ts",
+        "./buildInfo": "./src/buildInfo.ts",
+        "./modes": "./src/modes.ts",
+        "./rpcMethods": "./src/rpcMethods.ts",
+        "./schemas": "./src/schemas.ts",
+        "./sessionExport": "./src/sessionExport.ts",
         "./types": "./src/types.ts",
-        "./voice": "./src/voice.ts"
+        "./voice": "./src/voice.ts",
+        "./voicePickerCatalog": "./src/voicePickerCatalog.ts",
+        "./voice-personality": "./src/voicePersonality.ts"
     },
     "sideEffects": false,
+    "scripts": {
+        "test": "bun test"
+    },
     "dependencies": {
         "zod": "^4.2.1"
     }

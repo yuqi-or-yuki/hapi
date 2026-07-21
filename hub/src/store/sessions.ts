@@ -5,6 +5,131 @@ import type { StoredSession, VersionedUpdateResult } from './types'
 import { safeJsonParse } from './json'
 import { updateVersionedField } from './versionedUpdates'
 
+// Carry-forward fields that the hub preserves across any metadata
+// replacement when the incoming write omits them.
+//
+// The CLI's archive transition (cli/src/agent/runnerLifecycle.ts
+// archiveAndClose) spreads `currentMetadata` from the session client's
+// local cache; if that cache is `null` (e.g. the row's metadata failed
+// Zod parse at bootstrap and got nulled out in cli/src/api/api.ts) or
+// stale, the resulting payload is sparse and the unconditional REPLACE
+// in updateSessionMetadata wipes whatever it omits. That breaks resume
+// even though the on-disk chat data still exists.
+//
+// Three preservation tiers cover the failure modes:
+//
+//   - PARSE_IDENTITY_FIELDS: required by MetadataSchema in
+//     shared/src/schemas.ts. Without these, hub session cache and CLI
+//     getSession reject the row with safeParse → metadata becomes null
+//     downstream and resume cannot find a path even when the resume
+//     token survived.
+//
+//   - ROUTING_FIELDS: flavor + machineId. `flavor` is what
+//     hub/src/web/routes/sessions.ts and hub/src/sync/syncEngine.ts use
+//     to pick which session id field to read; if it's dropped, the
+//     `?? 'claude'` fallback misroutes a Cursor/Codex/Gemini session as
+//     Claude and the preserved token is ignored. `machineId` is the
+//     filter the CLI's resumable listing uses to scope rows to the
+//     current host; without it the row drops out of the resume picker.
+//
+//   - SIMPLE_RESUME_TOKENS: flavor-specific resume identifiers that are
+//     write-once-keep semantics. Mirror of pickExistingSessionMetadata
+//     in cli/src/agent/sessionFactory.ts.
+//
+// `cursorSessionProtocol` is paired with `cursorSessionId`: protocol is
+// tied to a specific chat id, so a write that explicitly sets a new
+// `cursorSessionId` must drop a stale prior protocol. Handled in
+// preserveCursorProtocolPair below.
+//
+// Explicit-clear sentinel: when `next` sets a carry-forward field to
+// `null`, the merge drops the key entirely from the output (the
+// resulting blob has neither the prior value nor `null`). This lets
+// callers intentionally remove a preserved field — e.g.
+// `cli/src/codex/session.ts` `resetCodexThread()` clears the codex
+// thread id with `codexSessionId: null` so a `/clear` command actually
+// drops the persisted thread. `undefined` (key missing from `next`)
+// continues to mean "carry forward".
+const PARSE_IDENTITY_FIELDS = ['path', 'host'] as const
+
+const ROUTING_FIELDS = ['flavor', 'machineId'] as const
+
+const SIMPLE_RESUME_TOKENS = [
+    'claudeSessionId',
+    'codexSessionId',
+    'geminiSessionId',
+    'opencodeSessionId',
+    'grokSessionId',
+    'cursorSessionId',
+    'kimiSessionId'
+] as const
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function carryForwardIfMissing(
+    prior: Record<string, unknown>,
+    next: Record<string, unknown>,
+    merged: Record<string, unknown> | null,
+    fields: ReadonlyArray<string>
+): Record<string, unknown> | null {
+    let result = merged
+    for (const field of fields) {
+        // Explicit-clear sentinel: `null` in next means "drop this field".
+        // Strip it from the merged output so the persisted blob stays
+        // schema-clean (MetadataSchema fields are `string().optional()`
+        // — string|undefined, not nullable).
+        if (next[field] === null) {
+            if (result === null) {
+                result = { ...next }
+            }
+            delete result[field]
+            continue
+        }
+        if (next[field] === undefined && prior[field] !== undefined) {
+            if (result === null) {
+                result = { ...next }
+            }
+            result[field] = prior[field]
+        }
+    }
+    return result
+}
+
+function preserveCursorProtocolPair(
+    prior: Record<string, unknown>,
+    next: Record<string, unknown>,
+    merged: Record<string, unknown> | null
+): Record<string, unknown> | null {
+    // If next explicitly sets cursorSessionId, the protocol is tied to
+    // the new id — never carry over the prior protocol. The next write
+    // can include its own cursorSessionProtocol if it knows the protocol.
+    if (next.cursorSessionId !== undefined) {
+        return merged
+    }
+    // Otherwise next is silent on the id (and possibly the protocol);
+    // carry over the prior protocol so it stays paired with the prior id
+    // (which is preserved via SIMPLE_RESUME_TOKENS above).
+    if (next.cursorSessionProtocol === undefined && prior.cursorSessionProtocol !== undefined) {
+        const result = merged ?? { ...next }
+        result.cursorSessionProtocol = prior.cursorSessionProtocol
+        return result
+    }
+    return merged
+}
+
+export function mergeSessionMetadata(prior: unknown, next: unknown): unknown {
+    if (!isPlainObject(prior) || !isPlainObject(next)) {
+        return next
+    }
+    let merged: Record<string, unknown> | null = null
+    merged = carryForwardIfMissing(prior, next, merged, PARSE_IDENTITY_FIELDS)
+    merged = carryForwardIfMissing(prior, next, merged, ROUTING_FIELDS)
+    merged = carryForwardIfMissing(prior, next, merged, SIMPLE_RESUME_TOKENS)
+    merged = preserveCursorProtocolPair(prior, next, merged)
+    return merged ?? next
+}
+
 type DbSessionRow = {
     id: string
     tag: string | null
@@ -19,6 +144,7 @@ type DbSessionRow = {
     model: string | null
     model_reasoning_effort: string | null
     effort: string | null
+    service_tier: string | null
     todos: string | null
     todos_updated_at: number | null
     team_state: string | null
@@ -43,6 +169,7 @@ function toStoredSession(row: DbSessionRow): StoredSession {
         model: row.model,
         modelReasoningEffort: row.model_reasoning_effort,
         effort: row.effort,
+        serviceTier: row.service_tier,
         todos: safeJsonParse(row.todos),
         todosUpdatedAt: row.todos_updated_at,
         teamState: safeJsonParse(row.team_state),
@@ -61,18 +188,32 @@ export function getOrCreateSession(
     namespace: string,
     model?: string,
     effort?: string,
-    modelReasoningEffort?: string
+    modelReasoningEffort?: string,
+    requestedId?: string
 ): StoredSession {
     const existing = db.prepare(
         'SELECT * FROM sessions WHERE tag = ? AND namespace = ? ORDER BY created_at DESC LIMIT 1'
     ).get(tag, namespace) as DbSessionRow | undefined
 
     if (existing) {
+        if (requestedId && existing.id !== requestedId) {
+            throw new SessionIdentityConflictError('Session tag is already bound to a different id')
+        }
         return toStoredSession(existing)
     }
 
     const now = Date.now()
-    const id = randomUUID()
+    const id = requestedId ?? randomUUID()
+
+    if (requestedId) {
+        const existingById = getSession(db, requestedId)
+        if (existingById) {
+            if (existingById.namespace === namespace && existingById.tag === tag) {
+                return existingById
+            }
+            throw new SessionIdentityConflictError('Session id is already bound to a different session')
+        }
+    }
 
     const metadataJson = JSON.stringify(metadata)
     const agentStateJson = agentState === null || agentState === undefined ? null : JSON.stringify(agentState)
@@ -95,7 +236,7 @@ export function getOrCreateSession(
             @model_reasoning_effort,
             @effort,
             NULL, NULL,
-            0, NULL, 0
+            0, @active_at, 0
         )
     `).run({
         id,
@@ -103,6 +244,9 @@ export function getOrCreateSession(
         namespace,
         created_at: now,
         updated_at: now,
+        // Never persist NULL — CLI SessionSchema requires numeric activeAt.
+        // Legacy rows may still be NULL; sessionCache coerces on read.
+        active_at: now,
         metadata: metadataJson,
         agent_state: agentStateJson,
         model: model ?? null,
@@ -117,6 +261,13 @@ export function getOrCreateSession(
     return row
 }
 
+export class SessionIdentityConflictError extends Error {
+    constructor(message: string) {
+        super(message)
+        this.name = 'SessionIdentityConflictError'
+    }
+}
+
 export function updateSessionMetadata(
     db: Database,
     id: string,
@@ -128,29 +279,42 @@ export function updateSessionMetadata(
     const now = Date.now()
     const touchUpdatedAt = options?.touchUpdatedAt !== false
 
-    return updateVersionedField({
-        db,
-        table: 'sessions',
-        id,
-        namespace,
-        field: 'metadata',
-        versionField: 'metadata_version',
-        expectedVersion,
-        value: metadata,
-        encode: (value) => {
-            const json = JSON.stringify(value)
-            return json === undefined ? null : json
-        },
-        decode: safeJsonParse,
-        setClauses: [
-            'updated_at = CASE WHEN @touch_updated_at = 1 THEN @updated_at ELSE updated_at END',
-            'seq = seq + 1'
-        ],
-        params: {
-            updated_at: now,
-            touch_updated_at: touchUpdatedAt ? 1 : 0
-        }
-    })
+    try {
+        return db.transaction((): VersionedUpdateResult<unknown | null> => {
+            const priorRow = db.prepare(
+                'SELECT metadata FROM sessions WHERE id = ? AND namespace = ?'
+            ).get(id, namespace) as { metadata: string | null } | undefined
+
+            const prior = priorRow ? safeJsonParse(priorRow.metadata) : null
+            const merged = mergeSessionMetadata(prior, metadata)
+
+            return updateVersionedField({
+                db,
+                table: 'sessions',
+                id,
+                namespace,
+                field: 'metadata',
+                versionField: 'metadata_version',
+                expectedVersion,
+                value: merged,
+                encode: (value) => {
+                    const json = JSON.stringify(value)
+                    return json === undefined ? null : json
+                },
+                decode: safeJsonParse,
+                setClauses: [
+                    'updated_at = CASE WHEN @touch_updated_at = 1 THEN @updated_at ELSE updated_at END',
+                    'seq = seq + 1'
+                ],
+                params: {
+                    updated_at: now,
+                    touch_updated_at: touchUpdatedAt ? 1 : 0
+                }
+            })
+        })()
+    } catch {
+        return { result: 'error' }
+    }
 }
 
 export function updateSessionAgentState(
@@ -309,6 +473,39 @@ export function setSessionModelReasoningEffort(
     }
 }
 
+export function setSessionServiceTier(
+    db: Database,
+    id: string,
+    serviceTier: string | null,
+    namespace: string,
+    options?: { touchUpdatedAt?: boolean }
+): boolean {
+    const now = Date.now()
+    const touchUpdatedAt = options?.touchUpdatedAt === true
+
+    try {
+        const result = db.prepare(`
+            UPDATE sessions
+            SET service_tier = @service_tier,
+                updated_at = CASE WHEN @touch_updated_at = 1 THEN @updated_at ELSE updated_at END,
+                seq = seq + 1
+            WHERE id = @id
+              AND namespace = @namespace
+              AND service_tier IS NOT @service_tier
+        `).run({
+            id,
+            namespace,
+            service_tier: serviceTier,
+            updated_at: now,
+            touch_updated_at: touchUpdatedAt ? 1 : 0
+        })
+
+        return result.changes === 1
+    } catch {
+        return false
+    }
+}
+
 export function setSessionEffort(
     db: Database,
     id: string,
@@ -334,6 +531,38 @@ export function setSessionEffort(
             effort,
             updated_at: now,
             touch_updated_at: touchUpdatedAt ? 1 : 0
+        })
+
+        return result.changes === 1
+    } catch {
+        return false
+    }
+}
+
+export function setSessionActive(
+    db: Database,
+    id: string,
+    active: boolean,
+    activeAt: number,
+    namespace: string
+): boolean {
+    try {
+        const result = db.prepare(`
+            UPDATE sessions
+            SET active = @active,
+                active_at = CASE
+                    WHEN active_at IS NULL OR active_at < @active_at THEN @active_at
+                    ELSE active_at
+                END,
+                seq = seq + 1
+            WHERE id = @id
+              AND namespace = @namespace
+              AND (active IS NOT @active OR active_at IS NULL OR active_at < @active_at)
+        `).run({
+            id,
+            namespace,
+            active: active ? 1 : 0,
+            active_at: activeAt
         })
 
         return result.changes === 1

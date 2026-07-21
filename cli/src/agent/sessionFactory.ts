@@ -78,9 +78,42 @@ export function buildSessionMetadata(options: {
         lifecycleState: 'running',
         lifecycleStateSince: now,
         flavor: options.flavor,
+        capabilities: {
+            terminal: true
+        },
         worktree: worktreeInfo ?? undefined,
         ...options.metadataOverrides
     }
+}
+
+function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Partial<Metadata> {
+    if (!metadata) return {}
+
+    const preserved: Partial<Metadata> = {}
+
+    if (metadata.name !== undefined) preserved.name = metadata.name
+    if (metadata.summary !== undefined) preserved.summary = metadata.summary
+    if (metadata.claudeSessionId !== undefined) preserved.claudeSessionId = metadata.claudeSessionId
+    if (metadata.codexSessionId !== undefined) preserved.codexSessionId = metadata.codexSessionId
+    if (metadata.codexSourceSessionId !== undefined) preserved.codexSourceSessionId = metadata.codexSourceSessionId
+    if (metadata.geminiSessionId !== undefined) preserved.geminiSessionId = metadata.geminiSessionId
+    if (metadata.opencodeSessionId !== undefined) preserved.opencodeSessionId = metadata.opencodeSessionId
+    if (metadata.grokSessionId !== undefined) preserved.grokSessionId = metadata.grokSessionId
+    if (metadata.cursorSessionId !== undefined) preserved.cursorSessionId = metadata.cursorSessionId
+    if (metadata.cursorSessionProtocol !== undefined) preserved.cursorSessionProtocol = metadata.cursorSessionProtocol
+    if (metadata.kimiSessionId !== undefined) preserved.kimiSessionId = metadata.kimiSessionId
+    if (metadata.piSessionId !== undefined) preserved.piSessionId = metadata.piSessionId
+    if (metadata.preferredPermissionMode !== undefined) preserved.preferredPermissionMode = metadata.preferredPermissionMode
+    if (metadata.tools !== undefined) preserved.tools = metadata.tools
+    if (metadata.slashCommands !== undefined) preserved.slashCommands = metadata.slashCommands
+    if (metadata.worktree !== undefined) preserved.worktree = metadata.worktree
+    // Preserve cached Pi model list so the web can show models immediately
+    // on inactive-session view without waiting for an RPC round-trip.
+    if (metadata.piAvailableModels !== undefined) preserved.piAvailableModels = metadata.piAvailableModels
+    // Preserve provider-qualified Pi model selection (disambiguates duplicate modelIds).
+    if (metadata.piSelectedModel !== undefined) preserved.piSelectedModel = metadata.piSelectedModel
+
+    return preserved
 }
 
 async function getMachineIdOrExit(): Promise<string> {
@@ -151,5 +184,137 @@ export async function bootstrapSession(options: SessionBootstrapOptions): Promis
         machineId,
         startedBy,
         workingDirectory
+    }
+}
+
+export async function bootstrapLazySession(options: SessionBootstrapOptions): Promise<SessionBootstrapResult> {
+    const workingDirectory = options.workingDirectory ?? getInvokedCwd()
+    const startedBy = options.startedBy ?? 'terminal'
+    if (startedBy !== 'terminal') {
+        throw new Error('Lazy session bootstrap is only supported for terminal sessions')
+    }
+
+    const api = await ApiClient.create()
+    const machineId = await getMachineIdOrExit()
+    const machineMetadata = buildMachineMetadata()
+    const metadata = buildSessionMetadata({
+        flavor: options.flavor,
+        startedBy,
+        workingDirectory,
+        machineId,
+        metadataOverrides: options.metadataOverrides
+    })
+    const agentState = options.agentState === undefined ? {} : options.agentState
+    const now = Date.now()
+    const requestedId = randomUUID()
+    const sessionTag = options.tag ?? randomUUID()
+    const sessionInfo: Session = {
+        id: requestedId,
+        namespace: 'pending',
+        seq: 0,
+        createdAt: now,
+        updatedAt: now,
+        active: false,
+        activeAt: now,
+        metadata,
+        metadataVersion: 0,
+        agentState,
+        agentStateVersion: 0,
+        thinking: false,
+        thinkingAt: now,
+        todos: [],
+        model: options.model ?? null,
+        modelReasoningEffort: options.modelReasoningEffort ?? null,
+        effort: options.effort ?? null,
+        serviceTier: null,
+        permissionMode: undefined,
+        collaborationMode: undefined
+    }
+
+    const session = api.sessionSyncClient(sessionInfo, {
+        materialize: async (snapshot, signal) => {
+            const materialized = await api.getOrCreateSession({
+                id: requestedId,
+                tag: sessionTag,
+                metadata: snapshot.metadata ?? metadata,
+                state: snapshot.agentState,
+                model: options.model,
+                modelReasoningEffort: options.modelReasoningEffort,
+                effort: options.effort,
+                machine: {
+                    id: machineId,
+                    metadata: machineMetadata
+                },
+                timeoutMs: 10_000,
+                signal
+            })
+            if (materialized.id !== requestedId) {
+                throw new Error(`Hub returned unexpected session id ${materialized.id}`)
+            }
+            return materialized
+        },
+        onMaterialized: (materialized, snapshot) => {
+            void reportSessionStarted(materialized.id, snapshot.metadata ?? metadata)
+        }
+    })
+
+    return {
+        api,
+        session,
+        sessionInfo,
+        metadata,
+        machineId,
+        startedBy,
+        workingDirectory
+    }
+}
+
+export async function bootstrapExistingSession(options: {
+    sessionId: string
+    flavor: string
+    startedBy?: SessionStartedBy
+    workingDirectory: string
+    metadataOverrides?: Partial<Metadata>
+}): Promise<SessionBootstrapResult> {
+    const startedBy = options.startedBy ?? 'terminal'
+    const api = await ApiClient.create()
+    const machineId = await getMachineIdOrExit()
+
+    await api.getOrCreateMachine({
+        machineId,
+        metadata: buildMachineMetadata()
+    })
+
+    const sessionInfo = await api.getSession(options.sessionId)
+    const baseMetadata = buildSessionMetadata({
+        flavor: options.flavor,
+        startedBy,
+        workingDirectory: options.workingDirectory,
+        machineId
+    })
+    const metadata = {
+        ...baseMetadata,
+        ...pickExistingSessionMetadata(sessionInfo.metadata),
+        ...options.metadataOverrides
+    }
+
+    const buildUpdatedMetadata = (current: Metadata): Metadata => ({
+        ...baseMetadata,
+        ...pickExistingSessionMetadata(current),
+        ...options.metadataOverrides
+    })
+
+    const session = api.sessionSyncClient(sessionInfo)
+    session.updateMetadata(buildUpdatedMetadata)
+    await reportSessionStarted(sessionInfo.id, metadata)
+
+    return {
+        api,
+        session,
+        sessionInfo,
+        metadata,
+        machineId,
+        startedBy,
+        workingDirectory: options.workingDirectory
     }
 }

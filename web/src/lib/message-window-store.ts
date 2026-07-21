@@ -21,6 +21,7 @@ export type MessageWindowState = {
 export const VISIBLE_WINDOW_SIZE = 400
 export const PENDING_WINDOW_SIZE = 200
 const AGENT_RUN_WINDOW_SIZE = 800
+const OLDER_LOAD_WINDOW_SIZE = VISIBLE_WINDOW_SIZE * 2
 const PAGE_SIZE = 50
 const COLD_LOAD_BACKFILL_PAGE_SIZE = 200
 const COLD_LOAD_REGULAR_TARGET = PAGE_SIZE
@@ -63,6 +64,7 @@ type PersistedMessageWindowState = {
 const states = new Map<string, InternalState>()
 const listeners = new Map<string, Set<() => void>>()
 const pendingVisibilityCacheBySession = new Map<string, Map<string, PendingVisibilityCacheEntry>>()
+const latestLoads = new Map<string, Promise<void>>()
 
 // Throttled notification: coalesce rapid state updates into at most one
 // notification per NOTIFY_THROTTLE_MS during streaming. This prevents
@@ -283,9 +285,20 @@ function hydrateState(sessionId: string): InternalState | null {
             return null
         }
         const base = createState(sessionId)
+        const restorePersistedMessage = (message: DecryptedMessage): DecryptedMessage => {
+            if (message.status !== 'sending') {
+                return message
+            }
+            // A page reload ends the in-flight POST, so persisted sending rows
+            // must re-enter authoritative queued-state reconciliation.
+            return {
+                ...message,
+                status: message.invokedAt === null ? 'queued' as const : 'sent' as const
+            }
+        }
         return buildState(base, {
-            messages: parsed.messages,
-            pending: parsed.pending,
+            messages: parsed.messages.map(restorePersistedMessage),
+            pending: parsed.pending.map(restorePersistedMessage),
             pendingOverflowCount: typeof parsed.pendingOverflowCount === 'number' ? parsed.pendingOverflowCount : 0,
             pendingOverflowVisibleCount: typeof parsed.pendingOverflowVisibleCount === 'number' ? parsed.pendingOverflowVisibleCount : 0,
             hasMore: parsed.hasMore === true,
@@ -453,14 +466,8 @@ function countRegularMessages(messages: DecryptedMessage[]): number {
     return count
 }
 
-function hasV8Cursor(response: MessagesResponse): boolean {
-    return response.page.nextBeforeAt !== undefined
-        && response.page.nextBeforeAt !== null
-        && response.page.nextBeforeSeq !== null
-}
-
 function sameCursor(a: MessagesResponse, b: MessagesResponse): boolean {
-    return (a.page.nextBeforeAt ?? null) === (b.page.nextBeforeAt ?? null)
+    return a.page.nextBeforeAt === b.page.nextBeforeAt
         && a.page.nextBeforeSeq === b.page.nextBeforeSeq
 }
 
@@ -484,17 +491,13 @@ async function backfillColdLoadMessages(
         }
         if (combined.page.nextBeforeSeq === null) break
 
-        const older = hasV8Cursor(combined)
-            ? await api.getMessages(sessionId, {
-                byPosition: true,
-                beforeAt: combined.page.nextBeforeAt!,
-                beforeSeq: combined.page.nextBeforeSeq,
-                limit: COLD_LOAD_BACKFILL_PAGE_SIZE
-            })
-            : await api.getMessages(sessionId, {
-                beforeSeq: combined.page.nextBeforeSeq,
-                limit: COLD_LOAD_BACKFILL_PAGE_SIZE
-            })
+        if (combined.page.nextBeforeAt === null) break
+
+        const older = await api.getMessages(sessionId, {
+            beforeAt: combined.page.nextBeforeAt,
+            beforeSeq: combined.page.nextBeforeSeq,
+            limit: COLD_LOAD_BACKFILL_PAGE_SIZE
+        })
 
         if (isCurrent && !isCurrent()) {
             return combined
@@ -678,6 +681,78 @@ function isOptimisticMessage(message: DecryptedMessage): boolean {
     return Boolean(message.localId && message.id === message.localId)
 }
 
+function isQueuedReconcileCandidate(message: DecryptedMessage): boolean {
+    if (!message.localId || !isQueuedForInvocation(message)) {
+        return false
+    }
+    if (!isOptimisticMessage(message)) {
+        return true
+    }
+    return message.status === 'queued' || message.status === 'sent'
+}
+
+/**
+ * Drops phantom queued messages during an at-bottom full refresh.
+ *
+ * A queued message (invokedAt === null) is normally cleared by the live
+ * `messages-consumed` SSE (markMessagesConsumed flips invokedAt). That event is
+ * one-shot: if the client was offline/closed when the CLI consumed the message,
+ * the signal is lost forever. On reload the row is restored from sessionStorage
+ * still carrying invokedAt: null, but the server's invoked copy is too old to
+ * appear in the latest window, so mergeMessages never corrects it and
+ * trimPreservingQueued pins it — a ghost card above the composer that never
+ * clears.
+ *
+ * The latest at-bottom page is authoritative for the newest slice of history: a
+ * genuinely-still-queued immediate message sorts by createdAt to the very top
+ * and is therefore always present in the fetched window. So an immediate,
+ * server-echoed, locally-queued message whose id is absent from the server
+ * response is a ghost and is dropped.
+ *
+ * Guards against false positives (these are kept even when absent from the
+ * response):
+ *  - optimistic rows (id === localId): the server echo may still be in flight;
+ *    mergeMessages owns their reconciliation.
+ *  - scheduled rows (scheduledAt != null): the hub omits not-yet-mature
+ *    scheduled messages from getMessages, so absence is expected; they have
+ *    their own maturation/release path.
+ *  - rows absent from `eligibleIds`: only messages already queued when the
+ *    fetch was issued are candidates. `serverMessages` is the HTTP snapshot
+ *    taken at the request's start; a `message-received` SSE that lands while
+ *    the fetch is in flight can add a real server-echoed queued row the
+ *    snapshot never saw. Without this gate that fresh row would be filtered as
+ *    a ghost and the queued bar would lose genuine work.
+ *
+ * @internal Exported for unit testing.
+ */
+export function reconcileQueuedAgainstLatest(
+    merged: DecryptedMessage[],
+    serverMessages: DecryptedMessage[],
+    eligibleIds: Set<string>
+): DecryptedMessage[] {
+    const serverIds = new Set(serverMessages.map((m) => m.id))
+    return merged.filter((msg) => {
+        if (!isQueuedForInvocation(msg)) return true
+        if (msg.scheduledAt != null) return true
+        if (isOptimisticMessage(msg)) return true
+        if (!eligibleIds.has(msg.id)) return true
+        return serverIds.has(msg.id)
+    })
+}
+
+/** Ids of immediate, server-echoed queued rows in a snapshot — the only rows
+ *  eligible for ghost reconciliation. Captured at fetch-request start so rows
+ *  added by a concurrent SSE are exempt. See reconcileQueuedAgainstLatest. */
+function queuedReconcileCandidateIds(messages: DecryptedMessage[], pending: DecryptedMessage[]): Set<string> {
+    const ids = new Set<string>()
+    for (const msg of [...messages, ...pending]) {
+        if (isQueuedForInvocation(msg) && msg.scheduledAt == null && !isOptimisticMessage(msg)) {
+            ids.add(msg.id)
+        }
+    }
+    return ids
+}
+
 function mergeIntoPending(
     prev: InternalState,
     incoming: DecryptedMessage[]
@@ -711,6 +786,48 @@ export function getMessageWindowState(sessionId: string): MessageWindowState {
     return getState(sessionId)
 }
 
+export function getQueuedReconcileCandidateLocalIds(sessionId: string): string[] {
+    const state = getState(sessionId)
+    const localIds = new Set<string>()
+    for (const message of [...state.messages, ...state.pending]) {
+        if (isQueuedReconcileCandidate(message)) {
+            localIds.add(message.localId!)
+        }
+    }
+    return [...localIds]
+}
+
+export function reconcileQueuedLocalIds(
+    sessionId: string,
+    candidateLocalIds: string[],
+    queuedLocalIds: string[]
+): void {
+    if (candidateLocalIds.length === 0) {
+        return
+    }
+    const candidates = new Set(candidateLocalIds)
+    const queued = new Set(queuedLocalIds)
+    updateState(sessionId, (prev) => {
+        let changed = false
+        const reconcile = (messages: DecryptedMessage[]) => messages.filter((message) => {
+            if (!message.localId || !candidates.has(message.localId)) {
+                return true
+            }
+            if (queued.has(message.localId) || !isQueuedReconcileCandidate(message)) {
+                return true
+            }
+            changed = true
+            return false
+        })
+        const messages = reconcile(prev.messages)
+        const pending = reconcile(prev.pending)
+        if (!changed) {
+            return prev
+        }
+        return buildState(prev, { messages, pending })
+    }, true)
+}
+
 export function subscribeMessageWindow(sessionId: string, listener: () => void): () => void {
     const subs = listeners.get(sessionId) ?? new Set()
     subs.add(listener)
@@ -727,6 +844,7 @@ export function subscribeMessageWindow(sessionId: string, listener: () => void):
 }
 
 export function clearMessageWindow(sessionId: string): void {
+    latestLoads.delete(sessionId)
     clearPendingVisibilityCache(sessionId)
     clearPersistedState(sessionId)
     const previous = states.get(sessionId)
@@ -766,18 +884,36 @@ export function seedMessageWindowFromSession(fromSessionId: string, toSessionId:
     })
 }
 
-export async function fetchLatestMessages(api: ApiClient, sessionId: string): Promise<void> {
+export function fetchLatestMessages(api: ApiClient, sessionId: string): Promise<void> {
+    const existing = latestLoads.get(sessionId)
+    if (existing) {
+        return existing
+    }
+    const load = fetchLatestMessagesOnce(api, sessionId)
+    latestLoads.set(sessionId, load)
+    const cleanup = () => {
+        if (latestLoads.get(sessionId) === load) {
+            latestLoads.delete(sessionId)
+        }
+    }
+    void load.then(cleanup, cleanup)
+    return load
+}
+
+async function fetchLatestMessagesOnce(api: ApiClient, sessionId: string): Promise<void> {
     const initial = getState(sessionId)
     if (initial.isLoading) {
         return
     }
+    // Snapshot the queued rows that exist now, before awaiting the HTTP fetch.
+    // Only these are eligible for ghost reconciliation — a queued row inserted by
+    // a concurrent message-received SSE must not be filtered against the older
+    // response snapshot that predates it.
+    const reconcileCandidateIds = queuedReconcileCandidateIds(initial.messages, initial.pending)
     const generation = beginAsyncGeneration(sessionId, 'latest', { isLoading: true, warning: null })
 
     try {
-        // Always request byPosition mode (V8). If the hub is V7 it ignores byPosition and
-        // returns the standard seq-based response (no nextBeforeAt field) — we fall back
-        // to seq-cursor mode seamlessly.
-        const firstResponse = await api.getMessages(sessionId, { byPosition: true, limit: PAGE_SIZE })
+        const firstResponse = await api.getMessages(sessionId, { limit: PAGE_SIZE })
         const response = initial.atBottom
             ? await backfillColdLoadMessages(api, sessionId, firstResponse, () => isCurrentGeneration(sessionId, 'latest', generation))
             : firstResponse
@@ -787,14 +923,18 @@ export async function fetchLatestMessages(api: ApiClient, sessionId: string): Pr
         // Derive composite cursor pair from server response. Both values come from
         // the same row on the server; we keep them paired so the next older fetch
         // doesn't mix `beforeAt` from the server with a recomputed minimum `seq`.
-        const nextBeforeAt = response.page.nextBeforeAt ?? null
-        const nextBeforeSeq = response.page.nextBeforeSeq ?? null
-        const isV8Cursor = nextBeforeAt !== null && nextBeforeSeq !== null
+        const nextBeforeAt = response.page.nextBeforeAt
+        const nextBeforeSeq = response.page.nextBeforeSeq
 
         updateStateForGeneration(sessionId, 'latest', generation, (prev) => {
             if (prev.atBottom) {
                 const merged = mergeMessages(prev.messages, [...prev.pending, ...response.messages])
-                const trimmed = trimVisible(merged, 'append')
+                // Reconcile against the authoritative latest page before trimming:
+                // trimVisible preserves every queued row, so a ghost (queued locally
+                // but already invoked server-side, missed messages-consumed while
+                // offline) would otherwise be pinned forever.
+                const reconciled = reconcileQueuedAgainstLatest(merged, response.messages, reconcileCandidateIds)
+                const trimmed = trimVisible(reconciled, 'append')
                 return buildState(prev, {
                     messages: trimmed,
                     pending: [],
@@ -802,8 +942,8 @@ export async function fetchLatestMessages(api: ApiClient, sessionId: string): Pr
                     pendingVisibleCount: 0,
                     pendingOverflowVisibleCount: 0,
                     hasMore: response.page.hasMore,
-                    oldestPositionAt: isV8Cursor ? nextBeforeAt : null,
-                    oldestPositionSeq: isV8Cursor ? nextBeforeSeq : null,
+                    oldestPositionAt: nextBeforeAt,
+                    oldestPositionSeq: nextBeforeSeq,
                     isLoading: false,
                     warning: null,
                 })
@@ -814,12 +954,11 @@ export async function fetchLatestMessages(api: ApiClient, sessionId: string): Pr
                 pendingVisibleCount: pendingResult.pendingVisibleCount,
                 pendingOverflowCount: pendingResult.pendingOverflowCount,
                 pendingOverflowVisibleCount: pendingResult.pendingOverflowVisibleCount,
-                // Persist the V8 cursor pair on the non-at-bottom path too. Without this
-                // a refresh while scrolled up dropped the composite cursor and the next
-                // loadMore fell back to V7 seq mode against a V8 hub — the same
-                // asymmetric class of bug the at-bottom branch already guards against.
-                oldestPositionAt: isV8Cursor ? nextBeforeAt : null,
-                oldestPositionSeq: isV8Cursor ? nextBeforeSeq : null,
+                // Persist the cursor pair on the non-at-bottom path too. Without this
+                // a refresh while scrolled up drops the composite cursor and prevents
+                // the next older-page load.
+                oldestPositionAt: nextBeforeAt,
+                oldestPositionSeq: nextBeforeSeq,
                 isLoading: false,
                 warning: pendingResult.warning,
             })
@@ -838,37 +977,29 @@ export async function fetchOlderMessages(api: ApiClient, sessionId: string): Pro
     if (initial.isLoadingMore || !initial.hasMore) {
         return
     }
-    if (initial.oldestSeq === null) {
+    if (initial.oldestPositionAt === null || initial.oldestPositionSeq === null) {
         return
     }
     const generation = beginAsyncGeneration(sessionId, 'older', { isLoadingMore: true })
 
     try {
-        // V8 mode: use the server-provided cursor pair as-is. Mixing `beforeAt` from
-        // the server with a recomputed minimum `seq` from the local window can refer
-        // to different rows after a low-seq message is invoked late.
-        const useV8Cursor = initial.oldestPositionAt !== null && initial.oldestPositionSeq !== null
-        const response = useV8Cursor
-            ? await api.getMessages(sessionId, {
-                byPosition: true,
-                beforeAt: initial.oldestPositionAt!,
-                beforeSeq: initial.oldestPositionSeq!,
-                limit: PAGE_SIZE
-            })
-            : await api.getMessages(sessionId, { beforeSeq: initial.oldestSeq, limit: PAGE_SIZE })
+        const response = await api.getMessages(sessionId, {
+            beforeAt: initial.oldestPositionAt,
+            beforeSeq: initial.oldestPositionSeq,
+            limit: PAGE_SIZE
+        })
 
-        const nextBeforeAt = response.page.nextBeforeAt ?? null
-        const nextBeforeSeq = response.page.nextBeforeSeq ?? null
-        const isV8Cursor = nextBeforeAt !== null && nextBeforeSeq !== null
+        const nextBeforeAt = response.page.nextBeforeAt
+        const nextBeforeSeq = response.page.nextBeforeSeq
 
         updateStateForGeneration(sessionId, 'older', generation, (prev) => {
             const merged = mergeMessages(response.messages, prev.messages)
-            const trimmed = trimVisible(merged, 'prepend')
+            const trimmed = trimPreservingQueued(merged, OLDER_LOAD_WINDOW_SIZE, 'prepend').kept
             return buildState(prev, {
                 messages: trimmed,
                 hasMore: response.page.hasMore,
-                oldestPositionAt: isV8Cursor ? nextBeforeAt : null,
-                oldestPositionSeq: isV8Cursor ? nextBeforeSeq : null,
+                oldestPositionAt: nextBeforeAt,
+                oldestPositionSeq: nextBeforeSeq,
                 isLoadingMore: false,
             })
         })
@@ -1012,14 +1143,11 @@ export function removeOptimisticMessage(sessionId: string, localId: string): voi
 /** Transition the queued messages whose localIds match to 'sent' and record invokedAt.
  *  Driven by the CLI ack (messages-consumed). Unmatched messages remain queued.
  *  Also handles server-loaded messages (status=undefined) that have a matching localId.
- *  V7 hub compat: if `invokedAt` is undefined the SyncEvent had no server timestamp,
- *  so we fall back to client time — without it the row would stay queued forever
- *  under the strict-null filter. The fallback only affects display ordering on
- *  this client; the persisted server value is the authoritative one when present. */
-export function markMessagesConsumed(sessionId: string, localIds: string[], invokedAt: number | undefined): void {
+ *  `invokedAt` is provided by the hub and used as the stable display-position
+ *  timestamp for composite cursor pagination. */
+export function markMessagesConsumed(sessionId: string, localIds: string[], invokedAt: number): void {
     if (localIds.length === 0) return
     const idSet = new Set(localIds)
-    const effectiveInvokedAt = invokedAt ?? Date.now()
     updateState(sessionId, (prev) => {
         let changed = false
         const updateList = (list: DecryptedMessage[]) => {
@@ -1039,8 +1167,7 @@ export function markMessagesConsumed(sessionId: string, localIds: string[], invo
                 // DB still holds the original timestamp.
                 const needsStatus = message.status !== 'sent'
                 // Strict null to stay consistent with isQueuedForInvocation and the rest
-                // of this file. The idSet filter already shields V7-stamped rows from
-                // this path, but the strict-null contract should not vary by call site.
+                // of this file.
                 const needsInvokedAt = message.invokedAt === null
                 if (!needsStatus && !needsInvokedAt) {
                     return message
@@ -1051,7 +1178,7 @@ export function markMessagesConsumed(sessionId: string, localIds: string[], invo
                     update.status = 'sent' as MessageStatus
                 }
                 if (needsInvokedAt) {
-                    update.invokedAt = effectiveInvokedAt
+                    update.invokedAt = invokedAt
                 }
                 return { ...message, ...update }
             })
@@ -1061,7 +1188,7 @@ export function markMessagesConsumed(sessionId: string, localIds: string[], invo
         // sees their own message at the invocation slot — it stays in the
         // pending bucket until they scroll, even though the floating bar
         // already cleared.  Identifying the migrated rows by (localId,
-        // invokedAt = effectiveInvokedAt) ensures we only move rows whose
+        // invokedAt = invokedAt) ensures we only move rows whose
         // ack just arrived, not unrelated pending entries.
         const updatedPending = updateList(prev.pending)
         const consumedFromPending: DecryptedMessage[] = []
@@ -1069,7 +1196,7 @@ export function markMessagesConsumed(sessionId: string, localIds: string[], invo
             if (
                 message.localId &&
                 idSet.has(message.localId) &&
-                message.invokedAt === effectiveInvokedAt
+                message.invokedAt === invokedAt
             ) {
                 consumedFromPending.push(message)
                 return false

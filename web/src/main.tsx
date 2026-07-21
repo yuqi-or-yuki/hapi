@@ -4,7 +4,6 @@ import { QueryClientProvider } from '@tanstack/react-query'
 import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
 import { RouterProvider, createMemoryHistory } from '@tanstack/react-router'
 import './index.css'
-import { registerSW } from 'virtual:pwa-register'
 import { initializeFontScale } from '@/hooks/useFontScale'
 import { getTelegramWebApp, isTelegramEnvironment, loadTelegramSdk } from './hooks/useTelegram'
 import { queryClient } from './lib/query-client'
@@ -12,6 +11,7 @@ import { createAppRouter } from './router'
 import { I18nProvider } from './lib/i18n-context'
 import { restoreSpaRedirect } from './lib/spaRedirect'
 import { ImageLightbox } from './components/ImageLightbox'
+import { installScrollRestorationGuard } from './lib/scrollStorageGuard'
 
 function getStartParam(): string | null {
     const query = new URLSearchParams(window.location.search)
@@ -43,6 +43,7 @@ async function bootstrap() {
         }
     }
 
+    installScrollRestorationGuard()
     initializeFontScale()
 
     // Only load Telegram SDK in Telegram environment (with 3s timeout)
@@ -58,25 +59,6 @@ async function bootstrap() {
     if (!isTelegram) {
         restoreSpaRedirect()
     }
-
-    registerSW({
-        // registerType is 'autoUpdate' (vite.config.ts), so the registration itself
-        // reloads the page once the new worker activates — onNeedRefresh is only
-        // invoked in 'prompt' mode and never fires here.
-        onOfflineReady() {
-            console.log('App ready for offline use')
-        },
-        onRegistered(registration) {
-            if (registration) {
-                setInterval(() => {
-                    registration.update()
-                }, 60 * 60 * 1000)
-            }
-        },
-        onRegisterError(error) {
-            console.error('SW registration error:', error)
-        }
-    })
 
     const history = isTelegram
         ? createMemoryHistory({ initialEntries: [getInitialPath()] })

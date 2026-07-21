@@ -58,6 +58,20 @@ describe('getToolPresentation — unknown tool semantic title + subtitle dedup',
         expect(presentation.subtitle).toBe('ls -la /tmp')
     })
 
+    it('uses input.name as a fallback subtitle for unknown tool cards', () => {
+        const presentation = getToolPresentation({
+            toolName: 'Tool',
+            input: { name: 'Tool 1' },
+            result: null,
+            childrenCount: 0,
+            description: null,
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('Tool')
+        expect(presentation.subtitle).toBe('Tool 1')
+    })
+
     it('returns null subtitle when no recognized input field is present', () => {
         const presentation = getToolPresentation({
             toolName: 'mystery_tool',
@@ -199,5 +213,47 @@ describe('getToolPresentation — Codex agent tools', () => {
         expect(presentation.subtitle).toBe('Closed (completed)')
         expect(presentation.subtitle).not.toContain('hidden child output')
         expect(presentation.minimal).toBe(true)
+    })
+})
+
+describe('getToolPresentation — request_user_input', () => {
+    it('uses the question header instead of exposing its protocol id', () => {
+        const presentation = getToolPresentation({
+            toolName: 'request_user_input',
+            input: {
+                questions: [{
+                    id: '__mcp_url_confirmation',
+                    header: 'Sign in',
+                    question: 'Sign in to continue'
+                }]
+            },
+            result: null,
+            childrenCount: 0,
+            description: null,
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('Sign in')
+        expect(presentation.title).not.toContain('__mcp_url_confirmation')
+        expect(presentation.subtitle).toBe('Sign in to continue')
+    })
+
+    it('falls back to Question rather than exposing an id when no header is present', () => {
+        const presentation = getToolPresentation({
+            toolName: 'request_user_input',
+            input: {
+                questions: [{
+                    id: '__mcp_form_confirmation',
+                    question: 'Continue?'
+                }]
+            },
+            result: null,
+            childrenCount: 0,
+            description: null,
+            metadata: null,
+        })
+
+        expect(presentation.title).toBe('Question')
+        expect(presentation.subtitle).toBe('Continue?')
     })
 })

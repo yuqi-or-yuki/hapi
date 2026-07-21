@@ -1,4 +1,5 @@
 import { logger } from '@/ui/logger';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager';
 import {
     listCodexModels,
@@ -8,7 +9,7 @@ import {
 import { getErrorMessage, rpcError } from '../rpcResponses';
 
 export function registerCodexModelHandlers(rpcHandlerManager: RpcHandlerManager): void {
-    rpcHandlerManager.registerHandler<ListCodexModelsRequest, ListCodexModelsResponse>('listCodexModels', async (data) => {
+    rpcHandlerManager.registerHandler<ListCodexModelsRequest, ListCodexModelsResponse>(RPC_METHODS.ListCodexModels, async (data) => {
         logger.debug('List Codex models request');
 
         try {

@@ -1,29 +1,25 @@
 import { useId, useMemo, useRef, useState } from 'react'
+import { useQueryClient } from '@tanstack/react-query'
 import type { Session } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { isTelegramApp } from '@/hooks/useTelegram'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { SessionActionMenu } from '@/components/SessionActionMenu'
+import { SessionExportDialog } from '@/components/SessionExportDialog'
 import { RenameSessionDialog } from '@/components/RenameSessionDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { CloneSessionDialog } from '@/components/CloneSessionDialog'
 import { ScheduleMessageDialog } from '@/components/ScheduleMessageDialog'
+import { formatReopenError } from '@/lib/reopenError'
+import { formatCodexReasoningLabel, shouldShowCodexReasoningLabel } from '@/lib/codexStatusLabels'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { useTranslation } from '@/lib/use-translation'
-
-function getSessionTitle(session: Session): string {
-    if (session.metadata?.name) {
-        return session.metadata.name
-    }
-    if (session.metadata?.summary?.text) {
-        return session.metadata.summary.text
-    }
-    if (session.metadata?.path) {
-        const parts = session.metadata.path.split('/').filter(Boolean)
-        return parts.length > 0 ? parts[parts.length - 1] : session.id.slice(0, 8)
-    }
-    return session.id.slice(0, 8)
-}
+import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
+import { getSessionTitle } from '@/lib/sessionTitle'
+import { useToast } from '@/lib/toast-context'
+import { queryKeys } from '@/lib/query-keys'
+import { markCodexSessionsImported } from '@/lib/codexImportedSessions'
 
 function FilesIcon(props: { className?: string }) {
     return (
@@ -69,6 +65,14 @@ function OutlineIcon(props: { className?: string }) {
     )
 }
 
+function headerToggleClass(active: boolean): string {
+    return `flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
+        active
+            ? 'bg-[var(--app-button)] text-[var(--app-button-text)] hover:opacity-90'
+            : 'text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]'
+    }`
+}
+
 function MoreVerticalIcon(props: { className?: string }) {
     return (
         <svg
@@ -89,18 +93,34 @@ function MoreVerticalIcon(props: { className?: string }) {
 export function SessionHeader(props: {
     session: Session
     onBack: () => void
-    onViewFiles?: () => void
-    onOpenOutline?: () => void
+    onToggleFiles?: () => void
+    filesActive?: boolean
+    onToggleOutline?: () => void
+    outlineActive?: boolean
     api: ApiClient | null
+    canReopen?: boolean
+    reopenDisabledReason?: string
     onSessionDeleted?: () => void
     onCloned?: (newSessionId: string) => void
     lastPrompt?: string | null
+    onSessionReopened?: (newSessionId: string) => void
 }) {
     const { t } = useTranslation()
-    const { session, api, onSessionDeleted } = props
+    const queryClient = useQueryClient()
+    const { addToast } = useToast()
+    const { session, api, onSessionDeleted, onSessionReopened } = props
     const title = useMemo(() => getSessionTitle(session), [session])
     const worktreeBranch = session.metadata?.worktree?.branch
     const modelLabel = getSessionModelLabel(session)
+    const agentFlavor = session.metadata?.flavor ?? null
+    const reasoningLabel = shouldShowCodexReasoningLabel(agentFlavor)
+        ? formatCodexReasoningLabel(session.modelReasoningEffort)
+        : null
+    // Match expected Fast badge semantics (#1004): only explicit service tier, no effort/model heuristics.
+    const showFastBadge = agentFlavor === 'codex' && isFastServiceTier(session.serviceTier)
+    const codexSessionId = session.metadata?.flavor === 'codex'
+        ? session.metadata.codexSessionId?.trim() || null
+        : null
 
     const [promptOpen, setPromptOpen] = useState(false)
     const [menuOpen, setMenuOpen] = useState(false)
@@ -108,16 +128,19 @@ export function SessionHeader(props: {
     const menuId = useId()
     const menuAnchorRef = useRef<HTMLButtonElement | null>(null)
     const [renameOpen, setRenameOpen] = useState(false)
+    const [exportOpen, setExportOpen] = useState(false)
     const [archiveOpen, setArchiveOpen] = useState(false)
     const [deleteOpen, setDeleteOpen] = useState(false)
     const [cloneOpen, setCloneOpen] = useState(false)
     const [scheduleOpen, setScheduleOpen] = useState(false)
+    const [isSyncingCodex, setIsSyncingCodex] = useState(false)
 
-    const { archiveSession, renameSession, deleteSession, cloneSession, isPending } = useSessionActions(
+    const { archiveSession, reopenSession, renameSession, deleteSession, cloneSession, isPending } = useSessionActions(
         api,
         session.id,
         session.metadata?.flavor ?? null
     )
+    const [reopenError, setReopenError] = useState<string | null>(null)
 
     const handleDelete = async () => {
         await deleteSession()
@@ -127,6 +150,59 @@ export function SessionHeader(props: {
     const handleClone = async (model: string | null) => {
         const newId = await cloneSession(model)
         props.onCloned?.(newId)
+    }
+
+    const handleReopen = async () => {
+        setReopenError(null)
+        try {
+            const result = await reopenSession()
+            if (result.sessionId && result.sessionId !== session.id) {
+                onSessionReopened?.(result.sessionId)
+            }
+        } catch (error) {
+            setReopenError(formatReopenError(error))
+        }
+    }
+
+    const handleSyncCodex = async () => {
+        if (!api || !codexSessionId || isSyncingCodex) return
+
+        setIsSyncingCodex(true)
+        try {
+            // 中文注释：手动同步必须携带当前会话归属机器和目录；多台 runner 在线时后端不能靠猜。
+            const result = await api.syncCodexSession({
+                sessionIds: [codexSessionId],
+                cwd: typeof session.metadata?.path === 'string' ? session.metadata.path : undefined,
+                machineId: typeof session.metadata?.machineId === 'string' ? session.metadata.machineId : undefined
+            })
+            if (!result.success) {
+                throw new Error(result.error || t('codexSync.failed.body'))
+            }
+
+            markCodexSessionsImported([codexSessionId])
+            await Promise.all([
+                queryClient.invalidateQueries({ queryKey: queryKeys.session(session.id) }),
+                queryClient.invalidateQueries({ queryKey: queryKeys.messages(session.id) }),
+                queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+            ])
+            addToast({
+                title: t('codexSync.manual.success.title'),
+                body: (result.syncedCount ?? 1) === 0
+                    ? t('codexSync.manual.success.noNewMessages')
+                    : t('codexSync.manual.success.body', { n: result.syncedCount ?? 1 }),
+                sessionId: session.id,
+                url: `/sessions/${session.id}`
+            })
+        } catch (error) {
+            addToast({
+                title: t('codexSync.manual.failed.title'),
+                body: error instanceof Error ? error.message : t('codexSync.failed.body'),
+                sessionId: session.id,
+                url: `/sessions/${session.id}`
+            })
+        } finally {
+            setIsSyncingCodex(false)
+        }
     }
 
     const handleMenuToggle = () => {
@@ -174,12 +250,22 @@ export function SessionHeader(props: {
                         </div>
                         <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs text-[var(--app-hint)]">
                             <span className="inline-flex items-center gap-1">
-                                <span aria-hidden="true">❖</span>
+                                <AgentFlavorIcon flavor={session.metadata?.flavor} className="h-3.5 w-3.5 shrink-0" />
                                 {session.metadata?.flavor?.trim() || 'unknown'}
                             </span>
                             {modelLabel ? (
                                 <span>
                                     {t(modelLabel.key)}: {modelLabel.value}
+                                </span>
+                            ) : null}
+                            {reasoningLabel ? (
+                                <span data-testid="session-header-reasoning" className="hidden sm:inline">
+                                    {reasoningLabel}
+                                </span>
+                            ) : null}
+                            {showFastBadge ? (
+                                <span data-testid="session-header-fast" className="text-[#34C759]">
+                                    fast
                                 </span>
                             ) : null}
                             {worktreeBranch ? (
@@ -188,24 +274,27 @@ export function SessionHeader(props: {
                         </div>
                     </div>
 
-                    {props.onViewFiles ? (
+                    {props.onToggleFiles ? (
                         <button
                             type="button"
-                            onClick={props.onViewFiles}
-                            className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
-                            title={t('session.title')}
+                            onClick={props.onToggleFiles}
+                            className={headerToggleClass(props.filesActive ?? false)}
+                            title={props.filesActive ? t('session.view.returnToChat') : t('session.title')}
+                            aria-label={props.filesActive ? t('session.view.returnToChat') : t('session.title')}
+                            aria-pressed={props.filesActive ?? false}
                         >
                             <FilesIcon />
                         </button>
                     ) : null}
 
-                    {props.onOpenOutline ? (
+                    {props.onToggleOutline ? (
                         <button
                             type="button"
-                            onClick={props.onOpenOutline}
-                            className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
-                            title={t('session.outline.open')}
-                            aria-label={t('session.outline.open')}
+                            onClick={props.onToggleOutline}
+                            className={headerToggleClass(props.outlineActive ?? false)}
+                            title={props.outlineActive ? t('session.outline.close') : t('session.outline.open')}
+                            aria-label={props.outlineActive ? t('session.outline.close') : t('session.outline.open')}
+                            aria-pressed={props.outlineActive ?? false}
                         >
                             <OutlineIcon />
                         </button>
@@ -252,7 +341,11 @@ export function SessionHeader(props: {
                 onClose={() => setMenuOpen(false)}
                 sessionActive={session.active}
                 onRename={() => setRenameOpen(true)}
+                onExport={() => setExportOpen(true)}
+                onSyncCodex={api && codexSessionId ? handleSyncCodex : undefined}
                 onArchive={() => setArchiveOpen(true)}
+                onReopen={props.canReopen === false ? undefined : handleReopen}
+                reopenDisabledReason={props.reopenDisabledReason}
                 onDelete={() => setDeleteOpen(true)}
                 onClone={() => setCloneOpen(true)}
                 onSchedule={() => setScheduleOpen(true)}
@@ -260,12 +353,32 @@ export function SessionHeader(props: {
                 menuId={menuId}
             />
 
+            {reopenError ? (
+                <ConfirmDialog
+                    isOpen={true}
+                    onClose={() => setReopenError(null)}
+                    title={t('dialog.reopen.errorTitle')}
+                    description={reopenError}
+                    confirmLabel={t('dialog.reopen.dismiss')}
+                    confirmingLabel={t('dialog.reopen.dismiss')}
+                    onConfirm={async () => setReopenError(null)}
+                    isPending={false}
+                />
+            ) : null}
+
             <RenameSessionDialog
                 isOpen={renameOpen}
                 onClose={() => setRenameOpen(false)}
                 currentName={title}
                 onRename={renameSession}
                 isPending={isPending}
+            />
+
+            <SessionExportDialog
+                isOpen={exportOpen}
+                onClose={() => setExportOpen(false)}
+                sessionId={session.id}
+                api={api}
             />
 
             <ConfirmDialog

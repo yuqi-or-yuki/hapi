@@ -1,4 +1,6 @@
+import { CREATABLE_AGENT_FLAVORS, getFlavorLabel } from '@hapi/protocol'
 import type { AgentType } from './types'
+import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
 import { useTranslation } from '@/lib/use-translation'
 
 export function AgentSelector(props: {
@@ -14,7 +16,7 @@ export function AgentSelector(props: {
                 {t('newSession.agent')}
             </label>
             <div className="flex flex-wrap gap-x-3 gap-y-2">
-                {(['claude', 'codex', 'cursor', 'gemini', 'opencode'] as const).map((agentType) => (
+                {CREATABLE_AGENT_FLAVORS.map((agentType) => (
                     <label
                         key={agentType}
                         className="flex items-center gap-1.5 cursor-pointer"
@@ -28,7 +30,8 @@ export function AgentSelector(props: {
                             disabled={props.isDisabled}
                             className="accent-[var(--app-link)]"
                         />
-                        <span className="text-sm capitalize">{agentType}</span>
+                        <AgentFlavorIcon flavor={agentType} className="h-4 w-4 shrink-0" />
+                        <span className="text-sm">{getFlavorLabel(agentType)}</span>
                     </label>
                 ))}
             </div>

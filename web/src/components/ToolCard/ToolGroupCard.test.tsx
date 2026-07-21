@@ -22,6 +22,8 @@ function makeToolBlock(id: string, name: string, input: unknown = {}): ToolCallB
             createdAt: 1,
             startedAt: 1,
             completedAt: 2,
+            execStartedAt: null,
+            execCompletedAt: null,
             description: null,
             result: { content: 'done' },
             permission: undefined,
@@ -98,25 +100,27 @@ describe('ToolGroupCard', () => {
     it('renders a collapsed target-first header', () => {
         const view = renderCard(makeGroup())
 
-        expect(screen.getByRole('button', { name: /inspect project files \+1/i })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /inspect project files/i })).toHaveAttribute('aria-expanded', 'false')
         expect(screen.getByText('Run 1 · Read 1')).toBeInTheDocument()
+        expect(screen.getByText('2 actions')).toBeInTheDocument()
         expect(screen.queryByText('src/a.ts')).not.toBeInTheDocument()
         expect(screen.queryByText('bun test')).not.toBeInTheDocument()
-        expect(screen.queryByText('2 actions')).not.toBeInTheDocument()
 
         expect(view.container.innerHTML).toContain('bg-[var(--app-tool-group-bg)]')
     })
 
     it('expands to show compact rows and opens a detail dialog per row', async () => {
         const view = renderCard(makeGroup())
-        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files \+1/i })
+        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files/i })
 
+        expect(view.container.querySelector('svg[data-state="closed"]')).toBeInTheDocument()
         fireEvent.click(groupToggle)
+        expect(groupToggle).toHaveAttribute('aria-expanded', 'true')
+        expect(view.container.querySelector('svg[data-state="open"]')).toBeInTheDocument()
         expect(screen.getByText('2 actions')).toBeInTheDocument()
-        expect(screen.getByText('Inspect project files')).toBeInTheDocument()
-        expect(screen.getByText('Run project commands')).toBeInTheDocument()
-        expect(screen.queryByText('src/a.ts')).not.toBeInTheDocument()
-        expect(screen.queryByText('bun test')).not.toBeInTheDocument()
+        expect(screen.getByText('src/a.ts')).toBeInTheDocument()
+        expect(screen.getByText('Terminal')).toBeInTheDocument()
+        expect(screen.getByText('bun test')).toBeInTheDocument()
 
         const firstRowButton = within(view.container)
             .getAllByRole('button')
@@ -132,6 +136,42 @@ describe('ToolGroupCard', () => {
         expect(screen.getAllByText('src/a.ts')[0]).toBeInTheDocument()
         expect(within(dialog).getAllByText('Input').length).toBeGreaterThan(0)
         expect(within(dialog).getAllByText('Result').length).toBeGreaterThan(0)
+    })
+
+    it('uses a neutral header for all-generic tool groups without duplicate counters', () => {
+        const tools = Array.from({ length: 25 }, (_, index) => makeToolBlock(`tool-${index + 1}`, 'Tool', { name: `Tool ${index + 1}` }))
+        const view = renderCard(makeGroup({
+            tools,
+            summary: {
+                totalTools: tools.length,
+                countsByKind: {
+                    read: 0,
+                    search: 0,
+                    command: 0,
+                    mutation: 0,
+                    web: 0,
+                    other: tools.length,
+                },
+                fileTargets: [],
+                commandTargets: [],
+                searchTargets: [],
+                urlTargets: [],
+                otherTargets: tools.map((tool) => tool.tool.name),
+                errorCount: 0,
+                runningCount: 0,
+                pendingCount: 0,
+            },
+        }))
+
+        expect(screen.getByRole('button', { name: /tool activity/i })).toBeInTheDocument()
+        expect(screen.getByText('25 actions')).toBeInTheDocument()
+        expect(screen.queryByText('Use tool +24')).not.toBeInTheDocument()
+        expect(screen.queryByText('Tool 25')).not.toBeInTheDocument()
+
+        fireEvent.click(within(view.container).getByRole('button', { name: /tool activity/i }))
+
+        expect(screen.getAllByText('Tool').length).toBeGreaterThan(0)
+        expect(screen.getByText('Tool 1')).toBeInTheDocument()
     })
 
     it('auto-loads older history after expand when the group is incomplete', async () => {
@@ -172,7 +212,7 @@ describe('ToolGroupCard', () => {
         }
 
         const view = render(<Harness />)
-        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files \+1/i })
+        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files/i })
 
         fireEvent.click(groupToggle)
 
@@ -232,7 +272,7 @@ describe('ToolGroupCard', () => {
         }
 
         const view = render(<Harness />)
-        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files \+1/i })
+        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files/i })
 
         fireEvent.click(groupToggle)
 
@@ -287,7 +327,7 @@ describe('ToolGroupCard', () => {
         }
 
         const view = render(<Harness />)
-        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files \+1/i })
+        const groupToggle = within(view.container).getByRole('button', { name: /inspect project files/i })
 
         fireEvent.click(groupToggle)
 

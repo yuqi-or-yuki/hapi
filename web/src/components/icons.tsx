@@ -60,3 +60,27 @@ export function CheckIcon(props: IconProps) {
         2
     )
 }
+
+export function InfoIcon(props: IconProps) {
+    return createIcon(
+        <>
+            <circle cx="12" cy="12" r="9" />
+            <path d="M12 11v5" />
+            <path d="M12 8h.01" />
+        </>,
+        props,
+        2
+    )
+}
+
+/** Composer schedule-send clock — circle + hands (matches ComposerButtons). */
+export function ScheduleIcon(props: IconProps) {
+    return createIcon(
+        <>
+            <circle cx="12" cy="12" r="9" />
+            <polyline points="12 7 12 12 15.5 14" />
+        </>,
+        props,
+        2
+    )
+}

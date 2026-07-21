@@ -3,10 +3,16 @@ import { CODEX_COLLABORATION_MODES, PERMISSION_MODES } from './modes'
 
 export const PermissionModeSchema = z.enum(PERMISSION_MODES)
 export const CodexCollaborationModeSchema = z.enum(CODEX_COLLABORATION_MODES)
+export const SessionEndReasonSchema = z.enum(['completed', 'terminated', 'error', 'handoff'])
+export type SessionEndReason = z.infer<typeof SessionEndReasonSchema>
 
 const MetadataSummarySchema = z.object({
     text: z.string(),
     updatedAt: z.number()
+})
+
+const SessionCapabilitiesSchema = z.object({
+    terminal: z.boolean().optional()
 })
 
 export const WorktreeMetadataSchema = z.object({
@@ -29,9 +35,23 @@ export const MetadataSchema = z.object({
     machineId: z.string().optional(),
     claudeSessionId: z.string().optional(),
     codexSessionId: z.string().optional(),
+    // 原始 Codex thread id。导入 Codex 历史后，HAPI 会 fork 出自己的续写 thread；
+    // codexSessionId 保存 fork 后的 thread，codexSourceSessionId 保留来源 thread 便于同步/展示。
+    codexSourceSessionId: z.string().optional(),
     geminiSessionId: z.string().optional(),
     opencodeSessionId: z.string().optional(),
+    grokSessionId: z.string().optional(),
     cursorSessionId: z.string().optional(),
+    cursorSessionProtocol: z.enum(['acp', 'stream-json']).optional(),
+    // Drives the web `CursorMigrationBanner`:
+    //   'in_progress' = legacy-to-ACP transplant currently running; banner shows spinner + "Upgrading..."
+    //   'ambiguous'   = migrator refused to transplant (ambiguous source drawer OR size mismatch);
+    //                   banner switches to "Manual review needed" until the operator resolves on disk.
+    //   undefined     = no migration in flight; banner hidden.
+    // tiann/hapi#873.
+    cursorMigrationState: z.enum(['in_progress', 'ambiguous']).optional(),
+    kimiSessionId: z.string().optional(),
+    piSessionId: z.string().optional(),
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(),
@@ -40,14 +60,25 @@ export const MetadataSchema = z.object({
     happyToolsDir: z.string().optional(),
     startedFromRunner: z.boolean().optional(),
     hostPid: z.number().optional(),
+    hapiMcpUrl: z.string().url().optional(),
     startedBy: z.enum(['runner', 'terminal']).optional(),
     lifecycleState: z.string().optional(),
     lifecycleStateSince: z.number().optional(),
     archivedBy: z.string().optional(),
     archiveReason: z.string().optional(),
+    preferredPermissionMode: PermissionModeSchema.optional(),
     flavor: z.string().nullish(),
+    capabilities: SessionCapabilitiesSchema.optional(),
     worktree: WorktreeMetadataSchema.optional(),
-    readyForReview: z.boolean().optional()
+    readyForReview: z.boolean().optional(),
+    // Cached Pi model list — written by CLI, read by web (inactive session fallback).
+    // Minimal shape: each entry must have modelId; other fields (provider, name, etc.) pass through.
+    piAvailableModels: z.array(z.object({ modelId: z.string() }).passthrough()).optional(),
+    // Pi-selected model with provider identity. The legacy `session.model`
+    // field stores only modelId (shared across all flavors); this preserves
+    // the provider so web can resolve the exact model when two providers
+    // share a modelId.
+    piSelectedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().optional()
 })
 
 export type Metadata = z.infer<typeof MetadataSchema>
@@ -172,7 +203,8 @@ export const DecryptedMessageSchema = z.object({
     localId: z.string().nullable(),
     content: z.unknown(),
     createdAt: z.number(),
-    invokedAt: z.number().nullable().optional()
+    invokedAt: z.number().nullable().optional(),
+    scheduledAt: z.number().nullable().optional()
 })
 
 export type DecryptedMessage = z.infer<typeof DecryptedMessageSchema>
@@ -184,7 +216,8 @@ export const SessionSchema = z.object({
     createdAt: z.number(),
     updatedAt: z.number(),
     active: z.boolean(),
-    activeAt: z.number(),
+    // Hub may still emit null for legacy SQLite rows; keep output type number.
+    activeAt: z.number().nullish().transform((value) => value ?? 0),
     metadata: MetadataSchema.nullable(),
     metadataVersion: z.number(),
     agentState: AgentStateSchema.nullable(),
@@ -197,11 +230,101 @@ export const SessionSchema = z.object({
     model: z.string().nullable().optional().default(null),
     modelReasoningEffort: z.string().nullable().optional().default(null),
     effort: z.string().nullable().optional().default(null),
+    serviceTier: z.string().nullable().optional().default(null),
     permissionMode: PermissionModeSchema.optional(),
     collaborationMode: CodexCollaborationModeSchema.optional()
 })
 
 export type Session = z.infer<typeof SessionSchema>
+
+export const SessionPatchSchema = z.object({
+    active: z.boolean().optional(),
+    thinking: z.boolean().optional(),
+    activeAt: z.number().optional(),
+    updatedAt: z.number().optional(),
+    model: z.string().nullable().optional(),
+    modelReasoningEffort: z.string().nullable().optional(),
+    effort: z.string().nullable().optional(),
+    serviceTier: z.string().nullable().optional(),
+    permissionMode: PermissionModeSchema.optional(),
+    collaborationMode: CodexCollaborationModeSchema.optional(),
+    backgroundTaskCount: z.number().optional()
+}).strict()
+
+export type SessionPatch = z.infer<typeof SessionPatchSchema>
+
+export const MachineMetadataSchema = z.object({
+    host: z.string(),
+    platform: z.string(),
+    happyCliVersion: z.string(),
+    displayName: z.string().optional(),
+    homeDir: z.string().optional(),
+    happyHomeDir: z.string().optional(),
+    happyLibDir: z.string().optional(),
+    workspaceRoots: z.array(z.string()).optional()
+})
+
+export type MachineMetadata = z.infer<typeof MachineMetadataSchema>
+
+export const RunnerStateSchema = z.object({
+    status: z.union([z.enum(['running', 'shutting-down']), z.string()]),
+    pid: z.number().optional(),
+    httpPort: z.number().optional(),
+    startedAt: z.number().optional(),
+    shutdownRequestedAt: z.number().optional(),
+    shutdownSource: z.union([z.enum(['mobile-app', 'cli', 'os-signal', 'unknown']), z.string()]).optional(),
+    lastSpawnError: z.object({
+        message: z.string(),
+        pid: z.number().optional(),
+        exitCode: z.number().nullable().optional(),
+        signal: z.string().nullable().optional(),
+        at: z.number()
+    }).nullable().optional()
+})
+
+export type RunnerState = z.infer<typeof RunnerStateSchema>
+
+export const MachineHealthSchema = z.object({
+    collectedAt: z.number(),
+    cpuCount: z.number().int().positive().optional(),
+    load1m: z.number().nonnegative().optional(),
+    cpuPercent: z.number().min(0).max(100).optional(),
+    memoryPercent: z.number().min(0).max(100).optional(),
+    uptimeSeconds: z.number().nonnegative().optional()
+}).strict()
+
+export type MachineHealth = z.infer<typeof MachineHealthSchema>
+
+export const MachineSchema = z.object({
+    id: z.string(),
+    namespace: z.string(),
+    seq: z.number(),
+    createdAt: z.number(),
+    updatedAt: z.number(),
+    active: z.boolean(),
+    activeAt: z.number(),
+    metadata: MachineMetadataSchema.nullable(),
+    metadataVersion: z.number(),
+    runnerState: RunnerStateSchema.nullable(),
+    runnerStateVersion: z.number(),
+    health: MachineHealthSchema.nullable().optional()
+})
+
+export type Machine = z.infer<typeof MachineSchema>
+
+export const MachinePatchSchema = z.object({
+    active: z.boolean().optional(),
+    activeAt: z.number().optional(),
+    updatedAt: z.number().optional()
+}).strict()
+
+export type MachinePatch = z.infer<typeof MachinePatchSchema>
+
+export const SessionUpdatedDataSchema = z.union([SessionSchema, SessionPatchSchema])
+export type SessionUpdatedData = z.infer<typeof SessionUpdatedDataSchema>
+
+export const MachineUpdatedDataSchema = z.union([MachineSchema, MachinePatchSchema, z.null()])
+export type MachineUpdatedData = z.infer<typeof MachineUpdatedDataSchema>
 
 const SessionEventBaseSchema = z.object({
     namespace: z.string().optional()
@@ -222,7 +345,7 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
     }),
     SessionChangedSchema.extend({
         type: z.literal('session-updated'),
-        data: z.unknown().optional()
+        data: SessionUpdatedDataSchema.optional()
     }),
     SessionEventBaseSchema.extend({
         type: z.literal('session-removed'),
@@ -236,12 +359,15 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
         type: z.literal('messages-invalidated')
     }),
     SessionChangedSchema.extend({
+        type: z.literal('scheduled-matured')
+    }),
+    SessionChangedSchema.extend({
         type: z.literal('session-ended'),
-        reason: z.enum(['completed', 'terminated', 'error']).optional()
+        reason: SessionEndReasonSchema.optional()
     }),
     MachineChangedSchema.extend({
         type: z.literal('machine-updated'),
-        data: z.unknown().optional()
+        data: MachineUpdatedDataSchema.optional()
     }),
     SessionEventBaseSchema.extend({
         type: z.literal('preference-updated'),
@@ -260,7 +386,7 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
     SessionChangedSchema.extend({
         type: z.literal('messages-consumed'),
         localIds: z.array(z.string()),
-        invokedAt: z.number().optional()
+        invokedAt: z.number()
     }),
     SessionChangedSchema.extend({
         type: z.literal('message-cancelled'),

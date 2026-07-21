@@ -35,4 +35,58 @@ describe('convertAgentMessage', () => {
             is_error: true
         });
     });
+
+    it('preserves stable reasoning id when provided', () => {
+        const converted = convertAgentMessage({
+            type: 'reasoning',
+            text: 'thinking',
+            id: 'reasoning-stream-1'
+        });
+
+        expect(converted).toEqual({
+            type: 'reasoning',
+            message: 'thinking',
+            id: 'reasoning-stream-1'
+        });
+    });
+
+    it('converts agent errors into error wire payloads', () => {
+        const converted = convertAgentMessage({
+            type: 'error',
+            message: 'Cursor Agent failed: authentication required'
+        });
+
+        expect(converted).toEqual({
+            type: 'error',
+            message: 'Cursor Agent failed: authentication required'
+        });
+    });
+
+    it('converts usage messages into token_count payloads', () => {
+        const converted = convertAgentMessage({
+            type: 'usage',
+            inputTokens: 8_119,
+            outputTokens: 2,
+            cacheReadTokens: 5_760,
+            thoughtTokens: 11,
+            totalTokens: 13_892,
+            contextTokens: 13_879,
+            contextWindow: 65_536
+        });
+
+        expect(converted).toEqual({
+            type: 'token_count',
+            info: {
+                total: {
+                    inputTokens: 8119,
+                    outputTokens: 2,
+                    cachedInputTokens: 5760,
+                    thoughtTokens: 11,
+                    totalTokens: 13892
+                },
+                contextTokens: 13879,
+                modelContextWindow: 65536
+            }
+        });
+    });
 });

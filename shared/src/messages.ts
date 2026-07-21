@@ -10,7 +10,13 @@ const VISIBLE_CLAUDE_SYSTEM_SUBTYPES = new Set([
     'api_error',
     'turn_duration',
     'microcompact_boundary',
-    'compact_boundary'
+    'compact_boundary',
+    // Auto-generated recap Claude Code's local TUI writes to the transcript on
+    // window blur/focus (5min+ idle). Only observed via the local launcher's
+    // transcript scan — SDK/remote mode never emits it. Chat-visible here also
+    // means CLI-forwarded, web-rendered, and included in session export
+    // (parity with turn_duration / compact_boundary).
+    'away_summary'
 ])
 
 export function isRoleWrappedRecord(value: unknown): value is RoleWrappedRecord {
@@ -48,6 +54,26 @@ export function isClaudeChatVisibleMessage(message: { type: unknown; subtype?: u
     }
 
     return isClaudeChatVisibleSystemSubtype(message.subtype)
+}
+
+export function isRedundantGoalStatusMessageText(value: unknown): boolean {
+    if (typeof value !== 'string') return false
+    const message = value.trim()
+    return message === 'Goal cleared'
+        || /^Goal (active|paused|complete|limited by budget)(?:$|\s+·\s+)/.test(message)
+}
+
+export function isRedundantGoalStatusEventContent(value: unknown): boolean {
+    const record = unwrapRoleWrappedRecordEnvelope(value)
+    if (record?.role !== 'agent') return false
+
+    const eventContent = record.content
+    if (!isObject(eventContent) || eventContent.type !== 'event') return false
+
+    const data = isObject(eventContent.data) ? eventContent.data : null
+    if (!data || data.type !== 'message') return false
+
+    return isRedundantGoalStatusMessageText(data.message)
 }
 
 export type { RoleWrappedRecord }

@@ -1,4 +1,4 @@
-import type { AgentReasoningBlock, AgentTextBlock, ChatBlock, CliOutputBlock, ToolCallBlock, ToolPermission } from '@/chat/types'
+import type { AgentReasoningBlock, AgentTextBlock, ChatBlock, CliOutputBlock, CodexReviewBlock, ToolCallBlock, ToolPermission } from '@/chat/types'
 import type { TracedMessage } from '@/chat/tracer'
 import { createCliOutputBlock, isCliOutputText, mergeCliOutputBlocks } from '@/chat/reducerCliOutput'
 import { parseMessageAsEvent } from '@/chat/reducerEvents'
@@ -25,9 +25,27 @@ function getAgentRunCompletedAt(event: Record<string, unknown>): number | null {
 
 function setEarliestStartedAt(block: ToolCallBlock, startedAt: number | null): void {
     if (startedAt === null) return
-    block.tool.startedAt = block.tool.startedAt === null
+    const nextStartedAt = block.tool.startedAt === null
         ? startedAt
         : Math.min(block.tool.startedAt, startedAt)
+    if (nextStartedAt !== block.tool.startedAt) {
+        block.tool = { ...block.tool, startedAt: nextStartedAt }
+    }
+}
+
+// Mirror of setEarliestStartedAt for the Claude-entry execution-machine start
+// timestamp. Only ever fed a real Claude `agentTimestamp` (never the hub
+// receive time) so the both-or-neither contract in `toolDurationMs` holds; a
+// null argument is a no-op. Takes the earliest so it also backfills correctly
+// when the tool_result entry was processed before the tool_use entry.
+function setEarliestExecStartedAt(block: ToolCallBlock, execStartedAt: number | null): void {
+    if (execStartedAt === null) return
+    const nextExecStartedAt = block.tool.execStartedAt === null
+        ? execStartedAt
+        : Math.min(block.tool.execStartedAt, execStartedAt)
+    if (nextExecStartedAt !== block.tool.execStartedAt) {
+        block.tool = { ...block.tool, execStartedAt: nextExecStartedAt }
+    }
 }
 
 function getAgentRunCardId(event: Record<string, unknown>, fallback: string): string {
@@ -177,6 +195,15 @@ function normalizeTraceMessage(
         meta: source.meta
     }
 
+    if (data.type === 'error' && typeof data.message === 'string') {
+        return [{
+            ...base,
+            id: traceId,
+            role: 'event',
+            content: { type: 'error', message: data.message }
+        } as TracedMessage]
+    }
+
     if (data.type === 'message' && typeof data.message === 'string') {
         return [{
             ...base,
@@ -191,7 +218,7 @@ function normalizeTraceMessage(
             ...base,
             id: traceId,
             role: 'agent',
-            content: [{ type: 'reasoning', text: data.message, uuid: traceId, parentUUID: null }]
+            content: [{ type: 'reasoning', text: data.message, uuid: traceId, streamId: traceId, parentUUID: null }]
         } as TracedMessage]
     }
 
@@ -270,6 +297,7 @@ export function reduceTimeline(
     const agentRunCardByAgentId = new Map<string, string>()
     const agentRunTraceMessagesByCardId = new Map<string, TracedMessage[]>()
     const pendingAgentRunCardByFingerprint = new Map<string, string>()
+    const reasoningBlocksByStreamId = new Map<string, AgentReasoningBlock>()
     let hasReadyEvent = false
 
     const ensureAgentRunBlock = (
@@ -318,9 +346,12 @@ export function reduceTimeline(
 
     const patchAgentRunInput = (block: ToolCallBlock, patch: Record<string, unknown>): void => {
         const current = isObject(block.tool.input) ? block.tool.input : {}
-        block.tool.input = {
-            ...current,
-            ...patch
+        block.tool = {
+            ...block.tool,
+            input: {
+                ...current,
+                ...patch
+            }
         }
     }
 
@@ -367,6 +398,19 @@ export function reduceTimeline(
             toBlock.tool.completedAt = toBlock.tool.completedAt === null
                 ? fromBlock.tool.completedAt
                 : Math.max(toBlock.tool.completedAt, fromBlock.tool.completedAt)
+        }
+        // Keep the exec-timestamp pair merged the same way as startedAt/
+        // completedAt so a merged card never carries a stale exec pair (agent-run
+        // cards currently never carry exec timestamps, but keep the invariant).
+        if (fromBlock.tool.execStartedAt !== null) {
+            toBlock.tool.execStartedAt = toBlock.tool.execStartedAt === null
+                ? fromBlock.tool.execStartedAt
+                : Math.min(toBlock.tool.execStartedAt, fromBlock.tool.execStartedAt)
+        }
+        if (fromBlock.tool.execCompletedAt !== null) {
+            toBlock.tool.execCompletedAt = toBlock.tool.execCompletedAt === null
+                ? fromBlock.tool.execCompletedAt
+                : Math.max(toBlock.tool.execCompletedAt, fromBlock.tool.execCompletedAt)
         }
         toBlock.durationMs = toBlock.durationMs ?? fromBlock.durationMs
         toBlock.usage = toBlock.usage ?? fromBlock.usage
@@ -437,8 +481,8 @@ export function reduceTimeline(
                 const targetId = msg.content.targetMessageId
                 const durationMs = msg.content.durationMs as number
                 type DurationBearingBlock = AgentTextBlock | AgentReasoningBlock | CliOutputBlock | ToolCallBlock
-                const isDurationTarget = (b: ChatBlock): b is DurationBearingBlock =>
-                    b.kind === 'agent-text' || b.kind === 'agent-reasoning' || b.kind === 'cli-output' || b.kind === 'tool-call'
+                const isDurationTarget = (b: ChatBlock): b is DurationBearingBlock | CodexReviewBlock =>
+                    b.kind === 'agent-text' || b.kind === 'agent-reasoning' || b.kind === 'codex-review' || b.kind === 'cli-output' || b.kind === 'tool-call'
                 let foundIndex = -1
 
                 if (targetId) {
@@ -529,8 +573,9 @@ export function reduceTimeline(
                         statusText: getEventString(event, 'statusText') ?? getEventString(event, 'status_text') ?? 'Starting',
                         ...getAgentRunDisplayPatch(event)
                     })
-                    block.tool.state = mapAgentRunStatusToToolState(status)
-                    if (block.tool.state === 'running') {
+                    const nextState = mapAgentRunStatusToToolState(status)
+                    block.tool = { ...block.tool, state: nextState }
+                    if (nextState === 'running') {
                         setEarliestStartedAt(block, startedAt)
                     }
                     continue
@@ -552,20 +597,20 @@ export function reduceTimeline(
                         statusText: getEventString(event, 'statusText') ?? getEventString(event, 'status_text') ?? status,
                         ...getAgentRunDisplayPatch(event)
                     })
-                    block.tool.state = nextState
-                    if (block.tool.state === 'running') {
+                    block.tool = { ...block.tool, state: nextState }
+                    if (nextState === 'running') {
                         setEarliestStartedAt(block, startedAt ?? msg.createdAt)
                     }
-                    if (block.tool.state === 'completed' || block.tool.state === 'error') {
+                    if (nextState === 'completed' || nextState === 'error') {
                         setEarliestStartedAt(block, startedAt)
-                        block.tool.completedAt = getAgentRunCompletedAt(event) ?? msg.createdAt
+                        block.tool = { ...block.tool, completedAt: getAgentRunCompletedAt(event) ?? msg.createdAt }
                     }
                     if ('result' in event) {
-                        block.tool.result = event.result
+                        block.tool = { ...block.tool, result: event.result }
                     } else if ('error' in event) {
-                        block.tool.result = event.error
+                        block.tool = { ...block.tool, result: event.error }
                     } else if ('spawnResult' in event) {
-                        block.tool.result = event.spawnResult
+                        block.tool = { ...block.tool, result: event.spawnResult }
                     }
                     continue
                 }
@@ -730,8 +775,36 @@ export function reduceTimeline(
                     continue
                 }
 
-                if (c.type === 'reasoning') {
+                if (c.type === 'generated-image') {
                     blocks.push({
+                        kind: 'generated-image',
+                        id: `${msg.id}:${idx}`,
+                        localId: msg.localId,
+                        createdAt: msg.createdAt,
+                        invokedAt: msg.invokedAt,
+                        imageId: c.imageId,
+                        fileName: c.fileName,
+                        mimeType: c.mimeType,
+                        meta: msg.meta
+                    })
+                    continue
+                }
+
+                if (c.type === 'reasoning') {
+                    const streamId = asString(c.streamId)
+                    if (streamId) {
+                        const existing = reasoningBlocksByStreamId.get(streamId)
+                        if (existing) {
+                            existing.text = c.text
+                            existing.usage = msg.usage
+                            existing.model = msg.model
+                            existing.meta = msg.meta
+                            existing.invokedAt = msg.invokedAt
+                            continue
+                        }
+                    }
+
+                    const block: AgentReasoningBlock = {
                         kind: 'agent-reasoning',
                         id: `${msg.id}:${idx}`,
                         localId: msg.localId,
@@ -740,6 +813,25 @@ export function reduceTimeline(
                         usage: msg.usage,
                         model: msg.model,
                         text: c.text,
+                        meta: msg.meta
+                    }
+                    blocks.push(block)
+                    if (streamId) {
+                        reasoningBlocksByStreamId.set(streamId, block)
+                    }
+                    continue
+                }
+
+                if (c.type === 'codex-review') {
+                    blocks.push({
+                        kind: 'codex-review',
+                        id: `${msg.id}:${idx}`,
+                        localId: msg.localId,
+                        createdAt: msg.createdAt,
+                        invokedAt: msg.invokedAt,
+                        usage: msg.usage,
+                        model: msg.model,
+                        review: c.review,
                         meta: msg.meta
                     })
                     continue
@@ -788,13 +880,23 @@ export function reduceTimeline(
                         name: c.name,
                         input: c.input,
                         description: c.description,
-                        permission
+                        permission,
+                        agentTimestamp: msg.agentTimestamp
                     })
 
                     if (block.tool.state === 'pending') {
-                        block.tool.state = 'running'
-                        block.tool.startedAt = msg.createdAt
+                        block.tool = { ...block.tool, state: 'running' }
                     }
+                    // Backfill both the hub-clock start and the Claude exec start
+                    // regardless of state (not just the pending→running
+                    // transition), so a tool_result reduced before its tool_use
+                    // still lowers startedAt to the (earlier) tool_use receive
+                    // time. Otherwise both hub ends equal the result time and
+                    // toolDurationMs reads 0.0s. setEarliest* take the min; a
+                    // null exec timestamp is a no-op, leaving exec start unset so
+                    // toolDurationMs falls back to hub times on both sides.
+                    setEarliestStartedAt(block, msg.createdAt)
+                    setEarliestExecStartedAt(block, msg.agentTimestamp ?? null)
 
                     if (isSubagentToolName(c.name) && !context.consumedGroupIds.has(msg.id)) {
                         const sidechain = context.groups.get(msg.id) ?? null
@@ -859,11 +961,25 @@ export function reduceTimeline(
                         input: permissionEntry?.input ?? null,
                         description: null,
                         permission
+                        // NOTE: no agentTimestamp seed here. execStartedAt must
+                        // only ever originate from a tool_use entry; the tool_use
+                        // path backfills it via setEarliestExecStartedAt. Seeding
+                        // it from the result entry would, on a reorder with a
+                        // timestamp-less tool_use, leave execStartedAt ===
+                        // execCompletedAt (the result stamp) → a bogus 0 duration
+                        // instead of the correct hub-time fallback.
                     })
 
-                    block.tool.result = c.content
-                    block.tool.completedAt = msg.createdAt
-                    block.tool.state = c.is_error ? 'error' : 'completed'
+                    block.tool = {
+                        ...block.tool,
+                        result: c.content,
+                        completedAt: msg.createdAt,
+                        // Only a real Claude timestamp — never the hub receive
+                        // time — so toolDurationMs never subtracts two clocks.
+                        // Null here leaves the tool on the hub-time fallback.
+                        execCompletedAt: msg.agentTimestamp ?? null,
+                        state: c.is_error ? 'error' : 'completed'
+                    }
                     continue
                 }
 

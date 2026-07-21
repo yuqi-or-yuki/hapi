@@ -5,16 +5,16 @@ import type { SessionMetadataSummary } from '@/types/api'
 import { useHappyChatContext } from '@/components/AssistantChat/context'
 import { ToolDetailDialogContent, ToolStatusIcon, toolStatusColorClass } from '@/components/ToolCard/ToolCard'
 import { getToolPresentation } from '@/components/ToolCard/knownTools'
-import { formatGroupedHeaderSubtitle, formatGroupedHeaderTitle, formatGroupedRowLabel } from '@/components/ToolCard/groupedPresentation'
+import { formatGroupedHeaderSubtitle, formatGroupedHeaderTitle } from '@/components/ToolCard/groupedPresentation'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { openImageLightbox } from '@/components/ImageLightbox'
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 
-function DetailsIcon() {
+function DetailsIcon(props: { open: boolean }) {
     return (
-        <svg className="h-4 w-4" viewBox="0 0 16 16" fill="none">
+        <svg className={cn('h-4 w-4 transition-transform duration-200', props.open ? 'rotate-90' : null)} viewBox="0 0 16 16" fill="none" data-state={props.open ? 'open' : 'closed'}>
             <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
     )
@@ -61,7 +61,7 @@ function formatActionSummary(block: ToolGroupBlock, t: (key: string, params?: Re
     if (countsByKind.web > 0) {
         parts.push(t('toolGroup.summary.web', { n: countsByKind.web }))
     }
-    if (countsByKind.other > 0) {
+    if (countsByKind.other > 0 && parts.length > 0) {
         parts.push(t('toolGroup.summary.other', { n: countsByKind.other }))
     }
 
@@ -85,8 +85,15 @@ function RowLabel(props: { block: ToolCallBlock; metadata: SessionMetadataSummar
                 <div className="flex h-3.5 w-3.5 shrink-0 items-center justify-center text-[var(--app-tool-card-accent)] leading-none">
                     {presentation.icon}
                 </div>
-                <div className="min-w-0 truncate whitespace-nowrap text-sm font-medium text-[var(--app-fg)]">
-                    {formatGroupedRowLabel(props.block, t)}
+                <div className="min-w-0 flex-1">
+                    <div className="truncate whitespace-nowrap text-sm font-medium text-[var(--app-fg)]">
+                        {presentation.title}
+                    </div>
+                    {presentation.subtitle ? (
+                        <div className="truncate whitespace-nowrap font-mono text-xs text-[var(--app-tool-card-subtitle)]">
+                            {presentation.subtitle}
+                        </div>
+                    ) : null}
                 </div>
             </div>
         </div>
@@ -248,7 +255,7 @@ export function ToolGroupCard(props: {
                         <div className="min-w-0 flex flex-1 flex-col gap-1">
                             <div className="min-w-0 flex items-center gap-2">
                                 <div className="shrink-0 flex h-3.5 w-3.5 items-center justify-center text-[var(--app-tool-card-accent)] leading-none">
-                                    <DetailsIcon />
+                                    <DetailsIcon open={open} />
                                 </div>
                                 <CardTitle className="min-w-0 truncate whitespace-nowrap text-sm font-medium leading-tight text-[var(--app-fg)]">
                                     {primaryTitle}
@@ -262,6 +269,10 @@ export function ToolGroupCard(props: {
                         </div>
 
                         <div className="flex shrink-0 items-center gap-2 self-center text-[var(--app-hint)]">
+                            <SummaryBadge
+                                className="bg-[var(--app-subtle-bg)] text-[var(--app-hint)]"
+                                text={t('toolGroup.toolCount', { n: props.block.tools.length })}
+                            />
                             {props.block.summary.runningCount > 0 ? (
                                 <SummaryBadge
                                     className="bg-sky-500/10 text-sky-600"
@@ -310,10 +321,6 @@ export function ToolGroupCard(props: {
 
             {open ? (
                 <CardContent className="px-3 pb-3 pt-1">
-                    <div className="mb-3 text-xs text-[var(--app-hint)]">
-                        {t('toolGroup.toolCount', { n: props.block.tools.length })}
-                    </div>
-
                     <div className="flex flex-col gap-2">
                         {props.block.tools.map((tool) => {
                             return (

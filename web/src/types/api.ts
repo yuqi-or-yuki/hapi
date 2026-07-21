@@ -1,5 +1,7 @@
 import type {
     DecryptedMessage as ProtocolDecryptedMessage,
+    Machine,
+    RunnerState,
     Session,
     SessionSummary,
     SyncEvent as ProtocolSyncEvent,
@@ -7,11 +9,54 @@ import type {
 } from '@hapi/protocol/types'
 
 export type {
+    CodexModelsResponse,
+    CodexModelSummary,
+    CommandResponse,
+    CursorModelsResponse,
+    CursorModelSummary,
+    CursorChatStoreStatus,
+    DeleteUploadResponse,
+    DirectoryEntry,
+    FileReadResponse,
+    GitCommandResponse,
+    GrokModelsResponse,
+    GrokModelSummary,
+    GrokReasoningEffortResponse,
+    GrokReasoningEffortOption,
+    ListDirectoryResponse,
+    MachineDirectoryEntry,
+    MachineListDirectoryResponse,
+    MachinePathsExistsResponse,
+    AuthResponse,
+    MachinesResponse,
+    MessagesResponse,
+    OpencodeModelsResponse,
+    OpencodeModelSummary,
+    PathExistsResponse,
+    PiModelSummary,
+    PiModelsResponse,
+    PiThinkingLevelMap,
+    SlashCommand,
+    SlashCommandsResponse,
+    SessionResponse,
+    SessionsResponse,
+    SpawnResponse,
+    UploadFileResponse
+} from '@hapi/protocol/apiTypes'
+
+export type {
     AgentState,
     AttachmentMetadata,
     CodexCollaborationMode,
+    Metadata,
     PermissionMode,
+    Machine,
+    MachineHealth,
+    PendingRequest,
+    PendingRequestKind,
+    RunnerState,
     Session,
+    SessionPatch,
     SessionSummary,
     SessionSummaryMetadata,
     TeamMember,
@@ -24,6 +69,8 @@ export type {
     WorktreeMetadata
 } from '@hapi/protocol/types'
 
+export type { HapiSessionExport } from '@hapi/protocol/sessionExport'
+
 export type SessionMetadataSummary = {
     path: string
     host: string
@@ -34,6 +81,9 @@ export type SessionMetadataSummary = {
     machineId?: string
     tools?: string[]
     flavor?: string | null
+    capabilities?: {
+        terminal?: boolean
+    }
     worktree?: WorktreeMetadata
 }
 
@@ -43,45 +93,6 @@ export type DecryptedMessage = ProtocolDecryptedMessage & {
     status?: MessageStatus
     originalText?: string
     invokedAt?: number | null
-}
-
-export type RunnerState = {
-    status?: string
-    pid?: number
-    httpPort?: number
-    startedAt?: number
-    shutdownRequestedAt?: number
-    shutdownSource?: string
-    lastSpawnError?: {
-        message: string
-        pid?: number
-        exitCode?: number | null
-        signal?: string | null
-        at: number
-    } | null
-}
-
-export type Machine = {
-    id: string
-    active: boolean
-    metadata: {
-        host: string
-        platform: string
-        happyCliVersion: string
-        displayName?: string
-        workspaceRoots?: string[]
-    } | null
-    runnerState?: RunnerState | null
-}
-
-export type AuthResponse = {
-    token: string
-    user: {
-        id: number
-        username?: string
-        firstName?: string
-        lastName?: string
-    }
 }
 
 export type ScheduledMessage = {
@@ -134,48 +145,6 @@ export type SkillUsage = {
 
 export type SkillUsageResponse = { skills: SkillUsage[] }
 
-export type SessionsResponse = { sessions: SessionSummary[] }
-export type SessionResponse = { session: Session }
-export type MessagesResponse = {
-    messages: DecryptedMessage[]
-    page: {
-        limit: number
-        beforeSeq?: number | null
-        nextBeforeSeq: number | null
-        nextBeforeAt?: number | null
-        hasMore: boolean
-    }
-}
-
-export type MachinesResponse = { machines: Machine[] }
-export type MachinePathsExistsResponse = { exists: Record<string, boolean> }
-
-export type MachineDirectoryEntry = {
-    name: string
-    type: 'file' | 'directory' | 'other'
-    size?: number
-    modified?: number
-    isGitRepo?: boolean
-}
-
-export type MachineListDirectoryResponse = {
-    success: boolean
-    entries?: MachineDirectoryEntry[]
-    error?: string
-}
-
-export type SpawnResponse =
-    | { type: 'success'; sessionId: string }
-    | { type: 'error'; message: string }
-
-export type GitCommandResponse = {
-    success: boolean
-    stdout?: string
-    stderr?: string
-    exitCode?: number
-    error?: string
-}
-
 export type FileSearchItem = {
     fileName: string
     filePath: string
@@ -186,36 +155,6 @@ export type FileSearchItem = {
 export type FileSearchResponse = {
     success: boolean
     files?: FileSearchItem[]
-    error?: string
-}
-
-export type DirectoryEntry = {
-    name: string
-    type: 'file' | 'directory' | 'other'
-    size?: number
-    modified?: number
-}
-
-export type ListDirectoryResponse = {
-    success: boolean
-    entries?: DirectoryEntry[]
-    error?: string
-}
-
-export type FileReadResponse = {
-    success: boolean
-    content?: string
-    error?: string
-}
-
-export type UploadFileResponse = {
-    success: boolean
-    path?: string
-    error?: string
-}
-
-export type DeleteUploadResponse = {
-    success: boolean
     error?: string
 }
 
@@ -238,20 +177,6 @@ export type GitStatusFiles = {
     totalUnstaged: number
 }
 
-export type SlashCommand = {
-    name: string
-    description?: string
-    source: 'builtin' | 'user' | 'plugin' | 'project'
-    content?: string  // Expanded content for Codex user prompts
-    pluginName?: string
-}
-
-export type SlashCommandsResponse = {
-    success: boolean
-    commands?: SlashCommand[]
-    error?: string
-}
-
 export type SkillSummary = {
     name: string
     description?: string
@@ -260,20 +185,6 @@ export type SkillSummary = {
 export type SkillsResponse = {
     success: boolean
     skills?: SkillSummary[]
-    error?: string
-}
-
-export type CodexModelSummary = {
-    id: string
-    displayName: string
-    isDefault: boolean
-    defaultReasoningEffort?: string | null
-    supportedReasoningEfforts?: string[]
-}
-
-export type CodexModelsResponse = {
-    success: boolean
-    models?: CodexModelSummary[]
     error?: string
 }
 
@@ -295,18 +206,6 @@ export type ClaudeModelsResponse = {
     error?: string
 }
 
-export type OpencodeModelSummary = {
-    modelId: string
-    name?: string
-}
-
-export type OpencodeModelsResponse = {
-    success: boolean
-    availableModels?: OpencodeModelSummary[]
-    currentModelId?: string | null
-    error?: string
-}
-
 export type PushSubscriptionKeys = {
     p256dh: string
     auth: string
@@ -323,6 +222,101 @@ export type PushUnsubscribePayload = {
 
 export type PushVapidPublicKeyResponse = {
     publicKey: string
+}
+
+export type CodexDesktopScriptResponse = {
+    success: boolean
+    message?: string
+    pid?: number
+    command?: string
+    script?: string
+    cwd?: string
+    output?: string
+    error?: string
+    codexDesktopRunning?: boolean
+    codexClientAvailable?: boolean
+    // 中文注释：多选导入时返回实际处理完成的 Codex 会话数量，用于前端提示本次导入条数。
+    syncedCount?: number
+    // 中文注释：这里存放本次导入对应的 Codex thread ID 列表，方便日志和排查 direct import 结果。
+    sessionIds?: string[]
+    hapiSessionIds?: string[]
+}
+
+export type CodexLocalSessionSummary = {
+    id: string
+    title: string
+    lastUserMessage?: string | null
+    cwd?: string | null
+    file: string
+    modifiedAt: number
+    originator?: string | null
+    cliVersion?: string | null
+    source?: string | null
+    threadSource?: string | null
+    forkedFromId?: string | null
+}
+
+export type CodexLocalSessionsResponse = {
+    success: true
+    sessions: CodexLocalSessionSummary[]
+    machineId?: string
+} | {
+    success: false
+    error: string
+    sessions: []
+    machineId?: string
+}
+
+
+export type CodexArchiveSessionResponse = {
+    success: true
+    archivedPath: string
+    machineId?: string
+} | {
+    success: false
+    error: string
+    machineId?: string
+}
+
+export type CodexDesktopSyncRequest = {
+    // 中文注释：前端弹窗直接提交 Codex thread ID，后端会按这些 transcript 直接导入到 Hapi。
+    sessionIds: string[]
+    cwd?: string | null
+    machineId?: string | null
+    model?: string | null
+    modelReasoningEffort?: string | null
+    yolo?: boolean
+}
+
+export type CodexDesktopStatusResponse = {
+    success: true
+    codexDesktopRunning: boolean
+    codexClientAvailable: boolean
+}
+
+export type CodexDuplicateSessionGroup = {
+    codexSessionId: string
+    hapiSessionIds: string[]
+    canonicalSessionId?: string
+    removedSessionIds?: string[]
+}
+
+export type CodexDuplicateSessionsResponse = {
+    success: true
+    // 中文注释：这里只返回本次选中导入的 codexSessionId 中检测出来的重复会话，不包含未勾选的其它会话。
+    duplicates: CodexDuplicateSessionGroup[]
+} | {
+    success: false
+    error: string
+}
+
+export type CodexMergeDuplicateSessionsResponse = {
+    success: true
+    merged: CodexDuplicateSessionGroup[]
+    mergedCount: number
+} | {
+    success: false
+    error: string
 }
 
 export type VisibilityPayload = {

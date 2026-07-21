@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { getEventPresentation, formatResetTime } from './presentation'
+import { getEventPresentation, formatMessageTimestamp, formatResetTime } from './presentation'
+
+describe('getEventPresentation — agent errors', () => {
+    it('formats error events with warning icon and message text', () => {
+        const result = getEventPresentation({
+            type: 'error',
+            message: 'Cursor Agent failed: authentication required'
+        })
+
+        expect(result.icon).toBe('⚠️')
+        expect(result.text).toBe('Cursor Agent failed: authentication required')
+    })
+})
 
 describe('getEventPresentation — limit-warning', () => {
     it('formats five_hour warning', () => {
@@ -122,6 +134,18 @@ describe('getEventPresentation — thread goals', () => {
     })
 })
 
+describe('getEventPresentation — recap (away_summary)', () => {
+    it('formats the recap with a recap: prefix', () => {
+        const result = getEventPresentation({
+            type: 'recap',
+            text: 'Building the login flow, next: wire up the submit handler.'
+        })
+
+        expect(result.icon).toBe('💭')
+        expect(result.text).toBe('recap: Building the login flow, next: wire up the submit handler.')
+    })
+})
+
 describe('formatResetTime', () => {
     it('formats a unix timestamp to a non-empty string', () => {
         const result = formatResetTime(1774278000)
@@ -137,5 +161,20 @@ describe('formatResetTime', () => {
     it('returns raw value for invalid timestamps', () => {
         const result = formatResetTime(NaN)
         expect(result).toBeTruthy()
+    })
+})
+
+describe('formatMessageTimestamp', () => {
+    it('formats today without requiring a date prefix', () => {
+        const now = new Date(2026, 4, 22, 14, 30)
+        const result = formatMessageTimestamp(new Date(2026, 4, 22, 9, 5), now)
+        expect(result).toBeTruthy()
+        expect(result).not.toContain('2026')
+    })
+
+    it('includes a year for messages outside the current year', () => {
+        const now = new Date(2026, 4, 22, 14, 30)
+        const result = formatMessageTimestamp(new Date(2025, 11, 31, 23, 59), now)
+        expect(result).toContain('2025')
     })
 })

@@ -27,6 +27,11 @@ type SessionEndPayload = {
     time: number
 }
 
+type SessionReadyPayload = {
+    sid: string
+    time: number
+}
+
 type MachineAlivePayload = {
     machineId: string
     time: number
@@ -38,15 +43,18 @@ export type CliHandlersDeps = {
     rpcRegistry: RpcRegistry
     terminalRegistry: TerminalRegistry
     onSessionAlive?: (payload: SessionAlivePayload) => void
+    onSessionReady?: (payload: SessionReadyPayload) => void
     onSessionEnd?: (payload: SessionEndPayload) => void
     onMachineAlive?: (payload: MachineAlivePayload) => void
     onWebappEvent?: (event: SyncEvent) => void
     onBackgroundTaskDelta?: (sessionId: string, delta: { started: number; completed: number }) => void
     onSessionActivity?: (sessionId: string, updatedAt: number) => void
+    onSweepImmediateQueued?: (sessionId: string, now: number) => void
+    onMessagesConsumed?: (sessionId: string) => void
 }
 
 export function registerCliHandlers(socket: CliSocketWithData, deps: CliHandlersDeps): void {
-    const { io, store, rpcRegistry, terminalRegistry, onSessionAlive, onSessionEnd, onMachineAlive, onWebappEvent, onBackgroundTaskDelta, onSessionActivity } = deps
+    const { io, store, rpcRegistry, terminalRegistry, onSessionAlive, onSessionReady, onSessionEnd, onMachineAlive, onWebappEvent, onBackgroundTaskDelta, onSessionActivity, onSweepImmediateQueued, onMessagesConsumed } = deps
     const terminalNamespace = io.of('/terminal')
     const namespace = typeof socket.data.namespace === 'string' ? socket.data.namespace : null
 
@@ -104,10 +112,13 @@ export function registerCliHandlers(socket: CliSocketWithData, deps: CliHandlers
         resolveSessionAccess,
         emitAccessError,
         onSessionAlive,
+        onSessionReady,
         onSessionEnd,
         onWebappEvent,
         onBackgroundTaskDelta,
-        onSessionActivity
+        onSessionActivity,
+        onSweepImmediateQueued,
+        onMessagesConsumed
     })
     registerMachineHandlers(socket, {
         store,

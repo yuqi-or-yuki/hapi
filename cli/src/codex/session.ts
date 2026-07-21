@@ -17,6 +17,8 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
     readonly codexCliOverrides?: CodexCliOverrides;
     readonly startedBy: 'runner' | 'terminal';
     readonly startingMode: 'local' | 'remote';
+    readonly replayTranscriptHistoryOnStart: boolean;
+    readonly sourceSessionId?: string;
     localLaunchFailure: LocalLaunchFailure | null = null;
 
     private transcriptPathCallbacks: Array<(path: string) => void> = [];
@@ -38,6 +40,8 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         model?: SessionModel;
         modelReasoningEffort?: SessionModelReasoningEffort;
         collaborationMode?: EnhancedMode['collaborationMode'];
+        replayTranscriptHistoryOnStart?: boolean;
+        sourceSessionId?: string;
     }) {
         super({
             api: opts.api,
@@ -64,6 +68,8 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         this.codexCliOverrides = opts.codexCliOverrides;
         this.startedBy = opts.startedBy;
         this.startingMode = opts.startingMode;
+        this.replayTranscriptHistoryOnStart = opts.replayTranscriptHistoryOnStart ?? false;
+        this.sourceSessionId = opts.sourceSessionId;
         this.permissionMode = opts.permissionMode;
         this.model = opts.model;
         this.modelReasoningEffort = opts.modelReasoningEffort;
@@ -99,9 +105,16 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
         this.sessionId = null;
         this.resetTranscriptPath();
         this.client.updateMetadata((metadata: Metadata) => {
-            const updated = { ...metadata };
-            delete updated.codexSessionId;
-            return updated;
+            // Explicit-clear sentinel: `null` instructs the hub merge to
+            // drop `codexSessionId` from the persisted blob. Plain
+            // `delete` arrives at the hub as an omitted field, which the
+            // carry-forward path then restores from the prior row —
+            // defeating the reset. See hub/src/store/sessions.ts
+            // mergeSessionMetadata. The value is `null` on the wire only;
+            // MetadataSchema parses `string().optional()`, so the
+            // post-merge persisted blob carries no key.
+            const updated: Record<string, unknown> = { ...metadata, codexSessionId: null };
+            return updated as unknown as Metadata;
         });
     }
 
@@ -132,6 +145,10 @@ export class CodexSession extends AgentSessionBase<EnhancedMode> {
 
     sendUserMessage = (text: string): void => {
         this.client.sendUserMessage(text);
+    };
+
+    notifyUserActivity = (): void => {
+        this.client.notifyUserActivity();
     };
 
     sendSessionEvent = (event: Parameters<ApiSessionClient['sendSessionEvent']>[0]): void => {

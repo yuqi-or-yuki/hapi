@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Outlet, useLocation, useMatchRoute, useRouter } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
 import { initializeChatSurfaceColors } from '@/hooks/useChatSurfaceColors'
 import { initializeTheme } from '@/hooks/useTheme'
+import { initializeThemeColors } from '@/hooks/useThemeColors'
 import { useAuth } from '@/hooks/useAuth'
 import { useAuthSource } from '@/hooks/useAuthSource'
 import { useServerUrl } from '@/hooks/useServerUrl'
@@ -19,14 +20,18 @@ import { useAppGoBack } from '@/hooks/useAppGoBack'
 import { useTranslation } from '@/lib/use-translation'
 import { VoiceProvider } from '@/lib/voice-context'
 import { requireHubUrlForLogin } from '@/lib/runtime-config'
+import { getAppGlobalSseSubscription, getAppSessionSseSubscription } from '@/lib/appSseSubscriptions'
+import { reconcileQueuedStateAfterConnect } from '@/lib/queued-state-reconciliation'
 import { LoginPrompt } from '@/components/LoginPrompt'
 import { InstallPrompt } from '@/components/InstallPrompt'
 import { OfflineBanner } from '@/components/OfflineBanner'
+import { PwaUpdateBanner, PwaUpdateBannerWithStatusOffset } from '@/components/PwaUpdateBanner'
 import { SyncingBanner } from '@/components/SyncingBanner'
 import { ReconnectingBanner } from '@/components/ReconnectingBanner'
 import { VoiceErrorBanner } from '@/components/VoiceErrorBanner'
 import { LoadingState } from '@/components/LoadingState'
 import { ToastContainer } from '@/components/ToastContainer'
+import { PwaUpdateProvider } from '@/lib/pwa-update-context'
 import { ToastProvider, useToast } from '@/lib/toast-context'
 import type { SyncEvent } from '@/types/api'
 import { normalizeAgentDoneRing, playAgentDoneRing, type AgentDoneRing } from '@/lib/agentDoneSound'
@@ -127,10 +132,21 @@ function saveAllDoneRing(ring: AgentDoneRing): void {
     } catch {}
 }
 
+function withPwaBanner(content: ReactNode) {
+    return (
+        <>
+            <PwaUpdateBanner />
+            {content}
+        </>
+    )
+}
+
 export function App() {
     return (
         <ToastProvider>
-            <AppInner />
+            <PwaUpdateProvider>
+                <AppInner />
+            </PwaUpdateProvider>
         </ToastProvider>
     )
 }
@@ -221,6 +237,7 @@ function AppInner() {
         tg?.ready()
         tg?.expand()
         initializeTheme()
+        initializeThemeColors()
         initializeChatSurfaceColors()
     }, [])
 
@@ -367,9 +384,12 @@ function AppInner() {
         }
         const invalidations = [
             queryClient.invalidateQueries({ queryKey: queryKeys.sessions }),
-            ...(selectedSessionId ? [
-                queryClient.invalidateQueries({ queryKey: queryKeys.session(selectedSessionId) })
-            ] : [])
+            // Invalidate ALL cached session-detail entries on reconnect, not just
+            // the selected one.  With `SESSION_DETAIL_STALE_TIME_MS` extending the
+            // freshness window on `useSession`, a previously-viewed session that
+            // received updates during the SSE gap would otherwise serve stale
+            // cached data on remount.  See tiann/hapi#884.
+            queryClient.invalidateQueries({ queryKey: ['session'] })
         ]
         const refreshMessages = (selectedSessionId && api)
             ? fetchLatestMessages(api, selectedSessionId)
@@ -415,6 +435,16 @@ function AppInner() {
         }
         playDoneSound(event.sessionId, agentDoneRing)
     }, [markUnreadDone, selectedSessionId, playDoneSound, allDoneRing, agentDoneRing])
+
+    const handleSessionSseConnect = useCallback(() => {
+        if (!api || !selectedSessionId) {
+            return
+        }
+        void reconcileQueuedStateAfterConnect(api, selectedSessionId).catch((error) => {
+            console.error('Failed to reconcile queued state after SSE connect:', error)
+        })
+    }, [api, selectedSessionId])
+
     const translateIncomingToast = useCallback((title: string, body: string): { title: string; body: string } => {
         const normalizedTitle = title.trim()
         const normalizedBody = body.trim()
@@ -469,38 +499,60 @@ function AppInner() {
         })
     }, [addToast, translateIncomingToast])
 
-    const eventSubscription = useMemo(() => ({ all: true }), [])
+    const globalEventSubscription = useMemo(() => getAppGlobalSseSubscription(), [])
+    const sessionEventSubscription = useMemo(
+        () => getAppSessionSseSubscription(selectedSessionId),
+        [selectedSessionId]
+    )
+    const sseEnabled = Boolean(api && token)
 
-    const { subscriptionId } = useSSE({
-        enabled: Boolean(api && token),
+    const { subscriptionId: globalSubscriptionId } = useSSE({
+        enabled: sseEnabled,
         token: token ?? '',
         baseUrl,
-        subscription: eventSubscription,
+        subscription: globalEventSubscription,
+        scope: 'global',
         onConnect: handleSseConnect,
         onDisconnect: handleSseDisconnect,
-        onEvent: handleSseEvent,
+        onEvent: () => {},
         onToast: handleToast,
         onSessionFinished: handleSessionFinished
     })
 
+    const { subscriptionId: sessionSubscriptionId } = useSSE({
+        enabled: sseEnabled && Boolean(sessionEventSubscription),
+        token: token ?? '',
+        baseUrl,
+        subscription: sessionEventSubscription ?? undefined,
+        scope: 'full',
+        onConnect: handleSessionSseConnect,
+        onEvent: handleSseEvent
+    })
+
     useVisibilityReporter({
         api,
-        subscriptionId,
-        enabled: Boolean(api && token)
+        subscriptionId: globalSubscriptionId,
+        enabled: sseEnabled
+    })
+
+    useVisibilityReporter({
+        api,
+        subscriptionId: sessionSubscriptionId,
+        enabled: sseEnabled && Boolean(sessionEventSubscription)
     })
 
     // Loading auth source
     if (isAuthSourceLoading) {
-        return (
+        return withPwaBanner(
             <div className="h-full flex items-center justify-center p-4">
                 <LoadingState label={t('loading')} className="text-sm" />
-            </div>
+            </div>,
         )
     }
 
     // No auth source (browser environment, not logged in)
     if (!authSource) {
-        return (
+        return withPwaBanner(
             <LoginPrompt
                 onLogin={setAccessToken}
                 baseUrl={baseUrl}
@@ -508,12 +560,12 @@ function AppInner() {
                 setServerUrl={setServerUrl}
                 clearServerUrl={clearServerUrl}
                 requireServerUrl={REQUIRE_SERVER_URL}
-            />
+            />,
         )
     }
 
     if (needsBinding) {
-        return (
+        return withPwaBanner(
             <LoginPrompt
                 mode="bind"
                 onBind={bind}
@@ -523,16 +575,16 @@ function AppInner() {
                 clearServerUrl={clearServerUrl}
                 requireServerUrl={REQUIRE_SERVER_URL}
                 error={authError ?? undefined}
-            />
+            />,
         )
     }
 
     // Authenticating (also covers the gap before useAuth effect starts)
     if (isAuthLoading || (authSource && !token && !authError)) {
-        return (
+        return withPwaBanner(
             <div className="h-full flex items-center justify-center p-4">
                 <LoadingState label={t('authorizing')} className="text-sm" />
-            </div>
+            </div>,
         )
     }
 
@@ -540,7 +592,7 @@ function AppInner() {
     if (authError || !token || !api) {
         // If using access token and auth failed, show login again
         if (authSource.type === 'accessToken') {
-            return (
+            return withPwaBanner(
                 <LoginPrompt
                     onLogin={setAccessToken}
                     baseUrl={baseUrl}
@@ -549,12 +601,12 @@ function AppInner() {
                     clearServerUrl={clearServerUrl}
                     requireServerUrl={REQUIRE_SERVER_URL}
                     error={authError ?? t('login.error.authFailed')}
-                />
+                />,
             )
         }
 
         // Telegram auth failed
-        return (
+        return withPwaBanner(
             <div className="p-4 space-y-3">
                 <div className="text-base font-semibold">{t('login.title')}</div>
                 <div className="text-sm text-red-600">
@@ -563,7 +615,7 @@ function AppInner() {
                 <div className="text-xs text-[var(--app-hint)]">
                     Open this page from Telegram using the bot's "Open App" button (not "Open in browser").
                 </div>
-            </div>
+            </div>,
         )
     }
 
@@ -583,6 +635,10 @@ function AppInner() {
             clearUnreadDone
         }}>
             <VoiceProvider>
+                <PwaUpdateBannerWithStatusOffset
+                    isSyncing={isSyncing}
+                    isReconnecting={sseDisconnected && !isSyncing}
+                />
                 <SyncingBanner isSyncing={isSyncing} />
                 <ReconnectingBanner
                     isReconnecting={sseDisconnected && !isSyncing}

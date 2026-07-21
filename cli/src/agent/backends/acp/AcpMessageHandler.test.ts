@@ -1,4 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { AgentMessage } from '@/agent/types';
 import { AcpMessageHandler } from './AcpMessageHandler';
 import { ACP_SESSION_UPDATE_TYPES } from './constants';
@@ -14,6 +16,14 @@ function getToolResult(messages: AgentMessage[], id: string): Extract<AgentMessa
 }
 
 describe('AcpMessageHandler', () => {
+    beforeEach(() => {
+        vi.spyOn(Date, 'now').mockReturnValue(0);
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
     it('does not synthesize {status} output when tool completes without payload', () => {
         const messages: AgentMessage[] = [];
         const handler = new AcpMessageHandler((message) => messages.push(message));
@@ -367,6 +377,25 @@ describe('AcpMessageHandler', () => {
         expect(messages).toEqual([{ type: 'text', text: 'hello world' }]);
     });
 
+    it('preserves overlapping text chunks in delta mode', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler(
+            (message) => messages.push(message),
+            { textChunkMode: 'delta' }
+        );
+
+        for (const text of ['|-----|', '-----|', '-----|\n']) {
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text }
+            });
+        }
+
+        handler.flushText();
+
+        expect(messages).toEqual([{ type: 'text', text: '|-----|-----|-----|\n' }]);
+    });
+
     it('keeps existing tool name when update only has kind fallback', () => {
         const messages: AgentMessage[] = [];
         const handler = new AcpMessageHandler((message) => messages.push(message));
@@ -393,6 +422,385 @@ describe('AcpMessageHandler', () => {
         expect(calls).toHaveLength(2);
         expect(calls[0].name).toBe('hapi_change_title');
         expect(calls[1].name).toBe('hapi_change_title');
+    });
+
+    it('falls back to kind+title derivation when rawInput is explicitly null', () => {
+        // Kimi ACP sends rawInput: null on tool_call events. It must not be
+        // treated as a valid input — the kind+title fallback should still run.
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+            toolCallId: 'tool-null-1',
+            title: 'df -hT',
+            kind: 'execute',
+            rawInput: null,
+            status: 'in_progress'
+        });
+
+        const toolCall = messages.find(
+            (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+        );
+        expect(toolCall).toBeDefined();
+        expect(toolCall!.input).toEqual({ command: 'df -hT' });
+    });
+
+    it('strips "Shell: " prefix from title when deriving execute input (Kimi)', () => {
+        // Kimi sends titles like "Shell: free -h" where the part after the colon
+        // is the actual command. The prefix must be stripped so the derived input
+        // contains the command, not the label.
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+            toolCallId: 'kimi-shell-1',
+            title: 'Shell: free -h',
+            kind: 'shell',
+            rawInput: null,
+            status: 'in_progress'
+        });
+
+        const toolCall = messages.find(
+            (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+        );
+        expect(toolCall).toBeDefined();
+        expect(toolCall!.input).toEqual({ command: 'free -h' });
+    });
+
+    it('re-derives input when title changes from generic to concrete (Kimi)', () => {
+        // Kimi sends an initial tool_call with a generic title ("Shell") and later
+        // updates it to a concrete one ("Shell: free -h"). The input must be
+        // re-derived from the new title, not left as the stale placeholder.
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+            toolCallId: 'kimi-shell-2',
+            title: 'Shell',
+            kind: 'shell',
+            rawInput: null,
+            status: 'in_progress'
+        });
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+            toolCallId: 'kimi-shell-2',
+            title: 'Shell: free -h',
+            kind: 'shell',
+            rawInput: null,
+            status: 'completed'
+        });
+
+        const calls = messages.filter(
+            (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+        );
+        expect(calls).toHaveLength(2);
+        // Initial call: derived from generic title (placeholder)
+        expect(calls[0].input).toEqual({ command: 'Shell' });
+        // Updated call: re-derived from concrete title
+        expect(calls[1].input).toEqual({ command: 'free -h' });
+    });
+
+    it('extracts tool input from content JSON text (Kimi ACP)', () => {
+        // Kimi ACP does not send rawInput or kind. Instead it streams tool
+        // arguments as JSON text inside the content array.
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+            toolCallId: 'kimi-json-1',
+            title: 'Shell',
+            status: 'in_progress',
+            content: [{ type: 'content', content: { type: 'text', text: '' } }]
+        });
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+            toolCallId: 'kimi-json-1',
+            title: 'Shell: df -h',
+            status: 'in_progress',
+            content: [{ type: 'content', content: { type: 'text', text: '{"command": "df -h"}' } }]
+        });
+
+        const calls = messages.filter(
+            (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+        );
+        expect(calls).toHaveLength(2);
+        // Initial call has empty content → input is null
+        expect(calls[0].input).toBeNull();
+        // Update has JSON content → input is parsed
+        expect(calls[1].input).toEqual({ command: 'df -h' });
+    });
+
+    it('falls back to kind+title on tool_call_update when rawInput is null', () => {
+        // Initial tool_call has no rawInput key at all → input is derived.
+        // Subsequent update sends rawInput: null → falls through to enrichment
+        // branch, but since input was already derived, no re-emit is needed.
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+            toolCallId: 'tool-null-2',
+            title: 'cat README.md',
+            kind: 'read',
+            status: 'in_progress'
+        });
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+            toolCallId: 'tool-null-2',
+            title: 'cat README.md',
+            kind: 'read',
+            rawInput: null,
+            status: 'completed'
+        });
+
+        const calls = messages.filter(
+            (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+        );
+        // Only one tool_call emitted (the initial one); the completed update
+        // does not re-emit because the input was already derived.
+        expect(calls).toHaveLength(1);
+        expect(calls[0].input).toEqual({ file_path: 'cat README.md' });
+        expect(calls[0].status).toBe('in_progress');
+
+        // The tool_result should still be emitted
+        const results = messages.filter(
+            (m): m is Extract<AgentMessage, { type: 'tool_result' }> => m.type === 'tool_result'
+        );
+        expect(results).toHaveLength(1);
+        expect(results[0].status).toBe('completed');
+    });
+
+    describe('OpenCode rawInput lifecycle (empty {} is not usable input)', () => {
+        it('ignores empty content JSON {} on initial tool_call when rawInput is missing', () => {
+            // Kimi-style content JSON can be `{}`; initial path must not lock that as input.
+            const messages: AgentMessage[] = [];
+            const handler = new AcpMessageHandler((message) => messages.push(message));
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+                toolCallId: 'oc-empty-content-1',
+                title: 'other',
+                kind: 'other',
+                status: 'pending',
+                content: [{ type: 'content', content: { type: 'text', text: '{}' } }]
+            });
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                toolCallId: 'oc-empty-content-1',
+                title: 'other',
+                kind: 'other',
+                status: 'in_progress',
+                rawInput: { url: 'https://example.com' }
+            });
+
+            const calls = messages.filter(
+                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+            );
+            expect(calls).toHaveLength(2);
+            expect(calls[0].input).toBeNull();
+            expect(calls[1].input).toEqual({ url: 'https://example.com' });
+        });
+
+        it('ignores rawInput: {} on tool start and accepts real args on update', () => {
+            // OpenCode toolStart emits rawInput: {} with title=tool name, then a
+            // running update carries part.state.input.
+            const messages: AgentMessage[] = [];
+            const handler = new AcpMessageHandler((message) => messages.push(message));
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+                toolCallId: 'oc-bash-1',
+                title: 'bash',
+                kind: 'execute',
+                status: 'pending',
+                locations: [],
+                rawInput: {}
+            });
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                toolCallId: 'oc-bash-1',
+                title: "echo 'hi'",
+                kind: 'execute',
+                status: 'in_progress',
+                rawInput: { command: "echo 'hi'", description: "Print hi" }
+            });
+
+            const calls = messages.filter(
+                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+            );
+            expect(calls).toHaveLength(2);
+            // Start: empty {} must not lock input as {}; title "bash" alone is a weak
+            // execute fallback, but must not block the later real rawInput.
+            expect(calls[0].input).not.toEqual({});
+            expect(calls[1].input).toEqual({ command: "echo 'hi'", description: "Print hi" });
+        });
+
+        it('does not let permission rawInput: {} clobber a previously captured input', () => {
+            // OpenCode #7370: permission request / intermediate update can re-send
+            // rawInput: {} after a good running update.
+            const messages: AgentMessage[] = [];
+            const handler = new AcpMessageHandler((message) => messages.push(message));
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+                toolCallId: 'oc-bash-2',
+                title: 'bash',
+                kind: 'execute',
+                status: 'pending',
+                rawInput: {}
+            });
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                toolCallId: 'oc-bash-2',
+                title: 'ls -la',
+                kind: 'execute',
+                status: 'in_progress',
+                rawInput: { command: 'ls -la' }
+            });
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                toolCallId: 'oc-bash-2',
+                title: 'bash',
+                kind: 'execute',
+                status: 'pending',
+                rawInput: {}
+            });
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                toolCallId: 'oc-bash-2',
+                status: 'completed',
+                // completed may omit rawInput entirely
+                content: [{ type: 'content', content: { type: 'text', text: 'ok' } }]
+            });
+
+            const calls = messages.filter(
+                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+            );
+            const lastCall = calls[calls.length - 1];
+            expect(lastCall.input).toEqual({ command: 'ls -la' });
+
+            const results = messages.filter(
+                (m): m is Extract<AgentMessage, { type: 'tool_result' }> => m.type === 'tool_result'
+            );
+            expect(results).toHaveLength(1);
+            expect(results[0].status).toBe('completed');
+        });
+
+        it('preserves OpenCode other/fetch/think tool rawInput (MCP, webfetch, task)', () => {
+            // These kinds have no kind+title fallback in HAPI — usable rawInput is
+            // the only path. Empty {} must not be stored in place of later args.
+            const cases: Array<{
+                id: string;
+                kind: string;
+                title: string;
+                rawInput: Record<string, unknown>;
+            }> = [
+                {
+                    id: 'oc-webfetch',
+                    kind: 'fetch',
+                    title: 'webfetch',
+                    rawInput: { url: 'https://example.com', format: 'text' }
+                },
+                {
+                    id: 'oc-task',
+                    kind: 'think',
+                    title: 'task',
+                    rawInput: {
+                        description: 'Explore',
+                        subagent_type: 'explorer',
+                        prompt: 'find null tool input'
+                    }
+                },
+                {
+                    id: 'oc-mcp',
+                    kind: 'other',
+                    title: 'hapi_change_title',
+                    rawInput: { title: 'fixed title' }
+                }
+            ];
+
+            for (const c of cases) {
+                const messages: AgentMessage[] = [];
+                const handler = new AcpMessageHandler((message) => messages.push(message));
+
+                handler.handleUpdate({
+                    sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+                    toolCallId: c.id,
+                    title: c.title,
+                    kind: c.kind,
+                    status: 'pending',
+                    rawInput: {}
+                });
+
+                handler.handleUpdate({
+                    sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                    toolCallId: c.id,
+                    title: c.title,
+                    kind: c.kind,
+                    status: 'in_progress',
+                    rawInput: c.rawInput
+                });
+
+                handler.handleUpdate({
+                    sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                    toolCallId: c.id,
+                    status: 'completed',
+                    rawInput: {}
+                });
+
+                const calls = messages.filter(
+                    (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+                );
+                expect(calls[calls.length - 1].input, c.id).toEqual(c.rawInput);
+            }
+        });
+
+        it('keeps full edit rawInput (filePath/oldString/newString) over locations-only fallback', () => {
+            const messages: AgentMessage[] = [];
+            const handler = new AcpMessageHandler((message) => messages.push(message));
+
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+                toolCallId: 'oc-edit-1',
+                title: 'edit',
+                kind: 'edit',
+                status: 'pending',
+                locations: [],
+                rawInput: {}
+            });
+
+            const fullInput = {
+                filePath: '/tmp/a.ts',
+                oldString: 'foo',
+                newString: 'bar'
+            };
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCallUpdate,
+                toolCallId: 'oc-edit-1',
+                title: 'a.ts',
+                kind: 'edit',
+                status: 'in_progress',
+                locations: [{ path: '/tmp/a.ts' }],
+                rawInput: fullInput
+            });
+
+            const calls = messages.filter(
+                (m): m is Extract<AgentMessage, { type: 'tool_call' }> => m.type === 'tool_call'
+            );
+            expect(calls[calls.length - 1].input).toEqual(fullInput);
+        });
     });
 
     it('intercepts rate_limit_event chunk before it enters the text buffer', () => {
@@ -658,7 +1066,7 @@ describe('AcpMessageHandler', () => {
         expect((messages[0] as { text: string }).text).toMatch(/^Claude AI usage limit warning\|/);
     });
 
-    it('forwards agent_thought_chunk as a reasoning message', () => {
+    it('forwards agent_thought_chunk as a reasoning message after flush', () => {
         const messages: AgentMessage[] = [];
         const handler = new AcpMessageHandler((message) => messages.push(message));
 
@@ -667,6 +1075,9 @@ describe('AcpMessageHandler', () => {
             content: { type: 'text', text: 'thinking about the problem' }
         });
 
+        // Chunks are buffered, not emitted inline.
+        expect(messages).toHaveLength(0);
+        handler.flushReasoning();
         expect(messages).toHaveLength(1);
         expect(messages[0]).toEqual({ type: 'reasoning', text: 'thinking about the problem' });
     });
@@ -697,16 +1108,16 @@ describe('AcpMessageHandler', () => {
             content: { type: 'text', text: 'mid-stream thought' }
         });
 
+        // The thought chunk must not flush the live text buffer — otherwise
+        // a single text segment would split across two messages.
+        handler.flushReasoning();
         handler.flushText();
 
-        // Both messages are delivered intact with no loss. Reasoning is
-        // emitted inline (see AcpMessageHandler) so it precedes the
-        // flushed text segment — this is an intentional contract to let
-        // thoughts and text interleave without splitting a live segment.
         expect(messages).toHaveLength(2);
+        // Reasoning was buffered separately and is now delivered as a single
+        // coalesced message. The text buffer survived the thought.
         expect(messages).toContainEqual({ type: 'reasoning', text: 'mid-stream thought' });
         expect(messages).toContainEqual({ type: 'text', text: 'partial answer' });
-        expect(messages[0]).toEqual({ type: 'reasoning', text: 'mid-stream thought' });
     });
 
     it('does not drop thought chunks annotated with a non-assistant audience', () => {
@@ -721,32 +1132,247 @@ describe('AcpMessageHandler', () => {
                 annotations: { audience: ['user'] }
             }
         });
+        handler.flushReasoning();
 
         expect(messages).toHaveLength(1);
         expect(messages[0]).toEqual({ type: 'reasoning', text: 'private reasoning' });
     });
 
-    it('forwards sequential thought chunks in arrival order as separate reasoning messages', () => {
+    it('coalesces sequential thought chunks into a single reasoning message', () => {
         const messages: AgentMessage[] = [];
         const handler = new AcpMessageHandler((message) => messages.push(message));
 
         handler.handleUpdate({
             sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
-            content: { type: 'text', text: 'first thought' }
+            content: { type: 'text', text: 'first thought ' }
         });
         handler.handleUpdate({
             sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
-            content: { type: 'text', text: 'second thought' }
+            content: { type: 'text', text: 'second thought ' }
         });
         handler.handleUpdate({
             sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
             content: { type: 'text', text: 'third thought' }
         });
+        handler.flushReasoning();
+
+        // OpenCode/Zen streams thoughts at one chunk per token; emitting
+        // each chunk as its own reasoning message made the web reducer
+        // render one row per token. The handler now coalesces a thought
+        // segment into a single reasoning message.
+        expect(messages).toEqual([
+            { type: 'reasoning', text: 'first thought second thought third thought' }
+        ]);
+    });
+
+    it('streams throttled reasoning snapshots with a stable id before final flush', () => {
+        let now = 0;
+        vi.spyOn(Date, 'now').mockImplementation(() => now);
+
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'first ' }
+        });
+        expect(messages).toEqual([]);
+
+        now = 300;
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'second' }
+        });
+
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toMatchObject({
+            type: 'reasoning',
+            text: 'first second',
+            live: true
+        });
+        const streamId = (messages[0] as Extract<AgentMessage, { type: 'reasoning' }>).id;
+        expect(streamId).toEqual(expect.any(String));
+
+        handler.flushReasoning();
+
+        expect(messages).toHaveLength(2);
+        expect(messages[1]).toEqual({
+            type: 'reasoning',
+            text: 'first second',
+            id: streamId
+        });
+    });
+
+    it('does not split reasoning on ignored agent message chunks', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'first ' }
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: { type: 'text', text: '' }
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: {
+                type: 'text',
+                text: 'user-only bookkeeping',
+                annotations: { audience: ['user'] }
+            }
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'second' }
+        });
+        handler.drainBuffers();
 
         expect(messages).toEqual([
-            { type: 'reasoning', text: 'first thought' },
-            { type: 'reasoning', text: 'second thought' },
-            { type: 'reasoning', text: 'third thought' }
+            { type: 'reasoning', text: 'first second' }
+        ]);
+    });
+
+    it('does not split reasoning on unknown ACP bookkeeping updates', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'first ' }
+        });
+        handler.handleUpdate({
+            sessionUpdate: 'session_status',
+            status: 'running'
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'second' }
+        });
+        handler.drainBuffers();
+
+        expect(messages).toEqual([
+            { type: 'reasoning', text: 'first second' }
+        ]);
+    });
+
+    it('emits buffered reasoning before a tool_call boundary', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'I should call the tool. ' }
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'Calling now.' }
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+            toolCallId: 'tc-1',
+            title: 'do_thing',
+            kind: 'execute',
+            rawInput: { foo: 1 },
+            status: 'in_progress'
+        });
+
+        // Reasoning is coalesced and emitted before the tool call so the
+        // arrival order between thought and tool lifecycle is preserved.
+        expect(messages[0]).toEqual({
+            type: 'reasoning',
+            text: 'I should call the tool. Calling now.'
+        });
+        expect(messages[1]).toMatchObject({ type: 'tool_call', id: 'tc-1' });
+    });
+
+    // Locks the flush-before-visible-boundary contract: a future refactor
+    // that forgets to call flushReasoning() in one visible branch of
+    // handleUpdate would otherwise silently regress reasoning ordering for
+    // that update type.
+    it.each([
+        [
+            'agentMessageChunk',
+            {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: 'visible answer' }
+            }
+        ],
+        [
+            'toolCall',
+            {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+                toolCallId: 'tc-x',
+                title: 'do_thing',
+                kind: 'execute',
+                rawInput: {},
+                status: 'in_progress'
+            }
+        ],
+        [
+            'plan',
+            {
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.plan,
+                entries: [{ content: 'Step 1', priority: 'high', status: 'pending' }]
+            }
+        ]
+    ])('flushes buffered reasoning before %s', (_label, boundaryUpdate) => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'thinking first' }
+        });
+        handler.handleUpdate(boundaryUpdate);
+        handler.drainBuffers();
+
+        // Reasoning must arrive at index 0, before anything the boundary
+        // update produced.
+        expect(messages[0]).toEqual({ type: 'reasoning', text: 'thinking first' });
+        expect(messages.length).toBeGreaterThanOrEqual(1);
+    });
+
+    it('drops whitespace-only buffered reasoning rather than emitting an empty bubble', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: '   ' }
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: '\n\n' }
+        });
+        handler.drainBuffers();
+
+        // A whitespace-only reasoning bubble in the web UI is visible only as
+        // empty space — drop it instead.
+        expect(messages.filter((m) => m.type === 'reasoning')).toEqual([]);
+    });
+
+    it('drainBuffers emits reasoning before any pending text', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        // Build up text and reasoning together — text first, then thought
+        // interleaved (per the existing intra-segment contract).
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: { type: 'text', text: 'visible' }
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentThoughtChunk,
+            content: { type: 'text', text: 'silent' }
+        });
+
+        handler.drainBuffers();
+
+        expect(messages).toEqual([
+            { type: 'reasoning', text: 'silent' },
+            { type: 'text', text: 'visible' }
         ]);
     });
 
@@ -1241,7 +1867,7 @@ describe('AcpMessageHandler', () => {
         // include rawInput in tool_call events and emits prose (non-JSON)
         // thoughts. There is therefore no JSON-thought-hoisting trigger —
         // tool_call input is null and the thought text surfaces as reasoning.
-        const fixtureDir = new URL('./__fixtures__', import.meta.url).pathname;
+        const fixtureDir = fileURLToPath(new URL('./__fixtures__', import.meta.url));
 
         const fixtures = [
             {
@@ -1249,14 +1875,14 @@ describe('AcpMessageHandler', () => {
                 // model expresses reasoning as a `kind: think` tool_call rather
                 // than as a thought chunk, so the reasoning channel is empty.
                 name: 'gemini-3-flash-preview / read_file',
-                file: `${fixtureDir}/gemini-3-flash-preview-read-file.json`,
+                file: join(fixtureDir, 'gemini-3-flash-preview-read-file.json'),
                 expectedMinToolCalls: 2,
                 expectedMinReasoning: 0,
                 hasMessageChunks: true,
             },
             {
                 name: 'gemini-3-flash-preview / run_shell',
-                file: `${fixtureDir}/gemini-3-flash-preview-run-shell.json`,
+                file: join(fixtureDir, 'gemini-3-flash-preview-run-shell.json'),
                 expectedMinToolCalls: 1,
                 expectedMinReasoning: 1,
                 hasMessageChunks: true,
@@ -1265,7 +1891,7 @@ describe('AcpMessageHandler', () => {
                 // write_file: kind=edit, locations carries the file path.
                 // Same shape (and zero thought chunks) as read_file.
                 name: 'gemini-3-flash-preview / write_file',
-                file: `${fixtureDir}/gemini-3-flash-preview-write-file.json`,
+                file: join(fixtureDir, 'gemini-3-flash-preview-write-file.json'),
                 expectedMinToolCalls: 2,
                 expectedMinReasoning: 0,
                 hasMessageChunks: true,
@@ -1273,7 +1899,7 @@ describe('AcpMessageHandler', () => {
             {
                 // replace (in-place edit): same kind=edit + locations pattern.
                 name: 'gemini-3-flash-preview / edit_file',
-                file: `${fixtureDir}/gemini-3-flash-preview-edit-file.json`,
+                file: join(fixtureDir, 'gemini-3-flash-preview-edit-file.json'),
                 expectedMinToolCalls: 2,
                 expectedMinReasoning: 0,
                 hasMessageChunks: true,
@@ -1285,7 +1911,7 @@ describe('AcpMessageHandler', () => {
             // assertions below match the flash captures.
             {
                 name: 'gemini-3.1-pro-preview / read_file',
-                file: `${fixtureDir}/gemini-3.1-pro-preview-read-file.json`,
+                file: join(fixtureDir, 'gemini-3.1-pro-preview-read-file.json'),
                 expectedMinToolCalls: 2,
                 expectedMinReasoning: 0,
                 hasMessageChunks: true,
@@ -1294,7 +1920,7 @@ describe('AcpMessageHandler', () => {
                 // run_shell: pro emits a single agent_thought_chunk in addition
                 // to the execute tool_call.
                 name: 'gemini-3.1-pro-preview / run_shell',
-                file: `${fixtureDir}/gemini-3.1-pro-preview-run-shell.json`,
+                file: join(fixtureDir, 'gemini-3.1-pro-preview-run-shell.json'),
                 expectedMinToolCalls: 1,
                 expectedMinReasoning: 1,
                 hasMessageChunks: true,
@@ -1302,7 +1928,7 @@ describe('AcpMessageHandler', () => {
             {
                 // write_file: kind=edit, locations carries the file path.
                 name: 'gemini-3.1-pro-preview / write_file',
-                file: `${fixtureDir}/gemini-3.1-pro-preview-write-file.json`,
+                file: join(fixtureDir, 'gemini-3.1-pro-preview-write-file.json'),
                 expectedMinToolCalls: 1,
                 expectedMinReasoning: 0,
                 hasMessageChunks: true,
@@ -1311,7 +1937,7 @@ describe('AcpMessageHandler', () => {
                 // replace (in-place edit): pro version interleaves think + read
                 // + edit kinds before the final agent_message_chunk burst.
                 name: 'gemini-3.1-pro-preview / edit_file',
-                file: `${fixtureDir}/gemini-3.1-pro-preview-edit-file.json`,
+                file: join(fixtureDir, 'gemini-3.1-pro-preview-edit-file.json'),
                 expectedMinToolCalls: 2,
                 expectedMinReasoning: 0,
                 hasMessageChunks: true,
@@ -1660,9 +2286,9 @@ describe('AcpMessageHandler', () => {
 
         it('replays write_file fixture and produces Write-shaped tool_call input', () => {
             // Integration: full fixture replay must produce Write with {file_path, content}
-            const fixtureDir = new URL('./__fixtures__', import.meta.url).pathname;
+            const fixtureDir = fileURLToPath(new URL('./__fixtures__', import.meta.url));
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const data = require(`${fixtureDir}/gemini-3-flash-preview-write-file.json`) as {
+            const data = require(join(fixtureDir, 'gemini-3-flash-preview-write-file.json')) as {
                 updates: unknown[];
             };
 
@@ -1688,9 +2314,9 @@ describe('AcpMessageHandler', () => {
 
         it('replays edit_file fixture and produces Edit-shaped tool_call input', () => {
             // Integration: full fixture replay must produce Edit with {file_path, old_string, new_string}
-            const fixtureDir = new URL('./__fixtures__', import.meta.url).pathname;
+            const fixtureDir = fileURLToPath(new URL('./__fixtures__', import.meta.url));
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const data = require(`${fixtureDir}/gemini-3-flash-preview-edit-file.json`) as {
+            const data = require(join(fixtureDir, 'gemini-3-flash-preview-edit-file.json')) as {
                 updates: unknown[];
             };
 

@@ -1,4 +1,5 @@
 import { logger } from '@/ui/logger';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager';
 import {
     listOpencodeModelsForCwd,
@@ -9,7 +10,7 @@ import { getErrorMessage, rpcError } from '../rpcResponses';
 
 export function registerOpencodeModelHandlers(rpcHandlerManager: RpcHandlerManager): void {
     rpcHandlerManager.registerHandler<ListOpencodeModelsForCwdRequest, ListOpencodeModelsForCwdResponse>(
-        'listOpencodeModelsForCwd',
+        RPC_METHODS.ListOpencodeModelsForCwd,
         async (data) => {
             logger.debug('List OpenCode models for cwd request', { cwd: data?.cwd });
 

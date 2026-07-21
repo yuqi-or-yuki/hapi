@@ -1,11 +1,15 @@
 import { useCallback, useEffect, useState, useSyncExternalStore } from 'react'
 import { getTelegramWebApp } from './useTelegram'
+import { applyColorTheme, getColorThemeBackground, getColorThemeStorageKey, getStoredColorTheme, type ColorScheme } from './useColorTheme'
 
-type ColorScheme = 'light' | 'dark'
-
-export type AppearancePreference = 'system' | 'dark' | 'light'
+export type AppearancePreference = 'system' | 'dark' | 'light' | 'oled'
 
 const APPEARANCE_KEY = 'hapi-appearance'
+const THEME_COLORS: Record<ColorScheme, string> = {
+    light: '#ffffff',
+    dark: '#1c1c1e',
+    oled: '#000000',
+}
 
 function isBrowser(): boolean {
     return typeof window !== 'undefined' && typeof document !== 'undefined'
@@ -39,7 +43,7 @@ function safeRemoveItem(key: string): void {
 }
 
 function parseAppearance(raw: string | null): AppearancePreference {
-    if (raw === 'dark' || raw === 'light') return raw
+    if (raw === 'dark' || raw === 'light' || raw === 'oled') return raw
     return 'system'
 }
 
@@ -51,15 +55,16 @@ export function getAppearanceOptions(): ReadonlyArray<{ value: AppearancePrefere
     return [
         { value: 'system', labelKey: 'settings.display.appearance.system' },
         { value: 'dark', labelKey: 'settings.display.appearance.dark' },
+        { value: 'oled', labelKey: 'settings.display.appearance.oled' },
         { value: 'light', labelKey: 'settings.display.appearance.light' },
     ]
 }
 
 function getColorScheme(): ColorScheme {
     const pref = getStoredAppearance()
-    if (pref === 'dark' || pref === 'light') return pref
+    if (pref === 'dark' || pref === 'light' || pref === 'oled') return pref
 
-    // 'system': use Telegram → system preference → light
+    // 'system': use Telegram → system preference → light (never auto-selects OLED)
     const tg = getTelegramWebApp()
     if (tg?.colorScheme) {
         return tg.colorScheme === 'dark' ? 'dark' : 'light'
@@ -77,8 +82,29 @@ function isIOS(): boolean {
     return /iPad|iPhone|iPod/.test(navigator.userAgent)
 }
 
+function applyBrowserThemeColor(scheme: ColorScheme): void {
+    if (!isBrowser()) return
+
+    let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]')
+    if (!meta) {
+        meta = document.createElement('meta')
+        meta.name = 'theme-color'
+        document.head.appendChild(meta)
+    }
+
+    meta.content = getColorThemeBackground(getStoredColorTheme(), scheme) ?? THEME_COLORS[scheme]
+    meta.removeAttribute('media')
+}
+
+export function getThemeColor(scheme: ColorScheme): string {
+    return THEME_COLORS[scheme]
+}
+
 function applyTheme(scheme: ColorScheme): void {
+    document.documentElement.style.removeProperty('background-color')
     document.documentElement.setAttribute('data-theme', scheme)
+    applyColorTheme(getStoredColorTheme(), scheme)
+    applyBrowserThemeColor(scheme)
 }
 
 function applyPlatform(): void {
@@ -103,9 +129,9 @@ function getSnapshot(): ColorScheme {
     return currentScheme
 }
 
-function updateScheme(): void {
+function updateScheme(force = false): void {
     const newScheme = getColorScheme()
-    if (newScheme !== currentScheme) {
+    if (force || newScheme !== currentScheme) {
         currentScheme = newScheme
         applyTheme(newScheme)
         listeners.forEach((cb) => cb())
@@ -120,7 +146,7 @@ export function useTheme(): { colorScheme: ColorScheme; isDark: boolean } {
 
     return {
         colorScheme,
-        isDark: colorScheme === 'dark',
+        isDark: colorScheme === 'dark' || colorScheme === 'oled',
     }
 }
 
@@ -165,18 +191,20 @@ export function initializeTheme(): void {
         const tg = getTelegramWebApp()
         if (tg?.onEvent) {
             // Telegram theme changes
-            tg.onEvent('themeChanged', updateScheme)
+            tg.onEvent('themeChanged', () => updateScheme())
         } else if (typeof window !== 'undefined' && window.matchMedia) {
             // Browser system preference changes
             const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-            mediaQuery.addEventListener('change', updateScheme)
+            mediaQuery.addEventListener('change', () => updateScheme())
         }
 
         // Cross-tab appearance sync: update theme when another tab changes localStorage
         if (typeof window !== 'undefined') {
             window.addEventListener('storage', (event: StorageEvent) => {
                 if (event.key === APPEARANCE_KEY) updateScheme()
+                if (event.key === getColorThemeStorageKey()) updateScheme(true)
             })
+            window.addEventListener('hapi-color-theme-change', () => updateScheme(true))
         }
     }
 }

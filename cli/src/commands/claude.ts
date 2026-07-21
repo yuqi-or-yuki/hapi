@@ -88,8 +88,8 @@ ${chalk.bold('Usage:')}
   hapi auth              Manage authentication
   hapi codex             Start Codex mode
   hapi cursor            Start Cursor Agent mode
-  hapi gemini            Start Gemini ACP mode
   hapi opencode          Start OpenCode ACP mode
+  hapi resume [id]       Resume an existing HAPI session locally
   hapi mcp               Start MCP stdio bridge
   hapi connect           (not available in direct-connect mode)
   hapi notify            (not available in direct-connect mode)
@@ -121,7 +121,12 @@ ${chalk.bold.cyan('Claude Code Options (from `claude --help`):')}
                 const claudeHelp = execFileSync(
                     'claude',
                     ['--help'],
-                    { encoding: 'utf8', env: withBunRuntimeEnv(), shell: process.platform === 'win32' }
+                    {
+                        encoding: 'utf8',
+                        env: withBunRuntimeEnv(),
+                        shell: process.platform === 'win32',
+                        windowsHide: process.platform === 'win32'
+                    }
                 )
                 console.log(claudeHelp)
             } catch {

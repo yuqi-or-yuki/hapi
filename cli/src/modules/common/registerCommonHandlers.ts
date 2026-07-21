@@ -2,7 +2,9 @@ import type { RpcHandlerManager } from '@/api/rpc/RpcHandlerManager'
 import { registerBashHandlers } from './handlers/bash'
 import { registerClaudeModelHandlers } from './handlers/claudeModels'
 import { registerCodexModelHandlers } from './handlers/codexModels'
+import { registerCursorModelHandlers } from './handlers/cursorModels'
 import { registerOpencodeModelHandlers } from './handlers/opencodeModels'
+import { registerGrokModelHandlers } from './handlers/grokModels'
 import { registerDirectoryHandlers } from './handlers/directories'
 import { registerDifftasticHandlers } from './handlers/difftastic'
 import { registerFileHandlers } from './handlers/files'
@@ -16,7 +18,9 @@ export function registerCommonHandlers(rpcHandlerManager: RpcHandlerManager, wor
     registerBashHandlers(rpcHandlerManager, workingDirectory)
     registerClaudeModelHandlers(rpcHandlerManager)
     registerCodexModelHandlers(rpcHandlerManager)
+    registerCursorModelHandlers(rpcHandlerManager)
     registerOpencodeModelHandlers(rpcHandlerManager)
+    registerGrokModelHandlers(rpcHandlerManager)
     registerFileHandlers(rpcHandlerManager, workingDirectory)
     registerDirectoryHandlers(rpcHandlerManager, workingDirectory)
     registerRipgrepHandlers(rpcHandlerManager, workingDirectory)

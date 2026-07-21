@@ -12,9 +12,16 @@ import type { ApiSessionClient } from '@/api/apiSession';
 /**
  * MCP server entry configuration.
  */
+export type McpToolApprovalMode = 'auto' | 'prompt' | 'approve';
+
+export interface McpServerToolConfig {
+    approval_mode?: McpToolApprovalMode;
+}
+
 export interface McpServerEntry {
     command: string;
     args: string[];
+    tools?: Record<string, McpServerToolConfig>;
 }
 
 /**
@@ -37,6 +44,10 @@ export interface HapiMcpBridge {
 
 export interface HapiMcpBridgeOptions {
     emitTitleSummary?: boolean;
+    skillLookup?: {
+        workingDirectory: string;
+        flavor: string;
+    };
 }
 
 /**
@@ -51,9 +62,26 @@ export async function buildHapiMcpBridge(
     options: HapiMcpBridgeOptions = {}
 ): Promise<HapiMcpBridge> {
     const happyServer = await startHappyServer(client, {
-        emitTitleSummary: options.emitTitleSummary
+        emitTitleSummary: options.emitTitleSummary,
+        skillLookup: options.skillLookup
     });
-    const bridgeCommand = getHappyCliCommand(['mcp', '--url', happyServer.url]);
+    const bridgeCommand = getHappyCliCommand([
+        'mcp',
+        '--url',
+        happyServer.url,
+        '--tools',
+        happyServer.toolNames.join(',')
+    ]);
+    const tools: Record<string, McpServerToolConfig> = {
+        change_title: {
+            approval_mode: 'approve'
+        }
+    };
+    if (options.skillLookup) {
+        tools.skill_lookup = {
+            approval_mode: 'approve'
+        };
+    }
 
     return {
         server: {
@@ -63,7 +91,8 @@ export async function buildHapiMcpBridge(
         mcpServers: {
             hapi: {
                 command: bridgeCommand.command,
-                args: bridgeCommand.args
+                args: bridgeCommand.args,
+                tools
             }
         }
     };

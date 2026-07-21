@@ -1,9 +1,10 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ReactNode } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { I18nProvider } from '@/lib/i18n-context'
+import { ToastProvider } from '@/lib/toast-context'
 import { SessionList } from './SessionList'
 
 afterEach(() => cleanup())
@@ -17,6 +18,11 @@ function makeSession(overrides: Partial<SessionSummary> & { id: string }): Sessi
         metadata: null,
         todoProgress: null,
         pendingRequestsCount: 0,
+        pendingRequestKinds: [],
+        pendingRequests: [],
+        backgroundTaskCount: 0,
+        futureScheduledMessageCount: 0,
+        nextScheduledAt: null,
         model: null,
         effort: null,
         loopActive: false,
@@ -36,9 +42,11 @@ function renderWithProviders(children: ReactNode) {
 
     return render(
         <QueryClientProvider client={queryClient}>
-            <I18nProvider>
-                {children}
-            </I18nProvider>
+            <ToastProvider>
+                <I18nProvider>
+                    {children}
+                </I18nProvider>
+            </ToastProvider>
         </QueryClientProvider>
     )
 }
@@ -193,3 +201,217 @@ describe('SessionList keyboard safety', () => {
         expect(fireEvent.keyDown(sessionButton!, { key: 'e' })).toBe(false)
         expect(screen.getByText('Archive Session')).toBeTruthy()
     })
+
+describe('SessionList time filter', () => {
+    beforeEach(() => {
+        vi.useFakeTimers()
+        vi.setSystemTime(new Date(2026, 6, 18, 12))
+    })
+
+    afterEach(() => {
+        vi.useRealTimers()
+    })
+
+    it('filters after selecting a start and end date', () => {
+        const recent = makeSession({
+            id: 'recent',
+            updatedAt: Date.now(),
+            metadata: { path: '/work/recent', name: 'Recent session' }
+        })
+        const old = makeSession({
+            id: 'old',
+            updatedAt: new Date(2020, 0, 1).getTime(),
+            metadata: { path: '/work/old', name: 'Old session' }
+        })
+
+        renderWithProviders(
+            <SessionList
+                sessions={[recent, old]}
+                selectedSessionId={null}
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+            />
+        )
+
+        expect(screen.getByRole('button', { name: /Recent session/ })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Old session/ })).toBeInTheDocument()
+
+        fireEvent.click(screen.getByRole('button', { name: 'Filter sessions by last activity' }))
+        fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 17).toLocaleDateString() }))
+        fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 18).toLocaleDateString() }))
+
+        expect(screen.getByRole('button', { name: /Recent session/ })).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Old session/ })).toBeNull()
+    })
+
+    it('uses the first calendar click as start and the second as end', () => {
+        const session = makeSession({
+            id: 'session-1',
+            updatedAt: Date.now(),
+            metadata: { path: '/work/hapi', name: 'Session' }
+        })
+
+        renderWithProviders(
+            <SessionList
+                sessions={[session]}
+                selectedSessionId={null}
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+            />
+        )
+
+        const filterButton = screen.getByRole('button', { name: 'Filter sessions by last activity' })
+        fireEvent.click(filterButton)
+        fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 1).toLocaleDateString() }))
+        expect(screen.getByText('Select end date')).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: new Date(2026, 6, 18).toLocaleDateString() }))
+
+        expect(filterButton).toHaveAttribute('aria-expanded', 'false')
+        expect(filterButton).toHaveAttribute('title', '2026-07-01 – 2026-07-18')
+    })
+})
+
+describe('SessionList action menu parity', () => {
+    it.each([
+        ['running', true],
+        ['closed', false]
+    ] as const)('offers conversation export for a %s session', (_label, active) => {
+        const session = makeSession({
+            id: `session-${active ? 'running' : 'closed'}`,
+            active,
+            updatedAt: Date.now(),
+            metadata: {
+                path: '/home/ubuntu',
+                machineId: 'machine-1',
+                name: active ? 'Running session' : 'Closed session',
+                flavor: 'codex'
+            }
+        })
+
+        renderWithProviders(
+            <SessionList
+                sessions={[session]}
+                selectedSessionId={null}
+                onSelect={vi.fn()}
+                onNewSession={vi.fn()}
+                onRefresh={vi.fn()}
+                isLoading={false}
+                renderHeader={false}
+                api={null}
+            />
+        )
+
+        fireEvent.contextMenu(screen.getByRole('button', { name: new RegExp(active ? 'Running session' : 'Closed session') }))
+        fireEvent.click(screen.getByRole('menuitem', { name: 'Export conversation' }))
+
+        expect(screen.getByRole('dialog')).toBeInTheDocument()
+        expect(screen.getByRole('heading', { name: 'Export conversation' })).toBeInTheDocument()
+    })
+})
+
+describe('SessionList collapse behavior', () => {
+    function renderSessionList(sessions: SessionSummary[], selectedSessionId = 'session-running') {
+        return (
+            <QueryClientProvider client={new QueryClient({
+                defaultOptions: {
+                    queries: { retry: false },
+                    mutations: { retry: false },
+                }
+            })}>
+                <I18nProvider>
+                    <SessionList
+                        sessions={sessions}
+                        selectedSessionId={selectedSessionId}
+                        onSelect={vi.fn()}
+                        onNewSession={vi.fn()}
+                        onRefresh={vi.fn()}
+                        isLoading={false}
+                        renderHeader={false}
+                        api={null}
+                    />
+                </I18nProvider>
+            </QueryClientProvider>
+        )
+    }
+
+    function getProjectPanel(): Element {
+        const header = screen.getByTitle('/work/hapi')
+        const panel = header.nextElementSibling
+        if (!panel) {
+            throw new Error('Expected project collapse panel')
+        }
+        return panel
+    }
+
+    it('keeps a selected running path collapsed across live session-list refreshes', async () => {
+        const baseSessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                pendingRequestsCount: 1,
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-old',
+                updatedAt: 50,
+                metadata: { path: '/work/hapi', name: 'Older task', flavor: 'codex' },
+            })
+        ]
+        const { rerender } = render(renderSessionList(baseSessions))
+
+        expect(getProjectPanel().getAttribute('data-open')).toBe('true')
+
+        fireEvent.click(screen.getByTitle('/work/hapi'))
+        expect(getProjectPanel().getAttribute('data-open')).toBeNull()
+
+        rerender(renderSessionList([
+            {
+                ...baseSessions[0]!,
+                pendingRequestsCount: 2,
+                updatedAt: 200,
+            },
+            baseSessions[1]!
+        ]))
+
+        await waitFor(() => {
+            expect(getProjectPanel().getAttribute('data-open')).toBeNull()
+        })
+    })
+
+    it('auto-expands the path again when the selected session changes', async () => {
+        const sessions = [
+            makeSession({
+                id: 'session-running',
+                active: true,
+                thinking: true,
+                updatedAt: 100,
+                metadata: { path: '/work/hapi', name: 'Running task', flavor: 'codex' },
+            }),
+            makeSession({
+                id: 'session-next',
+                updatedAt: 90,
+                metadata: { path: '/work/hapi', name: 'Next task', flavor: 'codex' },
+            })
+        ]
+        const { rerender } = render(renderSessionList(sessions))
+
+        fireEvent.click(screen.getByTitle('/work/hapi'))
+        expect(getProjectPanel().getAttribute('data-open')).toBeNull()
+
+        rerender(renderSessionList(sessions, 'session-next'))
+
+        await waitFor(() => {
+            expect(getProjectPanel().getAttribute('data-open')).toBe('true')
+        })
+    })
+})

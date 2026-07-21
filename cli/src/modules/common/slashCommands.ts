@@ -2,25 +2,16 @@ import { access, readdir, readFile } from 'fs/promises';
 import { dirname, join, resolve } from 'path';
 import { homedir } from 'os';
 import { parse as parseYaml } from 'yaml';
-import { getBuiltinSlashCommands, type SlashCommandSource } from '@hapi/protocol/slashCommands';
+import { getBuiltinSlashCommands, mergeSlashCommands } from '@hapi/protocol/slashCommands';
+import type { SlashCommand, SlashCommandsResponse } from '@hapi/protocol/apiTypes';
 
-export interface SlashCommand {
-    name: string;
-    description?: string;
-    source: SlashCommandSource;
-    content?: string;  // Expanded content for Codex user prompts
-    pluginName?: string;  // Name of the plugin that provides this command
-}
+export type { SlashCommand } from '@hapi/protocol/apiTypes';
 
 export interface ListSlashCommandsRequest {
     agent: string;
 }
 
-export interface ListSlashCommandsResponse {
-    success: boolean;
-    commands?: SlashCommand[];
-    error?: string;
-}
+export type ListSlashCommandsResponse = SlashCommandsResponse;
 
 /**
  * Interface for installed_plugins.json structure
@@ -74,6 +65,12 @@ function getUserCommandsDir(agent: string): string | null {
             const codexHome = process.env.CODEX_HOME ?? join(homedir(), '.codex');
             return join(codexHome, 'prompts');
         }
+        case 'opencode': {
+            const xdgConfigHome = process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config');
+            return join(xdgConfigHome, 'opencode', 'command');
+        }
+        case 'grok':
+            return join(homedir(), '.agents', 'commands');
         default:
             // Gemini and other agents don't have user commands
             return null;
@@ -90,6 +87,10 @@ function getProjectCommandsDir(agent: string, projectDir: string): string | null
             return join(projectDir, '.claude', 'commands');
         case 'codex':
             return join(projectDir, '.codex', 'prompts');
+        case 'opencode':
+            return join(projectDir, '.opencode', 'command');
+        case 'grok':
+            return join(projectDir, '.grok', 'commands');
         default:
             // Gemini and other agents don't have project commands
             return null;
@@ -292,16 +293,5 @@ export async function listSlashCommands(agent: string, projectDir?: string): Pro
         scanProjectCommands(agent, projectDir),
     ]);
 
-    const allCommands = [...builtin, ...user, ...plugin, ...project];
-
-    // Keep insertion order while allowing latter commands to override prior ones.
-    const commandMap = new Map<string, SlashCommand>();
-    for (const command of allCommands) {
-        if (commandMap.has(command.name)) {
-            commandMap.delete(command.name);
-        }
-        commandMap.set(command.name, command);
-    }
-
-    return Array.from(commandMap.values());
+    return mergeSlashCommands([...builtin, ...user, ...plugin, ...project]);
 }

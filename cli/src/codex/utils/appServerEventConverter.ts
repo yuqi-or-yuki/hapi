@@ -56,6 +56,28 @@ function extractCommand(value: unknown): string | null {
     return null;
 }
 
+function extractGeneratedImagePath(item: Record<string, unknown>): string | null {
+    return asString(
+        item.savedPath
+        ?? item.saved_path
+        ?? item.path
+        ?? item.filePath
+        ?? item.file_path
+        ?? item.outputPath
+        ?? item.output_path
+    );
+}
+
+function extractGeneratedImageMimeType(item: Record<string, unknown>): string | null {
+    return asString(item.mimeType ?? item.mime_type ?? item.mediaType ?? item.media_type);
+}
+
+function extractGeneratedImageFileName(item: Record<string, unknown>, savedPath: string): string {
+    const direct = asString(item.fileName ?? item.file_name ?? item.filename ?? item.name);
+    if (direct) return direct;
+    return savedPath.split(/[\\/]/).filter(Boolean).pop() ?? 'generated-image.png';
+}
+
 function extractChanges(value: unknown): Record<string, unknown> | null {
     const record = asRecord(value);
     if (record) return record;
@@ -228,6 +250,43 @@ function addEventScope(events: ConvertedEvent[], scope: Record<string, unknown>)
     }));
 }
 
+const MAX_UNHANDLED_LOG_STRING_LENGTH = 512;
+const MAX_UNHANDLED_LOG_ARRAY_LENGTH = 20;
+const MAX_UNHANDLED_LOG_DEPTH = 8;
+
+function sanitizeUnhandledNotificationLogValue(value: unknown, depth: number = 0): unknown {
+    if (typeof value === 'string') {
+        if (value.length <= MAX_UNHANDLED_LOG_STRING_LENGTH) {
+            return value;
+        }
+        return `${value.slice(0, MAX_UNHANDLED_LOG_STRING_LENGTH)}... [truncated ${value.length - MAX_UNHANDLED_LOG_STRING_LENGTH} chars for logs]`;
+    }
+
+    if (Array.isArray(value)) {
+        const items = value
+            .slice(0, MAX_UNHANDLED_LOG_ARRAY_LENGTH)
+            .map((item) => sanitizeUnhandledNotificationLogValue(item, depth + 1));
+        if (value.length > MAX_UNHANDLED_LOG_ARRAY_LENGTH) {
+            items.push(`... [truncated ${value.length - MAX_UNHANDLED_LOG_ARRAY_LENGTH} array items for logs]`);
+        }
+        return items;
+    }
+
+    if (!value || typeof value !== 'object') {
+        return value;
+    }
+
+    if (depth >= MAX_UNHANDLED_LOG_DEPTH) {
+        return '[truncated nested object for logs]';
+    }
+
+    const result: Record<string, unknown> = {};
+    for (const [key, nestedValue] of Object.entries(value)) {
+        result[key] = sanitizeUnhandledNotificationLogValue(nestedValue, depth + 1);
+    }
+    return result;
+}
+
 function normalizeCollabAgentToolName(value: unknown): string | null {
     const raw = asString(value);
     if (!raw) return null;
@@ -245,6 +304,18 @@ function extractStringArray(value: unknown): string[] {
     return Array.isArray(value)
         ? value.filter((entry): entry is string => typeof entry === 'string' && entry.length > 0)
         : [];
+}
+
+function extractCodexErrorInfo(
+    record: Record<string, unknown>,
+    errorRecord: Record<string, unknown> | null
+): string | null {
+    return asString(
+        record.codexErrorInfo
+        ?? record.codex_error_info
+        ?? errorRecord?.codexErrorInfo
+        ?? errorRecord?.codex_error_info
+    );
 }
 
 function buildCollabAgentInput(item: Record<string, unknown>, toolName: string): Record<string, unknown> {
@@ -467,12 +538,19 @@ export class AppServerEventConverter {
 
         if (msgType === 'error') {
             const errorRecord = asRecord(msg.error);
-            const willRetry = asBoolean(msg.will_retry ?? msg.willRetry ?? errorRecord?.will_retry ?? errorRecord?.willRetry) ?? false;
+            const retryable = asBoolean(msg.will_retry ?? msg.willRetry ?? errorRecord?.will_retry ?? errorRecord?.willRetry);
+            const willRetry = retryable ?? false;
             if (willRetry) {
                 return [];
             }
             const error = asString(msg.message ?? msg.reason ?? errorRecord?.message);
-            return error ? addEventScope([{ type: 'task_failed', error }], msgScope) : [];
+            const codexErrorInfo = extractCodexErrorInfo(msg, errorRecord);
+            return error ? addEventScope([{
+                type: 'task_failed',
+                ...(retryable !== null ? { retryable } : {}),
+                ...(codexErrorInfo ? { codex_error_info: codexErrorInfo } : {}),
+                error
+            }], msgScope) : [];
         }
 
         if (msgType === 'plan_update') {
@@ -613,7 +691,9 @@ export class AppServerEventConverter {
             const statusRaw = asString(paramsRecord.status ?? turn.status);
             const status = statusRaw?.toLowerCase();
             const turnId = asString(turn.turnId ?? turn.turn_id ?? turn.id);
-            const errorMessage = asString(paramsRecord.error ?? paramsRecord.message ?? paramsRecord.reason);
+            const turnError = asRecord(paramsRecord.error ?? turn.error);
+            const errorMessage = asString(paramsRecord.error ?? paramsRecord.message ?? paramsRecord.reason)
+                ?? asString(turnError?.message);
 
             if (status === 'interrupted' || status === 'cancelled' || status === 'canceled') {
                 events.push(scoped({ type: 'turn_aborted', ...(turnId ? { turn_id: turnId } : {}) }));
@@ -621,7 +701,14 @@ export class AppServerEventConverter {
             }
 
             if (status === 'failed' || status === 'error') {
-                events.push(scoped({ type: 'task_failed', ...(turnId ? { turn_id: turnId } : {}), ...(errorMessage ? { error: errorMessage } : {}) }));
+                const codexErrorInfo = extractCodexErrorInfo(paramsRecord, turnError);
+                events.push(scoped({
+                    type: 'task_failed',
+                    ...(turnId ? { turn_id: turnId } : {}),
+                    terminal_source: 'turn_completed',
+                    ...(codexErrorInfo ? { codex_error_info: codexErrorInfo } : {}),
+                    ...(errorMessage ? { error: errorMessage } : {})
+                }));
                 return events;
             }
 
@@ -643,12 +730,66 @@ export class AppServerEventConverter {
             return events;
         }
 
+        if (method === 'model/safetyBuffering/updated') {
+            const model = asString(paramsRecord.model);
+            const showBufferingUi = asBoolean(paramsRecord.showBufferingUi ?? paramsRecord.show_buffering_ui);
+            if (!model || showBufferingUi === null) {
+                return events;
+            }
+            events.push(scoped({
+                type: 'model_safety_buffering',
+                model,
+                use_cases: extractStringArray(paramsRecord.useCases ?? paramsRecord.use_cases),
+                reasons: extractStringArray(paramsRecord.reasons),
+                show_buffering_ui: showBufferingUi,
+                faster_model: asString(paramsRecord.fasterModel ?? paramsRecord.faster_model)
+            }));
+            return events;
+        }
+
+        if (method === 'model/rerouted') {
+            const fromModel = asString(paramsRecord.fromModel ?? paramsRecord.from_model);
+            const toModel = asString(paramsRecord.toModel ?? paramsRecord.to_model);
+            const reason = asString(paramsRecord.reason);
+            if (fromModel && toModel && reason) {
+                events.push(scoped({
+                    type: 'model_rerouted',
+                    from_model: fromModel,
+                    to_model: toModel,
+                    reason
+                }));
+            }
+            return events;
+        }
+
+        if (method === 'model/verification') {
+            events.push(scoped({
+                type: 'model_verification',
+                verifications: extractStringArray(paramsRecord.verifications)
+            }));
+            return events;
+        }
+
         if (method === 'error') {
-            const willRetry = asBoolean(paramsRecord.will_retry ?? paramsRecord.willRetry) ?? false;
+            const errorRecord = asRecord(paramsRecord.error);
+            const retryable = asBoolean(
+                paramsRecord.will_retry
+                ?? paramsRecord.willRetry
+                ?? errorRecord?.will_retry
+                ?? errorRecord?.willRetry
+            );
+            const willRetry = retryable ?? false;
             if (willRetry) return events;
-            const message = asString(paramsRecord.message) ?? asString(asRecord(paramsRecord.error)?.message);
+            const message = asString(paramsRecord.message) ?? asString(errorRecord?.message);
             if (message) {
-                events.push(scoped({ type: 'task_failed', error: message }));
+                const codexErrorInfo = extractCodexErrorInfo(paramsRecord, errorRecord);
+                events.push(scoped({
+                    type: 'task_failed',
+                    terminal_source: 'error',
+                    ...(retryable !== null ? { retryable } : {}),
+                    ...(codexErrorInfo ? { codex_error_info: codexErrorInfo } : {}),
+                    error: message
+                }));
             }
             return events;
         }
@@ -664,6 +805,7 @@ export class AppServerEventConverter {
                 this.lastAgentMessageDeltaByItemId.set(itemId, delta);
                 const prev = this.agentMessageBuffers.get(itemId) ?? '';
                 this.agentMessageBuffers.set(itemId, prev + delta);
+                events.push(scoped({ type: 'agent_message_delta' }));
             }
             return events;
         }
@@ -721,6 +863,23 @@ export class AppServerEventConverter {
             const itemId = extractItemId(paramsRecord) ?? asString(item.id ?? item.itemId ?? item.item_id);
 
             if (!itemType || !itemId) {
+                return events;
+            }
+
+            if (itemType === 'contextcompaction') {
+                if (method === 'item/completed') {
+                    const threadId = asString(eventScope.thread_id);
+                    const turnId = asString(eventScope.turn_id);
+                    if (threadId) {
+                        events.push({
+                            type: 'thread_compacted',
+                            thread_id: threadId,
+                            ...(turnId ? { turn_id: turnId } : {}),
+                            await_turn_completion: true
+                        });
+                        events.push(scoped({ type: 'context_compacted' }));
+                    }
+                }
                 return events;
             }
 
@@ -834,6 +993,24 @@ export class AppServerEventConverter {
                 return events;
             }
 
+            if (itemType === 'imagegeneration') {
+                if (method === 'item/completed') {
+                    const savedPath = extractGeneratedImagePath(item);
+                    if (!savedPath) {
+                        logger.debug('[AppServerEventConverter] imageGeneration missing savedPath', sanitizeUnhandledNotificationLogValue({ item }));
+                        return events;
+                    }
+                    events.push(scoped({
+                        type: 'generated_image',
+                        image_id: itemId,
+                        saved_path: savedPath,
+                        file_name: extractGeneratedImageFileName(item, savedPath),
+                        ...(extractGeneratedImageMimeType(item) ? { mime_type: extractGeneratedImageMimeType(item) } : {})
+                    }));
+                }
+                return events;
+            }
+
             if (itemType === 'collabagenttoolcall') {
                 const toolName = normalizeCollabAgentToolName(item.tool ?? item.name);
                 if (!toolName) return events;
@@ -899,7 +1076,7 @@ export class AppServerEventConverter {
             }
         }
 
-        logger.debug('[AppServerEventConverter] Unhandled notification', { method, params });
+        logger.debug('[AppServerEventConverter] Unhandled notification', sanitizeUnhandledNotificationLogValue({ method, params }));
         return events;
     }
 

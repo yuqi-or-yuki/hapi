@@ -1,27 +1,18 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { PROTOCOL_VERSION } from '@hapi/protocol'
-import { configuration } from '../../configuration'
+import {
+    CreateOrLoadMachineRequestSchema,
+    CreateOrLoadSessionRequestSchema,
+    CursorMigrateToAcpRequestSchema,
+    PROTOCOL_VERSION
+} from '@hapi/protocol'
+import { getConfiguration } from '../../configuration'
 import { constantTimeEquals } from '../../utils/crypto'
 import { parseAccessToken } from '../../utils/accessToken'
 import type { Machine, Session, SyncEngine } from '../../sync/syncEngine'
+import { SessionIdentityConflictError } from '../../store/sessions'
 
 const bearerSchema = z.string().regex(/^Bearer\s+(.+)$/i)
-
-const createOrLoadSessionSchema = z.object({
-    tag: z.string().min(1),
-    metadata: z.unknown(),
-    agentState: z.unknown().nullable().optional(),
-    model: z.string().optional(),
-    modelReasoningEffort: z.string().optional(),
-    effort: z.string().optional()
-})
-
-const createOrLoadMachineSchema = z.object({
-    id: z.string().min(1),
-    metadata: z.unknown(),
-    runnerState: z.unknown().nullable().optional()
-})
 
 const getMessagesQuerySchema = z.object({
     afterSeq: z.coerce.number().int().min(0),
@@ -82,6 +73,7 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
         }
 
         const token = parsed.data.replace(/^Bearer\s+/i, '')
+        const configuration = getConfiguration()
         const parsedToken = parseAccessToken(token)
         if (!parsedToken || !constantTimeEquals(parsedToken.baseToken, configuration.cliApiToken)) {
             return c.json({ error: 'Invalid token' }, 401)
@@ -97,22 +89,93 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
             return c.json({ error: 'Not ready' }, 503)
         }
         const json = await c.req.json().catch(() => null)
-        const parsed = createOrLoadSessionSchema.safeParse(json)
+        const parsed = CreateOrLoadSessionRequestSchema.safeParse(json)
         if (!parsed.success) {
             return c.json({ error: 'Invalid body' }, 400)
         }
 
         const namespace = c.get('namespace')
-        const session = engine.getOrCreateSession(
-            parsed.data.tag,
-            parsed.data.metadata,
-            parsed.data.agentState ?? null,
-            namespace,
-            parsed.data.model,
-            parsed.data.effort,
-            parsed.data.modelReasoningEffort
-        )
-        return c.json({ session })
+        const machineInput = parsed.data.machine
+        if (machineInput) {
+            const existingMachine = engine.getMachine(machineInput.id)
+            if (existingMachine && existingMachine.namespace !== namespace) {
+                return c.json({ error: 'Machine access denied' }, 403)
+            }
+            engine.getOrCreateMachine(
+                machineInput.id,
+                machineInput.metadata,
+                machineInput.runnerState ?? null,
+                namespace
+            )
+        }
+
+        try {
+            const session = engine.getOrCreateSession(
+                parsed.data.tag,
+                parsed.data.metadata,
+                parsed.data.agentState ?? null,
+                namespace,
+                parsed.data.model,
+                parsed.data.effort,
+                parsed.data.modelReasoningEffort,
+                parsed.data.id
+            )
+            return c.json({ session })
+        } catch (error) {
+            if (error instanceof SessionIdentityConflictError) {
+                return c.json({ error: error.message }, 409)
+            }
+            throw error
+        }
+    })
+
+    app.get('/sessions/resumable', (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ error: 'Not ready' }, 503)
+        }
+
+        const namespace = c.get('namespace')
+        const machineId = c.req.query('machineId') || undefined
+        const sessions = engine.listLocalResumableSessions(namespace, { machineId })
+        return c.json({ sessions })
+    })
+
+    app.get('/sessions/:id/resume-target', (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ error: 'Not ready' }, 503)
+        }
+
+        const namespace = c.get('namespace')
+        const result = engine.resolveLocalResumeTarget(c.req.param('id'), namespace)
+        if (result.type === 'error') {
+            const status = result.code === 'access_denied' ? 403
+                : result.code === 'session_not_found' ? 404
+                    : 409
+            return c.json({ error: result.message, code: result.code }, status)
+        }
+
+        return c.json({ target: result.target })
+    })
+
+    app.post('/sessions/:id/handoff-local', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ error: 'Not ready' }, 503)
+        }
+
+        const namespace = c.get('namespace')
+        const result = await engine.handoffSessionToLocal(c.req.param('id'), namespace)
+        if (result.type === 'error') {
+            const status = result.code === 'access_denied' ? 403
+                : result.code === 'session_not_found' ? 404
+                    : result.code === 'already_local' ? 409
+                        : 500
+            return c.json({ error: result.message, code: result.code }, status)
+        }
+
+        return c.json({ ok: true })
     })
 
     app.get('/sessions/:id', (c) => {
@@ -147,8 +210,54 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
         }
 
         const limit = parsed.data.limit ?? 200
-        const messages = engine.getMessagesAfter(resolved.sessionId, { afterSeq: parsed.data.afterSeq, limit })
+        // Future-scheduled rows are excluded from CLI backfill — see
+        // messages.ts:getDeliverableMessagesAfter for the rationale.  The
+        // mature-scan path (releaseMatureScheduledMessages) is the sole
+        // emit channel for scheduled rows.
+        const messages = engine.getDeliverableMessagesAfter(resolved.sessionId, {
+            afterSeq: parsed.data.afterSeq,
+            limit,
+            now: Date.now()
+        })
         return c.json({ messages })
+    })
+
+    app.post('/sessions/:id/migrate-to-acp', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ error: 'Not ready' }, 503)
+        }
+        const sessionId = c.req.param('id')
+        const namespace = c.get('namespace')
+        const resolved = resolveSessionForNamespace(engine, sessionId, namespace)
+        if (!resolved.ok) {
+            return c.json({ error: resolved.error }, resolved.status)
+        }
+        // Codex #34 P2 (round 13): mirror the sessions.ts route hardening —
+        // distinguish "no body" from "malformed JSON". A silent fallback to
+        // {} would run the migration with destructive defaults even when
+        // the operator's intended body was mangled in transit.
+        const rawBody = await c.req.text()
+        let body: unknown = {}
+        if (rawBody.trim().length > 0) {
+            try {
+                body = JSON.parse(rawBody)
+            } catch {
+                return c.json({ error: 'Invalid JSON body' }, 400)
+            }
+        }
+        const parsed = CursorMigrateToAcpRequestSchema.safeParse(body ?? {})
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body', issues: parsed.error.issues }, 400)
+        }
+        const outcome = await engine.migrateLegacyCursorSession(resolved.sessionId, namespace, parsed.data)
+        const status = outcome.ok ? 200
+            : outcome.reason === 'already_acp' || outcome.reason === 'not_cursor_session' || outcome.reason === 'no_cursor_session_id' ? 409
+                : outcome.reason === 'running_refused' ? 409
+                    : outcome.reason === 'target_already_exists' ? 409
+                        : outcome.reason === 'no_legacy_store_on_disk' ? 404
+                            : 500
+        return c.json(outcome, status)
     })
 
     app.post('/machines', async (c) => {
@@ -157,7 +266,7 @@ export function createCliRoutes(getSyncEngine: () => SyncEngine | null): Hono<Cl
             return c.json({ error: 'Not ready' }, 503)
         }
         const json = await c.req.json().catch(() => null)
-        const parsed = createOrLoadMachineSchema.safeParse(json)
+        const parsed = CreateOrLoadMachineRequestSchema.safeParse(json)
         if (!parsed.success) {
             return c.json({ error: 'Invalid body' }, 400)
         }

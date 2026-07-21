@@ -5,7 +5,15 @@ export type {
     AttachmentMetadata,
     DecryptedMessage,
     Metadata,
+    Machine,
+    MachineHealth,
+    MachineMetadata,
+    MachinePatch,
+    MachineUpdatedData,
+    RunnerState,
     Session,
+    SessionPatch,
+    SessionUpdatedData,
     SyncEvent,
     TeamMember,
     TeamMessage,
@@ -17,7 +25,8 @@ export type {
     WorktreeMetadata
 } from './schemas'
 
-export type { SessionSummary, SessionSummaryMetadata } from './sessionSummary'
+export type { SessionSummary, SessionSummaryMetadata, PendingRequest, PendingRequestKind } from './sessionSummary'
+export { PENDING_REQUEST_SUMMARY_CAP } from './sessionSummary'
 export { AGENT_MESSAGE_PAYLOAD_TYPE } from './modes'
 
 export type {
@@ -28,6 +37,8 @@ export type {
     CodexPermissionMode,
     CursorPermissionMode,
     GeminiPermissionMode,
+    GrokPermissionMode,
+    KimiPermissionMode,
     OpencodePermissionMode,
     PermissionMode,
     PermissionModeOption,

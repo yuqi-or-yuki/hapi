@@ -1,25 +1,11 @@
 import type { SlashCommand } from '@/types/api'
 import {
-    getBuiltinSlashCommands as getSharedBuiltinSlashCommands,
+    getBuiltinSlashCommands,
     isUnsupportedCodexBuiltinSlashCommand,
+    mergeSlashCommands,
 } from '@hapi/protocol/slashCommands'
 
-export function getBuiltinSlashCommands(agentType: string): SlashCommand[] {
-    const commands = getSharedBuiltinSlashCommands(agentType)
-    return commands.length > 0 ? commands : getSharedBuiltinSlashCommands('claude')
-}
-
-export function mergeSlashCommands(commands: readonly SlashCommand[]): SlashCommand[] {
-    const commandMap = new Map<string, SlashCommand>()
-    for (const command of commands) {
-        const key = command.name.toLowerCase()
-        if (commandMap.has(key)) {
-            commandMap.delete(key)
-        }
-        commandMap.set(key, command)
-    }
-    return Array.from(commandMap.values())
-}
+export { getBuiltinSlashCommands, mergeSlashCommands }
 
 export function findCodexCustomPromptExpansion(
     text: string,

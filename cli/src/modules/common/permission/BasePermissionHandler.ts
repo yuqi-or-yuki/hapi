@@ -1,5 +1,6 @@
 import type { AgentState } from "@/api/types";
 import type { PermissionMode } from "@hapi/protocol/types";
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 
 type RpcHandlerManagerLike = {
     registerHandler<TRequest = unknown, TResponse = unknown>(
@@ -27,6 +28,12 @@ const AUTO_APPROVE_TOOL_NAME_HINTS = [
     'think',
     'save_memory'
 ];
+const AUTO_APPROVE_EXACT_TOOL_NAMES = new Set([
+    'skill_lookup',
+    'hapi_skill_lookup',
+    'happy__skill_lookup',
+    'mcp__hapi__skill_lookup'
+]);
 const AUTO_APPROVE_TOOL_ID_HINTS = ['change_title', 'claim_debate', 'claim_loop', 'save_memory'];
 const AUTO_APPROVE_WRITE_TOOL_HINTS = ['write', 'edit', 'create', 'delete', 'patch', 'fs-edit'];
 
@@ -46,7 +53,10 @@ export function resolveToolAutoApprovalDecision(
     const lowerId = toolCallId.toLowerCase();
     const decisionForMode: AutoApprovalDecision = mode === 'yolo' ? 'approved_for_session' : 'approved';
 
-    if (rules.alwaysToolNameHints.some((name) => lowerTool.includes(name))) {
+    if (
+        AUTO_APPROVE_EXACT_TOOL_NAMES.has(lowerTool)
+        || rules.alwaysToolNameHints.some((name) => lowerTool.includes(name))
+    ) {
         return decisionForMode;
     }
 
@@ -206,7 +216,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
     }
 
     private setupRpcHandler(): void {
-        this.client.rpcHandlerManager.registerHandler<TResponse, void>('permission', async (response) => {
+        this.client.rpcHandlerManager.registerHandler<TResponse, void>(RPC_METHODS.Permission, async (response) => {
             const pending = this.pendingRequests.get(response.id);
 
             if (!pending) {

@@ -15,6 +15,11 @@ export type CodexMessage = {
     message: string;
     id: string;
 } | {
+    type: 'proposed_plan';
+    plan: string;
+    id: string;
+    turnId: string;
+} | {
     type: 'reasoning';
     message: string;
     id: string;
@@ -48,6 +53,8 @@ export type CodexConversionResult = {
      *  events but previously discarded them, so the UI's thinking/spinner indicator
      *  never activated for locally-launched Codex sessions. */
     thinking?: boolean;
+    userActivity?: true;
+    finishedTurnId?: string;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -129,18 +136,20 @@ export function convertCodexEvent(rawEvent: unknown): CodexConversionResult | nu
         }
 
         if (eventType === 'task_complete' || eventType === 'task_failed' || eventType === 'turn_aborted') {
-            return { thinking: false };
+            const turnId = asString(payloadRecord.turn_id);
+            return {
+                thinking: false,
+                ...(turnId ? { finishedTurnId: turnId } : {})
+            };
         }
 
         if (eventType === 'user_message') {
             const message = asString(payloadRecord.message)
                 ?? asString(payloadRecord.text)
                 ?? asString(payloadRecord.content);
-            if (!message) {
-                return null;
-            }
             return {
-                userMessage: message
+                userActivity: true,
+                ...(message ? { userMessage: message } : {})
             };
         }
 
@@ -154,6 +163,24 @@ export function convertCodexEvent(rawEvent: unknown): CodexConversionResult | nu
                     type: 'message',
                     message,
                     id: randomUUID()
+                }
+            };
+        }
+
+        if (eventType === 'item_completed') {
+            const item = asRecord(payloadRecord.item);
+            const itemType = asString(item?.type)?.toLowerCase();
+            const message = itemType === 'plan' ? asString(item?.text) : null;
+            const turnId = asString(payloadRecord.turn_id);
+            if (!message || message.trim().length === 0 || !turnId) {
+                return null;
+            }
+            return {
+                message: {
+                    type: 'proposed_plan',
+                    plan: message,
+                    id: asString(item?.id) ?? randomUUID(),
+                    turnId
                 }
             };
         }
@@ -205,6 +232,11 @@ export function convertCodexEvent(rawEvent: unknown): CodexConversionResult | nu
     if (type === 'response_item') {
         const itemType = asString(payloadRecord.type);
         if (!itemType) {
+            return null;
+        }
+
+        if (itemType === 'message') {
+            // Response messages are model conversation state; event_msg carries visible chat.
             return null;
         }
 

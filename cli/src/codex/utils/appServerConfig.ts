@@ -13,8 +13,9 @@ import { resolveCodexPermissionModeConfig } from './permissionModeConfig';
 
 export const codexCollaborationSpawnAgentInstructions = [
     'Codex sub-agent spawning rules:',
-    '- If you call spawn_agent with fork_context: true, do not set agent_type, model, or reasoning_effort; full-history forked agents inherit these values from the parent.',
-    '- If you need a specific agent_type, model, or reasoning_effort, omit fork_context or set fork_context: false, and include only the necessary context in the message.',
+    '- Treat omitted fork_context the same as fork_context: true: a full-history fork inherits the parent agent type, model, and reasoning effort.',
+    '- If you call spawn_agent with fork_context omitted or true, do not set agent_type, model, or reasoning_effort.',
+    '- If you need a specific agent_type, model, or reasoning_effort, set fork_context: false and include only the necessary context in the message.',
     '- Do not rely on parent turn reasoning settings for spawned agents; only set reasoning_effort on spawn_agent when the chosen child model supports it.'
 ].join('\n');
 
@@ -22,7 +23,23 @@ const MODELS_WITHOUT_REASONING_SUMMARY = new Set([
     'gpt-5.3-codex-spark'
 ]);
 
+const MCP_ELICITATION_ONLY_APPROVAL_POLICY = {
+    granular: {
+        sandbox_approval: false,
+        rules: false,
+        skill_approval: false,
+        request_permissions: false,
+        mcp_elicitations: true
+    }
+} as const satisfies ApprovalPolicy;
+
 function resolveApprovalPolicy(mode: EnhancedMode): ApprovalPolicy {
+    if (mode.permissionMode === 'yolo' || mode.permissionMode === 'read-only') {
+        // Codex's `never` policy auto-declines MCP elicitations before app-server
+        // can forward them. Keep command/sandbox prompts disabled for Yolo and
+        // read-only while allowing auth and structured input to reach HAPI's UI.
+        return MCP_ELICITATION_ONLY_APPROVAL_POLICY;
+    }
     return resolveCodexPermissionModeConfig(mode.permissionMode).approvalPolicy;
 }
 
@@ -47,6 +64,30 @@ function resolveSandboxPolicyOverride(value: CodexCliOverrides['sandbox'] | unde
     }
 }
 
+// The Codex model catalog advertises the Fast tier with request id `'priority'`
+// (display name "Fast"); OpenAI's docs confirm the legacy `service_tier = "fast"`
+// maps to the request value `priority`. The app-server `serviceTier` override is
+// a raw request value and does not validate unknown strings, so sending `'fast'`
+// would be silently ignored — we must send the advertised `'priority'` id.
+const APP_SERVER_FAST_TIER = 'priority';
+
+/**
+ * Translate HAPI's stored service-tier representation into the Codex
+ * app-server `serviceTier` field for thread/turn params:
+ * - `'fast'`     → `'priority'`  (the advertised Fast tier request value)
+ * - `'standard'` → `null`        (explicit Standard tier)
+ * - anything else / untouched → `undefined` (omit; use account default)
+ */
+function toAppServerServiceTier(stored: string | null | undefined): string | null | undefined {
+    if (stored === 'fast') {
+        return APP_SERVER_FAST_TIER;
+    }
+    if (stored === 'standard') {
+        return null;
+    }
+    return undefined;
+}
+
 export function supportsReasoningSummary(model: string | undefined): boolean {
     const normalized = model?.trim().toLowerCase();
     if (!normalized) return true;
@@ -60,7 +101,8 @@ function buildMcpServerConfig(mcpServers: McpServersConfig): Record<string, unkn
     for (const [name, server] of Object.entries(mcpServers)) {
         config[`mcp_servers.${name}`] = {
             command: server.command,
-            args: server.args
+            args: server.args,
+            ...(server.tools ? { tools: server.tools } : {})
         };
     }
 
@@ -122,6 +164,11 @@ export function buildThreadStartParams(args: {
 
     if (args.mode.model) {
         params.model = args.mode.model;
+    }
+
+    const threadServiceTier = toAppServerServiceTier(args.mode.serviceTier);
+    if (threadServiceTier !== undefined) {
+        params.serviceTier = threadServiceTier;
     }
 
     return params;
@@ -192,6 +239,11 @@ export function buildTurnStartParams(args: {
         };
     } else if (model) {
         params.model = model;
+    }
+
+    const turnServiceTier = toAppServerServiceTier(args.mode?.serviceTier);
+    if (turnServiceTier !== undefined) {
+        params.serviceTier = turnServiceTier;
     }
 
     return params;
