@@ -29,6 +29,7 @@ function healthDisplayChanged(
     return before.load1m !== after.load1m
         || before.cpuPercent !== after.cpuPercent
         || before.memoryPercent !== after.memoryPercent
+        || before.diskPercent !== after.diskPercent
         || before.cpuCount !== after.cpuCount
         || before.uptimeSeconds !== after.uptimeSeconds
 }

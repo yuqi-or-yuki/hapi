@@ -60,7 +60,9 @@ const SIMPLE_RESUME_TOKENS = [
     'opencodeSessionId',
     'grokSessionId',
     'cursorSessionId',
-    'kimiSessionId'
+    'kimiSessionId',
+    'zeroshotSessionId',
+    'zeroshotLastMessageTimestamp'
 ] as const
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

@@ -103,6 +103,9 @@ function pickExistingSessionMetadata(metadata: Metadata | null | undefined): Par
     if (metadata.cursorSessionProtocol !== undefined) preserved.cursorSessionProtocol = metadata.cursorSessionProtocol
     if (metadata.kimiSessionId !== undefined) preserved.kimiSessionId = metadata.kimiSessionId
     if (metadata.piSessionId !== undefined) preserved.piSessionId = metadata.piSessionId
+    if (metadata.zeroshotSessionId !== undefined) preserved.zeroshotSessionId = metadata.zeroshotSessionId
+    if (metadata.zeroshotLastMessageTimestamp !== undefined) preserved.zeroshotLastMessageTimestamp = metadata.zeroshotLastMessageTimestamp
+    if (metadata.zeroshotStage !== undefined) preserved.zeroshotStage = metadata.zeroshotStage
     if (metadata.preferredPermissionMode !== undefined) preserved.preferredPermissionMode = metadata.preferredPermissionMode
     if (metadata.tools !== undefined) preserved.tools = metadata.tools
     if (metadata.slashCommands !== undefined) preserved.slashCommands = metadata.slashCommands

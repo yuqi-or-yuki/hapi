@@ -530,6 +530,29 @@ export const knownTools: Record<string, {
             return question.length > 0 ? truncate(question, 120) : null
         },
         minimal: true
+    },
+    ZeroshotAgent: {
+        icon: () => <UsersIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const role = getInputStringAny(opts.input, ['role'])
+            const event = getInputStringAny(opts.input, ['event'])
+            if (role && event) return `${role}: ${snakeToTitleWithSpaces(event)}`
+            return event ? snakeToTitleWithSpaces(event) : 'Zeroshot agent'
+        },
+        subtitle: (opts) => getInputStringAny(opts.input, ['agent', 'model']),
+        minimal: true
+    },
+    ZeroshotVerdict: {
+        icon: () => <EyeIcon className={DEFAULT_ICON_CLASS} />,
+        title: (opts) => {
+            const approved = isObject(opts.input) && opts.input.approved === true
+            return approved ? 'Verdict: Approved' : 'Verdict: Rejected'
+        },
+        subtitle: (opts) => {
+            const summary = getInputStringAny(opts.input, ['summary'])
+            return summary ? truncate(summary, 120) : null
+        },
+        minimal: false
     }
 }
 

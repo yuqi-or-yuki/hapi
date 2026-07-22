@@ -11,6 +11,7 @@ import { kimiCommand } from './kimi'
 import { grokCommand } from './grok'
 import { opencodeCommand } from './opencode'
 import { piCommand } from './pi'
+import { zeroshotCommand } from './zeroshot'
 import { hookForwarderCommand } from './hookForwarder'
 import { mcpCommand } from './mcp'
 import { notifyCommand } from './notify'
@@ -44,6 +45,7 @@ const COMMANDS: CommandDefinition[] = [
     kimiCommand,
     opencodeCommand,
     piCommand,
+    zeroshotCommand,
     mcpCommand,
     hubCommand,
     { ...hubCommand, name: 'server' },

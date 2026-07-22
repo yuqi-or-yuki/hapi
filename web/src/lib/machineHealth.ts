@@ -3,8 +3,8 @@ import type { Machine, MachineHealth } from '@/types/api'
 export type MachineHealthTone = 'ok' | 'warn' | 'critical' | 'unknown'
 
 export type MachineHealthMetricPresentation = {
-    id: 'cpu' | 'ram'
-    shortLabel: 'CPU' | 'RAM'
+    id: 'cpu' | 'ram' | 'disk'
+    shortLabel: 'CPU' | 'RAM' | 'Disk'
     percent: number
     tone: MachineHealthTone
 }
@@ -104,6 +104,17 @@ export function presentMachineHealth(
             id: 'ram',
             shortLabel: 'RAM',
             percent: health.memoryPercent,
+            tone
+        })
+        tones.push(tone)
+    }
+
+    if (health.diskPercent !== undefined) {
+        const tone = percentTone(health.diskPercent)
+        metrics.push({
+            id: 'disk',
+            shortLabel: 'Disk',
+            percent: health.diskPercent,
             tone
         })
         tones.push(tone)

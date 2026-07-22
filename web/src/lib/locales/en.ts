@@ -292,6 +292,7 @@ export default {
   'machine.health.status.unknown': 'Metrics unavailable',
   'machine.health.metric.cpu': 'CPU',
   'machine.health.metric.ram': 'RAM',
+  'machine.health.metric.disk': 'Disk',
   'machine.health.tooltip.load': 'Run queue (1 min): {value}',
   'machine.health.tooltip.loadShort': 'Load (1m)',
   'machine.health.tooltip.uptimeShort': 'Uptime',
@@ -299,6 +300,7 @@ export default {
   'machine.health.tooltip.hint': 'Updated every ~20s from the runner on this machine',
   'machine.health.aria.cpu': 'CPU {n} percent',
   'machine.health.aria.ram': 'RAM {n} percent',
+  'machine.health.aria.disk': 'Disk {n} percent',
   'machine.health.aria.unknown': 'Machine health unavailable',
 
   // Chat

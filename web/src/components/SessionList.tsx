@@ -35,6 +35,14 @@ import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
 import { MachineGroupHeader } from '@/components/MachineGroupHeader'
 import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 
+const ZEROSHOT_STAGE_BADGES: Record<string, { label: string; colors: string }> = {
+    plan: { label: '🗺 planning', colors: 'bg-amber-500/10 text-amber-500' },
+    implement: { label: '🔨 implementing', colors: 'bg-blue-500/10 text-blue-500' },
+    verify: { label: '🔍 verifying', colors: 'bg-purple-500/10 text-purple-500' },
+    done: { label: '✓ done', colors: 'bg-[var(--app-badge-success-bg)] text-[var(--app-badge-success-text)]' },
+    failed: { label: '✗ failed', colors: 'bg-red-500/10 text-red-500' },
+}
+
 type SessionGroup = {
     key: string
     directory: string
@@ -1022,6 +1030,11 @@ function SessionItem(props: {
                             {s.debateActive ? (
                                 <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-purple-500/10 text-purple-500">
                                     ⚖ debate
+                                </span>
+                            ) : null}
+                            {s.metadata?.zeroshotStage ? (
+                                <span className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none ${ZEROSHOT_STAGE_BADGES[s.metadata.zeroshotStage]?.colors ?? 'bg-[var(--app-secondary-bg)] text-[var(--app-hint)]'}`}>
+                                    {ZEROSHOT_STAGE_BADGES[s.metadata.zeroshotStage]?.label ?? s.metadata.zeroshotStage}
                                 </span>
                             ) : null}
                             {s.scheduledDueAts.map((dueAt, index) => (

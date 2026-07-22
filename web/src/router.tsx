@@ -16,6 +16,7 @@ import { getScrollRestorationKey } from '@/lib/scrollRestorationKey'
 import { App } from '@/App'
 import { SessionChat } from '@/components/SessionChat'
 import { SessionList } from '@/components/SessionList'
+import { HeaderOverflowMenu } from '@/components/HeaderOverflowMenu'
 import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
 import { NewSession } from '@/components/NewSession'
@@ -262,6 +263,16 @@ function CalendarClockIcon(props: { className?: string }) {
     )
 }
 
+function MoreIcon(props: { className?: string }) {
+    return (
+        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" className={props.className}>
+            <circle cx="5" cy="12" r="2" />
+            <circle cx="12" cy="12" r="2" />
+            <circle cx="19" cy="12" r="2" />
+        </svg>
+    )
+}
+
 function RingSettingsButton(props: {
     api: ApiClient
     muted: boolean
@@ -496,6 +507,8 @@ function SessionsPage() {
     const [isSyncingCodexSession, setIsSyncingCodexSession] = useState(false)
     const [codexSessions, setCodexSessions] = useState<CodexLocalSessionSummary[]>([])
     const [codexImportMachineId, setCodexImportMachineId] = useState<string | null>(null)
+    const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false)
+    const moreButtonRef = useRef<HTMLButtonElement | null>(null)
     const [isLoadingCodexSessions, setIsLoadingCodexSessions] = useState(false)
     const [isSyncConfirmOpen, setIsSyncConfirmOpen] = useState(false)
     const [isRestartingCodexDesktop, setIsRestartingCodexDesktop] = useState(false)
@@ -837,15 +850,18 @@ function SessionsPage() {
                 style={{ '--sidebar-w': `${sidebar.width}px` } as React.CSSProperties}
             >
                 <div className="bg-[var(--app-bg)] pt-[env(safe-area-inset-top)]">
-                    <div className="mx-auto w-full max-w-content flex items-center justify-between px-3 py-2">
-                        <div className="min-w-0 text-xs text-[var(--app-hint)]">
+                    <div className="mx-auto w-full max-w-content flex items-center justify-between gap-2 px-3 py-2">
+                        <div className="min-w-0 truncate text-xs text-[var(--app-hint)]">
                             {t('sessions.count', { n: sessions.length, m: projectCount })}
                         </div>
                         <div className="flex shrink-0 items-center gap-2">
+                            {/* Navigational actions: room for these on tablet/desktop; collapsed
+                                into the overflow menu below sm so the session count never has to
+                                fight 5+ fixed-width items for space and wrap onto multiple lines. */}
                             <button
                                 type="button"
                                 onClick={() => navigate({ to: '/dashboard' })}
-                                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
                                 title="Open dashboard"
                             >
                                 <ChartIcon className="h-4 w-4" />
@@ -854,7 +870,7 @@ function SessionsPage() {
                             <button
                                 type="button"
                                 onClick={() => navigate({ to: '/scheduled-jobs' })}
-                                className="inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
                                 title="Open scheduled jobs"
                             >
                                 <CalendarClockIcon className="h-4 w-4" />
@@ -866,11 +882,54 @@ function SessionsPage() {
                                 disabled={isSyncingCodexSession || isLoadingCodexSessions}
                                 aria-label={t('codexSync.tooltip')}
                                 aria-busy={isSyncingCodexSession || isLoadingCodexSessions}
-                                className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors disabled:opacity-60 disabled:cursor-wait"
+                                className="hidden sm:flex p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors disabled:opacity-60 disabled:cursor-wait"
                                 title={t('codexSync.tooltip')}
                             >
                                 <CodexImportIcon className={`h-5 w-5 ${isLoadingCodexSessions ? 'animate-spin' : ''}`} />
                             </button>
+                            <button
+                                type="button"
+                                onClick={() => navigate({ to: '/browse' })}
+                                className="hidden sm:flex p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                title={t('browse.nav')}
+                            >
+                                <FolderOpenIcon className="h-5 w-5" />
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => navigate({ to: '/settings' })}
+                                className="hidden sm:flex p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                title={t('settings.title')}
+                            >
+                                <SettingsIcon className="h-5 w-5" />
+                            </button>
+
+                            {/* Mobile-only overflow trigger for the actions hidden above. */}
+                            <button
+                                ref={moreButtonRef}
+                                type="button"
+                                onClick={() => setIsMoreMenuOpen((open) => !open)}
+                                aria-haspopup="menu"
+                                aria-expanded={isMoreMenuOpen}
+                                className="sm:hidden p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                title="More"
+                            >
+                                <MoreIcon className="h-5 w-5" />
+                            </button>
+                            <HeaderOverflowMenu
+                                isOpen={isMoreMenuOpen}
+                                onClose={() => setIsMoreMenuOpen(false)}
+                                triggerRef={moreButtonRef}
+                                items={[
+                                    { key: 'dashboard', icon: <ChartIcon className="h-4 w-4" />, label: 'Dashboard', onClick: () => navigate({ to: '/dashboard' }) },
+                                    { key: 'jobs', icon: <CalendarClockIcon className="h-4 w-4" />, label: 'Scheduled jobs', onClick: () => navigate({ to: '/scheduled-jobs' }) },
+                                    { key: 'codex-sync', icon: <CodexImportIcon className="h-4 w-4" />, label: t('codexSync.tooltip'), onClick: () => void openCodexImportDialog() },
+                                    { key: 'browse', icon: <FolderOpenIcon className="h-4 w-4" />, label: t('browse.nav'), onClick: () => navigate({ to: '/browse' }) },
+                                    { key: 'settings', icon: <SettingsIcon className="h-4 w-4" />, label: t('settings.title'), onClick: () => navigate({ to: '/settings' }) }
+                                ]}
+                            />
+
+                            {/* Always-visible actions: frequent, non-navigational (or the primary CTA). */}
                             <button
                                 type="button"
                                 onClick={handleRefresh}
@@ -881,22 +940,6 @@ function SessionsPage() {
                                 title={t('button.refresh')}
                             >
                                 <RefreshIcon className={`h-5 w-5 ${isLoading ? 'animate-spin' : ''}`} />
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => navigate({ to: '/browse' })}
-                                className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                title={t('browse.nav')}
-                            >
-                                <FolderOpenIcon className="h-5 w-5" />
-                            </button>
-                            <button
-                                type="button"
-                                onClick={() => navigate({ to: '/settings' })}
-                                className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                title={t('settings.title')}
-                            >
-                                <SettingsIcon className="h-5 w-5" />
                             </button>
                             <RingSettingsButton
                                 api={api}
@@ -2265,7 +2308,9 @@ export function createAppRouter(history?: RouterHistory) {
     return createRouter({
         routeTree,
         history,
-        scrollRestoration: true,
+        // Disabled: TanStack scroll cache can exceed browser storage quota and hard-block the app.
+        // See web/src/lib/scrollStorageGuard.ts and tsr-scroll-restoration-v1_3 quota errors.
+        scrollRestoration: false,
         getScrollRestorationKey,
     })
 }

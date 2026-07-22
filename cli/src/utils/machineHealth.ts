@@ -1,6 +1,6 @@
 import { execSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { availableParallelism, cpus, freemem, loadavg, platform, totalmem, uptime } from 'node:os'
+import { readFileSync, statfsSync } from 'node:fs'
+import { availableParallelism, cpus, freemem, homedir, loadavg, platform, totalmem, uptime } from 'node:os'
 import type { MachineHealth } from '@hapi/protocol/types'
 import { MachineHealthSchema } from '@hapi/protocol/schemas'
 
@@ -164,6 +164,26 @@ function computeMemoryPercent(): number | undefined {
     return Math.max(0, Math.min(100, Math.round((used / total) * 100)))
 }
 
+/**
+ * Disk usage for the volume holding the user's home directory — the volume
+ * where session worktrees/artifacts actually land on most setups, so it's
+ * the more relevant "can this machine take more agents" signal than root (/)
+ * on hosts with a separate small system partition and a larger data volume.
+ * `bavail` (blocks available to unprivileged users) matches `df`'s Use%.
+ */
+function computeDiskPercent(): number | undefined {
+    try {
+        const stats = statfsSync(homedir())
+        if (!stats.blocks || stats.blocks <= 0) {
+            return undefined
+        }
+        const used = stats.blocks - stats.bavail
+        return Math.max(0, Math.min(100, Math.round((used / stats.blocks) * 100)))
+    } catch {
+        return undefined
+    }
+}
+
 function isUnixLikeLoadPlatform(): boolean {
     return platform() !== 'win32'
 }
@@ -179,6 +199,7 @@ function computeUptimeSeconds(): number | undefined {
 export function collectMachineHealth(now: number = Date.now()): MachineHealth {
     const cpuCount = availableParallelism()
     const memoryPercent = computeMemoryPercent()
+    const diskPercent = computeDiskPercent()
     const uptimeSeconds = computeUptimeSeconds()
     const load1m = isUnixLikeLoadPlatform() ? loadavg()[0] : undefined
 
@@ -197,6 +218,7 @@ export function collectMachineHealth(now: number = Date.now()): MachineHealth {
         ...(load1m !== undefined ? { load1m } : {}),
         ...(cpuPercent !== undefined ? { cpuPercent } : {}),
         ...(memoryPercent !== undefined ? { memoryPercent } : {}),
+        ...(diskPercent !== undefined ? { diskPercent } : {}),
         ...(uptimeSeconds !== undefined ? { uptimeSeconds } : {})
     }
 

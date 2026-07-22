@@ -39,6 +39,8 @@ export type SessionSummaryMetadata = {
     agentSessionId?: string
     readyForReview?: boolean
     lifecycleState?: string
+    /** Zeroshot run stage ('plan'|'implement'|'verify'|'done'|'failed'), for the session-list badge. */
+    zeroshotStage?: string
 }
 
 export type SessionSummary = {
@@ -127,9 +129,11 @@ export function toSessionSummary(session: Session): SessionSummary {
             ?? session.metadata.grokSessionId
             ?? session.metadata.cursorSessionId
             ?? session.metadata.kimiSessionId
+            ?? session.metadata.zeroshotSessionId
             ?? undefined,
         readyForReview: session.metadata.readyForReview ?? undefined,
-        lifecycleState: session.metadata.lifecycleState
+        lifecycleState: session.metadata.lifecycleState,
+        zeroshotStage: session.metadata.zeroshotStage
     } : null
 
     const todoProgress = session.todos?.length ? {

@@ -129,6 +129,8 @@ describe('collectMachineHealth', () => {
         expect(health.cpuCount).toBeGreaterThan(0)
         expect(health.memoryPercent).toBeGreaterThanOrEqual(0)
         expect(health.memoryPercent).toBeLessThanOrEqual(100)
+        expect(health.diskPercent).toBeGreaterThanOrEqual(0)
+        expect(health.diskPercent).toBeLessThanOrEqual(100)
         expect(health.uptimeSeconds).toBeGreaterThan(0)
     })
 

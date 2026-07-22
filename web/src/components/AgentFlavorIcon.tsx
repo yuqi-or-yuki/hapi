@@ -31,6 +31,10 @@ const FLAVOR_BADGES: Record<string, { label: string; colors: string }> = {
         label: 'Pi',
         colors: 'bg-[#5b21b6] text-white',
     },
+    zeroshot: {
+        label: 'ZS',
+        colors: 'bg-[#171411] text-white',
+    },
 }
 
 const UNKNOWN_FLAVOR_BADGE = {

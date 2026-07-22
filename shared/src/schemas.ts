@@ -52,6 +52,18 @@ export const MetadataSchema = z.object({
     cursorMigrationState: z.enum(['in_progress', 'ambiguous']).optional(),
     kimiSessionId: z.string().optional(),
     piSessionId: z.string().optional(),
+    // Zeroshot cluster id (the run this session tracks). Also the resume
+    // token used to reattach after a hapi-runner restart — see
+    // zeroshotLastMessageTimestamp below for the accompanying poll cursor.
+    zeroshotSessionId: z.string().optional(),
+    // High-water-mark ledger timestamp already forwarded to hub/web, so a
+    // restarted launcher can resume polling from where it left off instead
+    // of re-forwarding (or losing) messages.
+    zeroshotLastMessageTimestamp: z.number().optional(),
+    // Coarse run stage for the session-list badge: 'plan' | 'implement' |
+    // 'verify' | 'done' | 'failed'. Free-form string (like lifecycleState)
+    // rather than a closed enum, matching the CLI-writes/web-reads pattern.
+    zeroshotStage: z.string().optional(),
     tools: z.array(z.string()).optional(),
     slashCommands: z.array(z.string()).optional(),
     homeDir: z.string().optional(),
@@ -290,6 +302,7 @@ export const MachineHealthSchema = z.object({
     load1m: z.number().nonnegative().optional(),
     cpuPercent: z.number().min(0).max(100).optional(),
     memoryPercent: z.number().min(0).max(100).optional(),
+    diskPercent: z.number().min(0).max(100).optional(),
     uptimeSeconds: z.number().nonnegative().optional()
 }).strict()
 

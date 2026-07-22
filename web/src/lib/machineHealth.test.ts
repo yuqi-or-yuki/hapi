@@ -26,6 +26,23 @@ describe('presentMachineHealth', () => {
         expect(result?.cpuCount).toBe(8)
     })
 
+    it('builds a disk metric alongside cpu and ram', () => {
+        const result = presentMachineHealth({
+            collectedAt: Date.now(),
+            cpuPercent: 30,
+            memoryPercent: 40,
+            diskPercent: 92
+        }, 'linux')
+
+        expect(result?.metrics).toEqual([
+            { id: 'cpu', shortLabel: 'CPU', percent: 30, tone: 'ok' },
+            { id: 'ram', shortLabel: 'RAM', percent: 40, tone: 'ok' },
+            { id: 'disk', shortLabel: 'Disk', percent: 92, tone: 'critical' }
+        ])
+        expect(result?.overallTone).toBe('critical')
+        expect(result?.status).toBe('high')
+    })
+
     it('marks high pressure when ram is critical', () => {
         const result = presentMachineHealth({
             collectedAt: Date.now(),

@@ -18,6 +18,9 @@ const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
     cursor: new Set([Capabilities.ModelChange]),
     opencode: new Set([Capabilities.ModelChange]),
     pi: new Set([Capabilities.ModelChange, Capabilities.Effort]),
+    // Zeroshot manages its own executor/provider selection internally;
+    // no model/effort controls are exposed at the HAPI level.
+    zeroshot: new Set([]),
 }
 
 // --- Flavor display names ---
@@ -30,6 +33,7 @@ const FLAVOR_LABELS: Record<AgentFlavor, string> = {
     cursor: 'Cursor',
     opencode: 'OpenCode',
     pi: 'Pi',
+    zeroshot: 'Zeroshot',
 }
 
 // --- Query functions ---

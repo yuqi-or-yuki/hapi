@@ -3,9 +3,9 @@ import { render } from '@testing-library/react'
 import { AGENT_FLAVORS } from '@hapi/protocol'
 import { AgentFlavorIcon } from './AgentFlavorIcon'
 
-// Flavors backed by a @lobehub/icons brand logo. 'pi' has no logo in the
-// package and intentionally falls back to the letter badge.
-const LOGO_FLAVORS = AGENT_FLAVORS.filter((f) => f !== 'pi')
+// Flavors backed by a @lobehub/icons brand logo. 'pi' and 'zeroshot' have no
+// logo in the package and intentionally fall back to the letter badge.
+const LOGO_FLAVORS = AGENT_FLAVORS.filter((f) => f !== 'pi' && f !== 'zeroshot')
 
 function getWrapper(container: HTMLElement): HTMLElement {
     const wrapper = container.querySelector('span')
@@ -35,6 +35,15 @@ describe('AgentFlavorIcon', () => {
         expect(container.querySelector('svg')).toBeNull()
         expect(badge.textContent).toBe('Pi')
         expect(badge.className).toContain('bg-[#5b21b6]')
+        expect(badge.className).toContain('text-white')
+    })
+
+    it('keeps the "ZS" letter badge for the zeroshot flavor (no brand logo available)', () => {
+        const { container } = render(<AgentFlavorIcon flavor="zeroshot" />)
+        const badge = getWrapper(container)
+        expect(container.querySelector('svg')).toBeNull()
+        expect(badge.textContent).toBe('ZS')
+        expect(badge.className).toContain('bg-[#171411]')
         expect(badge.className).toContain('text-white')
     })
 
