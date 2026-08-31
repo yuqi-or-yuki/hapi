@@ -64,6 +64,7 @@ export default {
 
   // Sessions page
   'sessions.new': '新建会话',
+  'sessions.count': '{m} 个项目中的 {n} 个会话',
   'sessions.empty.title': '还没有会话',
   'sessions.empty.hint': '在 workspace 下任意目录启动一个会话，或先浏览目录树看看。',
   'sessions.empty.startSession': '启动会话',
@@ -83,6 +84,7 @@ export default {
   'sessions.timeFilter.dayWithActivity': '{date}，有会话活动',
   'sessions.group.expand': '展开 {n} 个',
   'sessions.group.collapse': '收起 {n} 个',
+  'sessions.group.showMore': '再显示 {n} 个',
   'sessions.runningSection': '进行中',
   'sessions.activeSection': '活跃会话',
   'sessions.group.new': '在此目录新建会话',

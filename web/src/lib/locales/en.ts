@@ -64,6 +64,7 @@ export default {
 
   // Sessions page
   'sessions.new': 'New Session',
+  'sessions.count': '{n} sessions in {m} projects',
   'sessions.empty.title': 'No sessions yet',
   'sessions.empty.hint': 'Start a coding session in any folder under your workspace, or browse the tree first.',
   'sessions.empty.startSession': 'Start a session',
@@ -83,6 +84,7 @@ export default {
   'sessions.timeFilter.dayWithActivity': '{date}, has session activity',
   'sessions.group.expand': 'Expand {n}',
   'sessions.group.collapse': 'Collapse {n}',
+  'sessions.group.showMore': 'Show {n} more',
   'sessions.runningSection': 'In progress',
   'sessions.activeSection': 'Active sessions',
   'sessions.group.new': 'New session in this directory',
