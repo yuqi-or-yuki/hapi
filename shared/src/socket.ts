@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { CodexCollaborationMode, PermissionMode } from './modes'
+import type { CopilotAgentMode } from './copilotModes'
 import type { SessionEndReason } from './schemas'
 export { SessionEndReasonSchema, type SessionEndReason } from './schemas'
 
@@ -30,6 +31,35 @@ export const TerminalResizePayloadSchema = z.object({
 })
 
 export type TerminalResizePayload = z.infer<typeof TerminalResizePayloadSchema>
+
+// Read-only agent-terminal viewer controls (no terminalId — the agent PTY is the
+// session's single TUI, keyed by sessionId). `resize` repaints the agent TUI at a
+// given size; `refresh` forces a repaint of the current screen so a freshly
+// (re)subscribed viewer sees the live state instead of a stale/black buffer.
+export const AgentTerminalResizePayloadSchema = z.object({
+    sessionId: z.string().min(1),
+    cols: z.number().int().positive(),
+    rows: z.number().int().positive()
+})
+
+export type AgentTerminalResizePayload = z.infer<typeof AgentTerminalResizePayloadSchema>
+
+export const AgentTerminalRefreshPayloadSchema = z.object({
+    sessionId: z.string().min(1)
+})
+
+export type AgentTerminalRefreshPayload = z.infer<typeof AgentTerminalRefreshPayloadSchema>
+
+// Raw keystroke(s) typed into the agent TUI from a web viewer — the agent PTY is
+// the session's single TUI, keyed by sessionId (no terminalId). Lets a remote
+// viewer navigate TUI screens (e.g. answer/escape a /usage or /model dialog) that
+// the structured chat composer cannot express.
+export const AgentTerminalInputPayloadSchema = z.object({
+    sessionId: z.string().min(1),
+    data: z.string().min(1)
+})
+
+export type AgentTerminalInputPayload = z.infer<typeof AgentTerminalInputPayloadSchema>
 
 export const TerminalClosePayloadSchema = z.object({
     sessionId: z.string().min(1),
@@ -113,6 +143,16 @@ export const UpdateMachineBodySchema = z.object({
 
 export type UpdateMachineBody = z.infer<typeof UpdateMachineBodySchema>
 
+export const UpdateRetryQueuedMessageBodySchema = z.object({
+    t: z.literal('retry-queued-message'),
+    sid: z.string(),
+    messageId: z.string(),
+    localId: z.string().nullable(),
+    message: UpdateNewMessageBodySchema.shape.message
+})
+
+export type UpdateRetryQueuedMessageBody = z.infer<typeof UpdateRetryQueuedMessageBodySchema>
+
 export const UpdateCancelQueuedMessageBodySchema = z.object({
     t: z.literal('cancel-queued-message'),
     sid: z.string(),
@@ -123,7 +163,11 @@ export const UpdateCancelQueuedMessageBodySchema = z.object({
 export type UpdateCancelQueuedMessageBody = z.infer<typeof UpdateCancelQueuedMessageBodySchema>
 
 export const CancelQueuedMessageAckSchema = z.object({
-    removed: z.boolean()
+    removed: z.boolean(),
+    inFlight: z.boolean().optional(),
+    indeterminate: z.boolean().optional(),
+    accepted: z.boolean().optional(),
+    consumed: z.boolean().optional()
 })
 
 export type CancelQueuedMessageAck = z.infer<typeof CancelQueuedMessageAckSchema>
@@ -131,7 +175,7 @@ export type CancelQueuedMessageAck = z.infer<typeof CancelQueuedMessageAckSchema
 export const UpdateSchema = z.object({
     id: z.string(),
     seq: z.number(),
-    body: z.union([UpdateNewMessageBodySchema, UpdateSessionBodySchema, UpdateMachineBodySchema, UpdateCancelQueuedMessageBodySchema]),
+    body: z.union([UpdateNewMessageBodySchema, UpdateRetryQueuedMessageBodySchema, UpdateSessionBodySchema, UpdateMachineBodySchema, UpdateCancelQueuedMessageBodySchema]),
     createdAt: z.number()
 })
 
@@ -190,17 +234,29 @@ export type MachineUpdateStateAck = {
 }
 
 export interface ServerToClientEvents {
-    update: (data: Update, ack?: (response: CancelQueuedMessageAck) => void) => void
+    update: (data: Update, ack?: (response: CancelQueuedMessageAck & { accepted?: boolean }) => void) => void
     'rpc-request': (data: { method: string; params: string }, callback: (response: string) => void) => void
     'terminal:open': (data: TerminalOpenPayload) => void
     'terminal:write': (data: TerminalWritePayload) => void
     'terminal:resize': (data: TerminalResizePayload) => void
     'terminal:close': (data: TerminalClosePayload) => void
+    'agent-terminal:resize': (data: AgentTerminalResizePayload) => void
+    'agent-terminal:refresh': (data: AgentTerminalRefreshPayload) => void
+    // Raw keystroke(s) from a web viewer, relayed to the CLI to write into the
+    // agent PTY (interactive TUI navigation; see AgentTerminalInputPayload).
+    'agent-terminal:input': (data: AgentTerminalInputPayload) => void
+    // Sent to the CLI when the last agent-terminal viewer leaves, so it stops
+    // streaming PTY output to the hub until someone subscribes again.
+    'agent-terminal:idle': (data: AgentTerminalRefreshPayload) => void
     error: (data: { message: string; code?: SocketErrorReason; scope?: 'session' | 'machine'; id?: string }) => void
 }
 
 export interface ClientToServerEvents {
-    message: (data: { sid: string; message: unknown; localId?: string }) => void
+    // createdAt: optional client-provided timestamp (epoch ms) for the entry's
+    // own origin time (e.g. a Claude transcript entry's timestamp). Currently
+    // only honored by the hub for agent messages (no localId) — see
+    // messages.ts addMessage. Absent -> hub falls back to Date.now().
+    message: (data: { sid: string; message: unknown; localId?: string; createdAt?: number }) => void
     'session-alive': (data: {
         sid: string
         time: number
@@ -212,11 +268,14 @@ export interface ClientToServerEvents {
         effort?: string | null
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
+        copilotAgentMode?: CopilotAgentMode
     }) => void
   /** CLI agent finished session/load (or equivalent) and can accept prompts. */
     'session-ready': (data: { sid: string; time: number }) => void
     'session-end': (data: { sid: string; time: number; reason?: SessionEndReason }) => void
-    'messages-consumed': (data: { sid: string; localIds: string[] }) => void
+    'messages-consumed': (data: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean; steered?: boolean }) => void
+    'messages-indeterminate': (data: { sid: string; localIds: string[] }) => void
+    'messages-steer-state': (data: { sid: string; localIds: string[]; state: 'queued' | 'dispatching' }, cb: (response: { ok: boolean }) => void) => void
     'update-metadata': (data: { sid: string; expectedVersion: number; metadata: unknown }, cb: (answer: UpdateMetadataAck) => void) => void
     'update-state': (data: { sid: string; expectedVersion: number; agentState: unknown | null }, cb: (answer: UpdateStateAck) => void) => void
     'machine-alive': (data: { machineId: string; time: number; health?: unknown }) => void
@@ -229,6 +288,10 @@ export interface ClientToServerEvents {
     'terminal:output': (data: TerminalOutputPayload) => void
     'terminal:exit': (data: TerminalExitPayload) => void
     'terminal:error': (data: TerminalErrorPayload) => void
+    'agent-terminal:output': (data: TerminalOutputPayload) => void
+    // Drop the hub's scrollback buffer for this session (a new agent PTY just
+    // spawned, e.g. after archive→restart, so old output must not replay).
+    'agent-terminal:reset': (data: { sessionId: string }) => void
     ping: (callback: () => void) => void
     'usage-report': (data: unknown) => void
 }

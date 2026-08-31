@@ -63,6 +63,29 @@ export interface ModelListResponse {
     [key: string]: unknown;
 }
 
+export interface SkillsListParams {
+    cwds: string[];
+    forceReload?: boolean;
+}
+
+export interface SkillMetadata {
+    name: string;
+    description: string;
+    path: string;
+    scope: string;
+    enabled: boolean;
+    [key: string]: unknown;
+}
+
+export interface SkillsListResponse {
+    data?: Array<{
+        cwd: string;
+        skills: SkillMetadata[];
+        errors?: unknown[];
+    }>;
+    [key: string]: unknown;
+}
+
 export interface CollaborationModeListItem {
     name?: string;
     mode?: 'plan' | 'default' | string | null;
@@ -134,7 +157,28 @@ export interface ThreadResumeResponse {
     [key: string]: unknown;
 }
 
+export interface ThreadReadParams {
+    threadId: string;
+    includeTurns?: boolean;
+}
+
+export interface ThreadReadResponse {
+    thread: {
+        id: string;
+        turns?: Array<{
+            id?: string;
+            status?: string;
+            items?: ResponseItem[];
+        }>;
+    };
+    [key: string]: unknown;
+}
+
 export interface ThreadForkParams extends Omit<ThreadResumeParams, 'history' | 'path'> {
+    /** Inclusive terminal turn for the fork (stable). */
+    lastTurnId?: string | null;
+    /** Exclusive: copy history strictly before this turn (experimental). */
+    beforeTurnId?: string | null;
 }
 
 export interface ThreadForkResponse {
@@ -165,6 +209,11 @@ export type UserInput =
     }
     | {
         type: 'skill';
+        name: string;
+        path: string;
+    }
+    | {
+        type: 'mention';
         name: string;
         path: string;
     };
@@ -212,6 +261,8 @@ export interface TurnStartParams {
     personality?: string;
     outputSchema?: unknown;
     collaborationMode?: CollaborationMode;
+    /** Optional client identity echoed back as userMessage.clientId. */
+    clientUserMessageId?: string;
 }
 
 export interface TurnStartResponse {
@@ -245,6 +296,18 @@ export interface ThreadRollbackResponse {
     [key: string]: unknown;
 }
 
+export interface TurnSteerParams {
+    threadId: string;
+    input: UserInput[];
+    expectedTurnId: string;
+    clientUserMessageId?: string | null;
+}
+
+export interface TurnSteerResponse {
+    turnId: string;
+    [key: string]: unknown;
+}
+
 export interface ThreadCompactStartParams {
     threadId: string;
 }
@@ -253,7 +316,13 @@ export interface ThreadCompactStartResponse {
     [key: string]: unknown;
 }
 
-export type ThreadGoalStatus = 'active' | 'paused' | 'budgetLimited' | 'complete';
+export type ThreadGoalStatus =
+    | 'active'
+    | 'paused'
+    | 'budgetLimited'
+    | 'usageLimited'
+    | 'blocked'
+    | 'complete';
 
 export interface ThreadGoal {
     threadId: string;

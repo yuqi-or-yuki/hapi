@@ -1,6 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
-import { isObject, toSessionSummary } from '@hapi/protocol'
+import {
+    computePendingRequestKinds,
+    computePendingRequests,
+    computePendingRequestsCount,
+    computeTodoProgress,
+    isObject,
+    toSessionSummary,
+    toSessionSummaryMetadata
+} from '@hapi/protocol'
 import { MachinePatchSchema, MachineSchema, SessionPatchSchema, SessionSchema } from '@hapi/protocol/schemas'
 import type {
     Machine,
@@ -13,8 +21,14 @@ import type {
     SyncEvent
 } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
-import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
+import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, markMessagesIndeterminate, markMessagesRequeued, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
 import { getAgentDoneRingDecision } from '@/lib/agentDoneRingTrigger'
+import { applySessionDetailPatch } from '@/lib/sessionPatch'
+
+// Pure patch-application rules live in @/lib/sessionPatch (React-free, shared
+// with the fixture generator); re-exported here so hook consumers and existing
+// tests keep their import site.
+export { applySessionDetailPatch, isNewerVersionedPatch, isRenderIrrelevantSessionPatch } from '@/lib/sessionPatch'
 
 type SSESubscription = {
     all?: boolean
@@ -27,6 +41,8 @@ export type SSEScope = 'global' | 'full'
 const MESSAGE_STREAM_EVENT_TYPES = new Set<SyncEvent['type']>([
     'message-received',
     'messages-consumed',
+    'messages-indeterminate',
+    'messages-requeued',
     'message-cancelled',
     'scheduled-matured'
 ])
@@ -35,18 +51,63 @@ export function isGlobalScopedMessageStreamEvent(scope: SSEScope, eventType: Syn
     return scope === 'global' && MESSAGE_STREAM_EVENT_TYPES.has(eventType)
 }
 
+export function shouldInvalidateSessionListForEvent(scope: SSEScope, eventType: SyncEvent['type']): boolean {
+    return scope === 'global' && eventType === 'messages-invalidated'
+}
+
+/**
+ * @deprecated Prefer gating against SessionSummary watermarks. Kept for unit
+ * tests of the old "detail required" rule; summary path no longer uses this
+ * for metadata/agentState/todos (teamState is a summary no-op).
+ */
+export function canApplyVersionedSummaryPatch(
+    patch: Pick<SessionPatch, 'metadata' | 'agentState' | 'todos' | 'teamState'>,
+    detailPresent: boolean
+): boolean {
+    // teamState is not rendered on SessionSummary — never block list patches.
+    if (
+        patch.metadata === undefined
+        && patch.agentState === undefined
+        && patch.todos === undefined
+    ) {
+        return true
+    }
+    return detailPresent
+}
+
 type VisibilityState = 'visible' | 'hidden'
 
 type ToastEvent = Extract<SyncEvent, { type: 'toast' }>
 
 const HEARTBEAT_STALE_MS = 90_000
+// The hub sends a heartbeat every 30s. When a suspended mobile tab returns to
+// the foreground, the connection may have been silently killed (no FIN/RST
+// ever reaches the browser), so a single missed heartbeat interval is already
+// enough to distrust it on resume. The watchdog keeps the longer 90s
+// threshold for tabs that stayed visible throughout.
+const VISIBILITY_RESUME_STALE_MS = 45_000
+// A new EventSource that hasn't opened within this window is likely hung on a
+// dead pooled socket (common right after a suspended tab resumes) — abandon
+// it and retry on a fresh connection instead of waiting for the watchdog.
+const CONNECT_TIMEOUT_MS = 10_000
 const HEARTBEAT_WATCHDOG_INTERVAL_MS = 10_000
 const RECONNECT_BASE_DELAY_MS = 1_000
 const RECONNECT_MAX_DELAY_MS = 30_000
 const RECONNECT_JITTER_MS = 500
+// A hub that stays unreachable is usually offline for hours, not seconds.
+// Retrying every 30s forever costs a full TLS handshake per attempt through
+// the relay, so widen the ceiling once the fast retries have clearly failed.
+const RECONNECT_SLOW_AFTER_ATTEMPTS = 8
+const RECONNECT_SLOW_MAX_DELAY_MS = 300_000
 const INVALIDATION_BATCH_MS = 16
 
 function sortSessionSummaries(left: SessionSummary, right: SessionSummary): number {
+    if (Boolean(left.globalPinned) !== Boolean(right.globalPinned)) {
+        return left.globalPinned ? -1 : 1
+    }
+    if (Boolean(left.pinned) !== Boolean(right.pinned)) {
+        return left.pinned ? -1 : 1
+    }
     if (left.active !== right.active) {
         return left.active ? -1 : 1
     }
@@ -58,6 +119,69 @@ function sortSessionSummaries(left: SessionSummary, right: SessionSummary): numb
 
 function isSessionRecord(value: unknown): value is Session {
     return SessionSchema.safeParse(value).success
+}
+
+/**
+ * True when the only difference between two summaries is `activeAt`.
+ *
+ * The CLI keep-alive makes the hub re-broadcast a full session patch about
+ * every 10s per active session even when nothing changed, and `activeAt` is
+ * the sole field that moves. No component reads `activeAt` - the list shows
+ * `updatedAt` and sorts on active/pendingRequestsCount/updatedAt - so storing
+ * it costs a new object identity and a full list re-render for nothing.
+ */
+export function sameSessionSummaryMetadata(
+    current: SessionSummary['metadata'],
+    next: SessionSummary['metadata']
+): boolean {
+    if (current === next) {
+        return true
+    }
+    if (current == null || next == null) {
+        return current == null && next == null
+    }
+    return current.name === next.name
+        && current.path === next.path
+        && current.machineId === next.machineId
+        && current.summary?.text === next.summary?.text
+        && current.flavor === next.flavor
+        && current.agentSessionId === next.agentSessionId
+        && current.lifecycleState === next.lifecycleState
+        && current.worktree?.basePath === next.worktree?.basePath
+        && current.worktree?.branch === next.worktree?.branch
+        && current.worktree?.name === next.worktree?.name
+        && current.worktree?.worktreePath === next.worktree?.worktreePath
+        && current.worktree?.createdAt === next.worktree?.createdAt
+}
+
+export function isRenderIrrelevantPatch(current: SessionSummary, next: SessionSummary): boolean {
+    return current.active === next.active
+        && current.thinking === next.thinking
+        && current.updatedAt === next.updatedAt
+        && current.backgroundTaskCount === next.backgroundTaskCount
+        && current.model === next.model
+        && current.modelReasoningEffort === next.modelReasoningEffort
+        && current.effort === next.effort
+        && current.pendingRequestsCount === next.pendingRequestsCount
+        // Structured SSE patches (#897) can move these without touching the
+        // keep-alive fields above; omit them and a todos/metadata/agentState
+        // patch would be dropped as "activeAt-only" churn.
+        && current.todoProgress?.completed === next.todoProgress?.completed
+        && current.todoProgress?.total === next.todoProgress?.total
+        && (current.todoProgress == null) === (next.todoProgress == null)
+        && current.pendingRequestKinds.length === next.pendingRequestKinds.length
+        && current.pendingRequestKinds.every((kind, i) => kind === next.pendingRequestKinds[i])
+        && current.pendingRequests.length === next.pendingRequests.length
+        && current.pendingRequests.every((req, i) => {
+            const nextReq = next.pendingRequests[i]
+            return req.id === nextReq?.id
+                && req.kind === nextReq.kind
+                && req.tool === nextReq.tool
+        })
+        && sameSessionSummaryMetadata(current.metadata, next.metadata)
+        && current.metadataVersion === next.metadataVersion
+        && current.agentStateVersion === next.agentStateVersion
+        && current.todosUpdatedAt === next.todosUpdatedAt
 }
 
 function getSessionPatch(value: unknown): SessionPatch | null {
@@ -91,7 +215,8 @@ function buildEventsUrl(
     baseUrl: string,
     token: string,
     subscription: SSESubscription,
-    visibility: VisibilityState
+    visibility: VisibilityState,
+    lastEventId: string | null
 ): string {
     const params = new URLSearchParams()
     params.set('token', token)
@@ -104,6 +229,9 @@ function buildEventsUrl(
     }
     if (subscription.machineId) {
         params.set('machineId', subscription.machineId)
+    }
+    if (lastEventId) {
+        params.set('lastEventId', lastEventId)
     }
 
     const path = `/api/events?${params.toString()}`
@@ -121,7 +249,12 @@ export function useSSE(options: {
     subscription?: SSESubscription
     scope?: SSEScope
     onEvent: (event: SyncEvent) => void
-    onConnect?: () => void
+    /**
+     * Fires on the server's connection-changed handshake. `resumed` is true
+     * when the hub replayed everything missed since the last connection, so
+     * the caller can skip its full REST resync.
+     */
+    onConnect?: (info: { resumed: boolean }) => void
     onDisconnect?: (reason: string) => void
     onError?: (error: unknown) => void
     onToast?: (event: ToastEvent) => void
@@ -140,9 +273,19 @@ export function useSSE(options: {
         sessions: boolean
         machines: boolean
         sessionIds: Set<string>
-    }>({ sessions: false, machines: false, sessionIds: new Set() })
+        scratchlistSessionIds: Set<string>
+    }>({ sessions: false, machines: false, sessionIds: new Set(), scratchlistSessionIds: new Set() })
     const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
     const reconnectAttemptRef = useRef(0)
+    // Set when a reconnect was due while the tab was hidden. Hidden tabs do
+    // not schedule retries at all - they wait for the tab to come back.
+    const reconnectDeferredRef = useRef(false)
+    // Last SSE event id seen, keyed by the subscription it belongs to. Sent
+    // as ?lastEventId on reconnects of the SAME subscription so the hub can
+    // replay the gap instead of the client refetching everything. A cursor
+    // from a different subscription (e.g. after a session switch) would make
+    // the hub replay against the wrong filter set, hence the key check.
+    const lastEventCursorRef = useRef<{ key: string; id: string } | null>(null)
     const lastActivityAtRef = useRef(0)
     const [reconnectNonce, setReconnectNonce] = useState(0)
     const [subscriptionId, setSubscriptionId] = useState<string | null>(null)
@@ -189,20 +332,25 @@ export function useSSE(options: {
             pendingInvalidationsRef.current.sessions = false
             pendingInvalidationsRef.current.machines = false
             pendingInvalidationsRef.current.sessionIds.clear()
+            pendingInvalidationsRef.current.scratchlistSessionIds.clear()
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current)
                 reconnectTimerRef.current = null
             }
             reconnectAttemptRef.current = 0
+            reconnectDeferredRef.current = false
             setSubscriptionId(null)
             return
         }
 
         setSubscriptionId(null)
+        const resumeCursor = lastEventCursorRef.current?.key === subscriptionKey
+            ? lastEventCursorRef.current.id
+            : null
         const url = buildEventsUrl(options.baseUrl, options.token, {
             ...subscription,
             sessionId: subscription.sessionId ?? undefined
-        }, getVisibilityState())
+        }, getVisibilityState(), resumeCursor)
         const eventSource = new EventSource(url)
         let disconnectNotified = false
         let reconnectRequested = false
@@ -210,8 +358,27 @@ export function useSSE(options: {
         lastActivityAtRef.current = Date.now()
 
         const scheduleReconnect = () => {
+            // Nobody is looking at a hidden tab, and every retry through the
+            // relay costs a TLS handshake. Defer until the tab is visible
+            // again; onVisibilityChange reconnects immediately at that point.
+            if (getVisibilityState() === 'hidden') {
+                reconnectDeferredRef.current = true
+                if (reconnectTimerRef.current) {
+                    clearTimeout(reconnectTimerRef.current)
+                    reconnectTimerRef.current = null
+                }
+                return
+            }
+
             const attempt = reconnectAttemptRef.current
-            const exponentialDelay = Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * (2 ** attempt))
+            const maxDelay = attempt >= RECONNECT_SLOW_AFTER_ATTEMPTS
+                ? RECONNECT_SLOW_MAX_DELAY_MS
+                : RECONNECT_MAX_DELAY_MS
+            // First attempt reconnects immediately (jitter only) — backoff is
+            // for repeated failures, not for the initial recovery.
+            const exponentialDelay = attempt === 0
+                ? 0
+                : Math.min(maxDelay, RECONNECT_BASE_DELAY_MS * (2 ** (attempt - 1)))
             const jitter = Math.floor(Math.random() * (RECONNECT_JITTER_MS + 1))
             reconnectAttemptRef.current = attempt + 1
             if (reconnectTimerRef.current) {
@@ -231,8 +398,8 @@ export function useSSE(options: {
             onDisconnectRef.current?.(reason)
         }
 
-        const requestReconnect = (reason: string) => {
-            if (reconnectRequested) {
+        const requestReconnect = (reason: string, force = false) => {
+            if (reconnectRequested && !force) {
                 return
             }
             reconnectRequested = true
@@ -247,17 +414,24 @@ export function useSSE(options: {
 
         const flushInvalidations = () => {
             const pending = pendingInvalidationsRef.current
-            if (!pending.sessions && !pending.machines && pending.sessionIds.size === 0) {
+            if (
+                !pending.sessions
+                && !pending.machines
+                && pending.sessionIds.size === 0
+                && pending.scratchlistSessionIds.size === 0
+            ) {
                 return
             }
 
             const shouldInvalidateSessions = pending.sessions
             const shouldInvalidateMachines = pending.machines
             const sessionIds = Array.from(pending.sessionIds)
+            const scratchlistSessionIds = Array.from(pending.scratchlistSessionIds)
 
             pending.sessions = false
             pending.machines = false
             pending.sessionIds.clear()
+            pending.scratchlistSessionIds.clear()
 
             const tasks: Array<Promise<unknown>> = []
             if (shouldInvalidateSessions) {
@@ -265,6 +439,9 @@ export function useSSE(options: {
             }
             for (const sessionId of sessionIds) {
                 tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.session(sessionId) }))
+            }
+            for (const sessionId of scratchlistSessionIds) {
+                tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.scratchlist(sessionId) }))
             }
             if (shouldInvalidateMachines) {
                 tasks.push(queryClient.invalidateQueries({ queryKey: queryKeys.machines }))
@@ -293,6 +470,11 @@ export function useSSE(options: {
 
         const queueSessionDetailInvalidation = (sessionId: string) => {
             pendingInvalidationsRef.current.sessionIds.add(sessionId)
+            scheduleInvalidationFlush()
+        }
+
+        const queueScratchlistInvalidation = (sessionId: string) => {
+            pendingInvalidationsRef.current.scratchlistSessionIds.add(sessionId)
             scheduleInvalidationFlush()
         }
 
@@ -348,7 +530,11 @@ export function useSSE(options: {
                     active: patch.active ?? current.active,
                     thinking: patch.thinking ?? current.thinking,
                     activeAt: patch.activeAt ?? current.activeAt,
-                    updatedAt: patch.updatedAt ?? current.updatedAt,
+                    // Monotonic: stale versioned-patch replays can carry an
+                    // older updatedAt; never move the list clock backward.
+                    updatedAt: patch.updatedAt !== undefined
+                        ? Math.max(current.updatedAt, patch.updatedAt)
+                        : current.updatedAt,
                     backgroundTaskCount: Object.prototype.hasOwnProperty.call(patch, 'backgroundTaskCount')
                         ? patch.backgroundTaskCount ?? 0
                         : current.backgroundTaskCount,
@@ -361,7 +547,33 @@ export function useSSE(options: {
                     debateActive: Object.prototype.hasOwnProperty.call(patch, 'debateActive') ? (patch as { debateActive?: boolean }).debateActive ?? current.debateActive : current.debateActive
                 }
 
+                // Gate versioned fields against THIS summary's watermarks —
+                // not the detail query. Global SSE covers every session;
+                // requiring detail would force O(N) /sessions invalidation.
+                // teamState is a summary no-op (not rendered on the list).
+                if (patch.todos !== undefined && patch.todos.version >= current.todosUpdatedAt) {
+                    nextSummary.todoProgress = computeTodoProgress(patch.todos.value)
+                    nextSummary.todosUpdatedAt = patch.todos.version
+                }
+                if (patch.agentState !== undefined && patch.agentState.version >= current.agentStateVersion) {
+                    nextSummary.pendingRequestsCount = computePendingRequestsCount(patch.agentState.value)
+                    nextSummary.pendingRequestKinds = computePendingRequestKinds(patch.agentState.value)
+                    nextSummary.pendingRequests = computePendingRequests(patch.agentState.value, nextSummary.updatedAt)
+                    nextSummary.agentStateVersion = patch.agentState.version
+                }
+                if (patch.metadata !== undefined && patch.metadata.version >= current.metadataVersion) {
+                    nextSummary.metadata = toSessionSummaryMetadata(patch.metadata.value)
+                    nextSummary.metadataVersion = patch.metadata.version
+                }
+
                 patched = true
+                // The keep-alive patch repeats every field every ~10s per active
+                // session, and `activeAt` is the only one that actually moves.
+                // Nothing renders `activeAt`, so writing a new object for it just
+                // hands React Query a fresh reference and re-renders the list.
+                if (isRenderIrrelevantPatch(current, nextSummary)) {
+                    return previous
+                }
                 nextSessions[index] = nextSummary
                 nextSessions.sort(sortSessionSummaries)
                 return { ...previous, sessions: nextSessions }
@@ -376,12 +588,13 @@ export function useSSE(options: {
                     return previous
                 }
                 patched = true
+                const nextSession = applySessionDetailPatch(previous.session, patch)
+                if (!nextSession) {
+                    return previous
+                }
                 return {
                     ...previous,
-                    session: {
-                        ...previous.session,
-                        ...patch
-                    }
+                    session: nextSession
                 }
             })
             return patched
@@ -453,6 +666,13 @@ export function useSSE(options: {
                         setSubscriptionId(nextId)
                     }
                 }
+                // The connect callback fires here, not on EventSource open:
+                // only the server handshake knows whether the gap was replayed
+                // (`resume: 'ok'`) or the caller must resync. Older hubs omit
+                // the field, which safely reads as a full resync.
+                const resumed = data && typeof data === 'object'
+                    && (data as { resume?: unknown }).resume === 'ok'
+                onConnectRef.current?.({ resumed: Boolean(resumed) })
             }
 
             if (event.type === 'toast') {
@@ -469,6 +689,10 @@ export function useSSE(options: {
                 })
             }
 
+            if (shouldInvalidateSessionListForEvent(scope, event.type)) {
+                queueSessionListInvalidation()
+            }
+
             if (scope === 'global' && MESSAGE_STREAM_EVENT_TYPES.has(event.type)) {
                 if (event.type === 'message-received' && event.message.scheduledAt != null) {
                     queueSessionListInvalidation()
@@ -476,6 +700,8 @@ export function useSSE(options: {
                 if (
                     event.type === 'message-cancelled'
                     || event.type === 'messages-consumed'
+                    || event.type === 'messages-indeterminate'
+                    || event.type === 'messages-requeued'
                     || event.type === 'scheduled-matured'
                 ) {
                     queueSessionListInvalidation()
@@ -485,7 +711,13 @@ export function useSSE(options: {
                 // reconnect gaps or while another session is selected, only the global
                 // connection may be alive — still clear the queued bar / optimistic rows.
                 if (event.type === 'messages-consumed') {
-                    markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt)
+                    markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+                }
+                if (event.type === 'messages-indeterminate') {
+                    markMessagesIndeterminate(event.sessionId, event.localIds)
+                }
+                if (event.type === 'messages-requeued') {
+                    markMessagesRequeued(event.sessionId, event.localIds)
                 }
                 if (event.type === 'message-cancelled') {
                     removeOptimisticMessage(event.sessionId, event.messageId)
@@ -495,7 +727,15 @@ export function useSSE(options: {
             }
 
             if (event.type === 'messages-consumed') {
-                markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt)
+                markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+            }
+
+            if (event.type === 'messages-indeterminate') {
+                markMessagesIndeterminate(event.sessionId, event.localIds)
+            }
+
+            if (event.type === 'messages-requeued') {
+                markMessagesRequeued(event.sessionId, event.localIds)
             }
 
             if (event.type === 'message-cancelled') {
@@ -527,6 +767,13 @@ export function useSSE(options: {
                         }
                         if (!summaryPatched) {
                             queueSessionListInvalidation()
+                        }
+                        // tiann/hapi#893: piggybacked scratchlist token.
+                        // The patch itself does not carry the entries -
+                        // the timestamp is the change-detection signal,
+                        // which triggers the dedicated query refetch.
+                        if (Object.prototype.hasOwnProperty.call(patch, 'scratchlistUpdatedAt')) {
+                            queueScratchlistInvalidation(event.sessionId)
                         }
                     } else {
                         queueSessionDetailInvalidation(event.sessionId)
@@ -582,27 +829,59 @@ export function useSSE(options: {
             }
 
             handleSyncEvent(parsed as SyncEvent)
+
+            // Track the hub's replay cursor - after handling, so a throwing
+            // handler leaves the cursor behind the event and the hub replays
+            // it on the next reconnect (at-least-once). EventSource keeps
+            // lastEventId sticky across frames, so heartbeats (no id field)
+            // simply repeat the previous cursor.
+            if (message.lastEventId) {
+                lastEventCursorRef.current = { key: subscriptionKey, id: message.lastEventId }
+            }
         }
 
         eventSource.onmessage = handleMessage
+        // A connection attempt that never reaches OPEN within CONNECT_TIMEOUT_MS
+        // is likely hung on a dead pooled socket (common right after a
+        // suspended mobile tab resumes). Abandon it and retry on a fresh
+        // connection. force bypasses the one-shot reconnectRequested guard: a
+        // hung attempt is a new attempt cycle, not a duplicate of the previous
+        // reconnect request.
+        const connectDeadlineTimer = setTimeout(() => {
+            if (eventSourceRef.current !== eventSource) {
+                return
+            }
+            if (eventSource.readyState === EventSource.OPEN) {
+                return
+            }
+            requestReconnect('connect-timeout', true)
+        }, CONNECT_TIMEOUT_MS)
+
         eventSource.onopen = () => {
+            clearTimeout(connectDeadlineTimer)
             if (reconnectTimerRef.current) {
                 clearTimeout(reconnectTimerRef.current)
                 reconnectTimerRef.current = null
             }
             reconnectAttemptRef.current = 0
+            reconnectDeferredRef.current = false
             disconnectNotified = false
             lastActivityAtRef.current = Date.now()
-            onConnectRef.current?.()
+            // onConnect intentionally does NOT fire here: it fires on the
+            // connection-changed handshake, which carries the resume verdict.
         }
         eventSource.onerror = (error) => {
             onErrorRef.current?.(error)
-            // Always trigger a full reconnect on error.
-            // Previously we only called notifyDisconnect('error') for non-CLOSED
-            // states and relied on the browser's built-in EventSource retry,
-            // but that can silently fail (e.g. after hub restart, stale params)
-            // leaving the banner stuck until the 90s heartbeat watchdog.
-            requestReconnect(eventSource.readyState === EventSource.CLOSED ? 'closed' : 'error')
+            if (eventSource.readyState === EventSource.CLOSED) {
+                requestReconnect('closed')
+                return
+            }
+            // CONNECTING means the browser would keep retrying natively - at
+            // its own few-second interval, with the original (stale) URL, and
+            // regardless of tab visibility. Take the source down and route the
+            // retry through our scheduler so hidden-tab deferral and the slow
+            // backoff actually govern every reconnect path.
+            requestReconnect('transport-error')
         }
 
         const watchdogTimer = setInterval(() => {
@@ -620,12 +899,22 @@ export function useSSE(options: {
 
         // When the tab becomes visible again, check immediately whether the
         // SSE connection went stale while hidden (the watchdog skips checks
-        // for hidden tabs).  This avoids the user having to wait up to
-        // HEARTBEAT_WATCHDOG_INTERVAL_MS after switching back.
+        // for hidden tabs). Uses the tighter VISIBILITY_RESUME_STALE_MS
+        // threshold: a device suspend can kill the connection without the
+        // browser ever noticing, so a missed heartbeat interval at resume
+        // already warrants a proactive reconnect.
         const onVisibilityChange = () => {
             if (getVisibilityState() !== 'visible') return
+            // A retry fell due while the tab was hidden and was deliberately
+            // not scheduled. Run it now, before the identity guard below:
+            // requestReconnect has already cleared eventSourceRef.
+            if (reconnectDeferredRef.current) {
+                reconnectDeferredRef.current = false
+                setReconnectNonce((value) => value + 1)
+                return
+            }
             if (eventSourceRef.current !== eventSource) return
-            if (Date.now() - lastActivityAtRef.current >= HEARTBEAT_STALE_MS) {
+            if (Date.now() - lastActivityAtRef.current >= VISIBILITY_RESUME_STALE_MS) {
                 requestReconnect('visibility-recovery')
             }
         }
@@ -633,6 +922,7 @@ export function useSSE(options: {
 
         return () => {
             clearInterval(watchdogTimer)
+            clearTimeout(connectDeadlineTimer)
             document.removeEventListener('visibilitychange', onVisibilityChange)
             if (invalidationTimerRef.current) {
                 clearTimeout(invalidationTimerRef.current)

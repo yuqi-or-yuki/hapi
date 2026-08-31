@@ -3,24 +3,28 @@
  */
 
 import { io, type Socket } from 'socket.io-client'
-import { readdir, realpath, stat } from 'node:fs/promises'
-import { realpathSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
+import { readdir, stat } from 'node:fs/promises'
+import { join } from 'node:path'
 import { logger } from '@/ui/logger'
 import { configuration } from '@/configuration'
 import type { ClientToServerEvents, ServerToClientEvents, Update, UpdateMachineBody } from '@hapi/protocol'
 import {
     ArchiveCodexSessionRpcRequestSchema,
     ListCodexSessionsRpcRequestSchema,
+    ListPiSessionsRpcRequestSchema,
     type ArchiveCodexSessionRpcResponse,
+    type AgentAvailabilityResponse,
     type ListCodexSessionsRpcResponse,
+    type ListPiSessionsRpcResponse,
     type MachineDirectoryEntry,
     type MachineListDirectoryResponse,
     type PathExistsResponse
 } from '@hapi/protocol/apiTypes'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
+import { RUNNER_CAPABILITIES } from '@hapi/protocol'
 import type { RunnerState, Machine, MachineMetadata } from './types'
 import { RunnerStateSchema, MachineMetadataSchema } from './types'
+import { getInstalledCliMtimeMs } from '@/runner/controlClient'
 import { backoff } from '@/utils/time'
 import { getInvokedCwd } from '@/utils/invokedCwd'
 import { RpcHandlerManager } from './rpc/RpcHandlerManager'
@@ -35,18 +39,28 @@ import {
     type ListGrokModelsForCwdRequest,
     type ListGrokModelsForCwdResponse
 } from '../modules/common/grokModels'
+import {
+    listCopilotModelsForCwd,
+    type ListCopilotModelsForCwdRequest,
+    type ListCopilotModelsForCwdResponse
+} from '../modules/common/copilotModels'
 import type { SpawnSessionOptions, SpawnSessionResult } from '../modules/common/rpcTypes'
 import { applyVersionedAck } from './versionedUpdate'
 import { archiveLocalCodexSession, listLocalCodexSessionSummaries, listLocalCodexSessionsWithMessagesByIds } from '../modules/common/codexSessions'
+import { listLocalPiSessionSummaries, listLocalPiSessionsWithMessagesByIds } from '../modules/common/piSessions'
 import { buildSocketIoExtraHeaderOptions } from './hubExtraHeaders'
 import { collectMachineHealth } from '@/utils/machineHealth'
 import { inspectCursorChatStore } from '@/cursor/cursorChatStoreStatus'
 import { homedir } from 'node:os'
 import type { CursorChatStoreStatus } from '@hapi/protocol/apiTypes'
+import { MachinePathPolicy } from './machinePathPolicy'
+import { getAgentAvailabilityResponse } from '@/agent/agentAvailability'
+
+export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 
 type MachineRpcHandlers = {
     spawnSession: (options: SpawnSessionOptions) => Promise<SpawnSessionResult>
-    stopSession: (sessionId: string) => boolean
+    stopSession: (sessionId: string) => Promise<'stopped' | 'already_gone' | 'still_alive'>
     requestShutdown: () => void
 }
 
@@ -56,36 +70,13 @@ interface PathExistsRequest {
 
 interface ListMachineDirectoryRequest {
     path: string
+    includeHidden?: boolean
 }
 
 interface CursorChatStoreStatusRequest {
     workspacePath: string
     cursorSessionId: string
     homeDir?: string
-}
-
-export function normalizeWindowsDriveRoot(path: string): string {
-    return /^[A-Za-z]:$/.test(path) ? `${path}\\` : path
-}
-
-function canonicalRealpathSync(path: string): string {
-    return normalizeWindowsDriveRoot(realpathSync.native(path))
-}
-
-function normalizeWorkspaceRoots(paths?: string[]): string[] | undefined {
-    if (!paths?.length) {
-        return undefined
-    }
-
-    const normalized = Array.from(new Set(paths.map((path) => {
-        try {
-            return canonicalRealpathSync(path)
-        } catch {
-            return normalizeWindowsDriveRoot(resolvePath(path))
-        }
-    })))
-
-    return normalized.length > 0 ? normalized : undefined
 }
 
 function workspaceRootsEqual(left?: string[], right?: string[]): boolean {
@@ -108,17 +99,17 @@ export class ApiMachineClient {
     private keepAliveStartTimeout: ReturnType<typeof setTimeout> | null = null
     private rpcHandlerManager: RpcHandlerManager
 
-    private readonly normalizedWorkspaceRoots: string[] | undefined
+    private readonly pathPolicy: MachinePathPolicy
 
     constructor(
         private readonly token: string,
         private readonly machine: Machine,
         private readonly workspaceRoots?: string[]
     ) {
-        // Realpath roots once so all subsequent comparisons are against
-        // canonical, symlink-resolved locations. Falls back to lexical
-        // resolution if realpath fails so we still get protection.
-        this.normalizedWorkspaceRoots = normalizeWorkspaceRoots(workspaceRoots)
+        this.pathPolicy = new MachinePathPolicy({
+            workspaceRoots,
+            homeDirectory: this.machine.metadata?.homeDir ?? homedir(),
+        })
 
         this.rpcHandlerManager = new RpcHandlerManager({
             scopePrefix: this.machine.id,
@@ -127,23 +118,38 @@ export class ApiMachineClient {
 
         registerCommonHandlers(this.rpcHandlerManager, getInvokedCwd())
 
+        this.rpcHandlerManager.registerHandler<unknown, AgentAvailabilityResponse>(
+            RPC_METHODS.AgentAvailability,
+            async () => getAgentAvailabilityResponse()
+        )
+
         this.rpcHandlerManager.registerHandler<PathExistsRequest, PathExistsResponse>(RPC_METHODS.PathExists, async (params) => {
             const rawPaths = Array.isArray(params?.paths) ? params.paths : []
             const uniquePaths = Array.from(new Set(rawPaths.filter((path): path is string => typeof path === 'string')))
             const exists: Record<string, boolean> = {}
+            const outsideWorkspaceRoots: string[] = []
 
             await Promise.all(uniquePaths.map(async (path) => {
                 const trimmed = path.trim()
                 if (!trimmed) return
+                const resolved = await this.pathPolicy.resolveForCheck(trimmed)
+                if (!this.pathPolicy.isWithinSpawnRoots(resolved)) {
+                    exists[trimmed] = false
+                    outsideWorkspaceRoots.push(trimmed)
+                    return
+                }
                 try {
-                    const stats = await stat(trimmed)
+                    const stats = await stat(resolved)
                     exists[trimmed] = stats.isDirectory()
                 } catch {
                     exists[trimmed] = false
                 }
             }))
 
-            return { exists }
+            return {
+                exists,
+                ...(outsideWorkspaceRoots.length > 0 ? { outsideWorkspaceRoots } : {}),
+            }
         })
 
         this.rpcHandlerManager.registerHandler<CursorChatStoreStatusRequest, CursorChatStoreStatus>(
@@ -159,18 +165,16 @@ export class ApiMachineClient {
         )
 
         this.rpcHandlerManager.registerHandler<ListMachineDirectoryRequest, MachineListDirectoryResponse>(RPC_METHODS.ListMachineDirectory, async (params) => {
-            if (!this.normalizedWorkspaceRoots?.length) {
-                return { success: false, error: 'Workspace browsing is not enabled for this machine' }
-            }
-
             const rawPath = typeof params?.path === 'string' ? params.path.trim() : ''
             if (!rawPath) {
                 return { success: false, error: 'Path is required' }
             }
 
-            const targetPath = await this.resolveForWorkspaceCheck(rawPath)
-            if (!this.isWithinWorkspaceRoots(targetPath)) {
-                return { success: false, error: 'Path is outside workspace roots' }
+            const includeHidden = params?.includeHidden === true
+
+            const targetPath = await this.pathPolicy.resolveForCheck(rawPath)
+            if (!this.pathPolicy.isWithinBrowseRoots(targetPath)) {
+                return { success: false, error: 'Path is outside browse roots' }
             }
 
             try {
@@ -183,7 +187,7 @@ export class ApiMachineClient {
                 const entries: MachineDirectoryEntry[] = []
 
                 await Promise.all(dirEntries.map(async (entry) => {
-                    if (entry.name.startsWith('.')) return
+                    if (!includeHidden && entry.name.startsWith('.')) return
 
                     const fullPath = join(targetPath, entry.name)
                     let type: 'file' | 'directory' | 'other' = 'other'
@@ -243,8 +247,8 @@ export class ApiMachineClient {
                     return { success: false, error: 'cwd is required' }
                 }
 
-                const resolvedCwd = await this.resolveForWorkspaceCheck(rawCwd)
-                if (!this.isWithinWorkspaceRoots(resolvedCwd)) {
+                const resolvedCwd = await this.pathPolicy.resolveForCheck(rawCwd)
+                if (!this.pathPolicy.isWithinSpawnRoots(resolvedCwd)) {
                     return { success: false, error: 'Path is outside workspace roots' }
                 }
 
@@ -258,12 +262,27 @@ export class ApiMachineClient {
                 const rawCwd = typeof params?.cwd === 'string' ? params.cwd.trim() : ''
                 if (!rawCwd) return { success: false, error: 'cwd is required' }
 
-                const resolvedCwd = await this.resolveForWorkspaceCheck(rawCwd)
-                if (!this.isWithinWorkspaceRoots(resolvedCwd)) {
+                const resolvedCwd = await this.pathPolicy.resolveForCheck(rawCwd)
+                if (!this.pathPolicy.isWithinSpawnRoots(resolvedCwd)) {
                     return { success: false, error: 'Path is outside workspace roots' }
                 }
 
                 return await listGrokModelsForCwd(resolvedCwd)
+            }
+        )
+
+        this.rpcHandlerManager.registerHandler<ListCopilotModelsForCwdRequest, ListCopilotModelsForCwdResponse>(
+            RPC_METHODS.ListCopilotModelsForCwd,
+            async (params) => {
+                const rawCwd = typeof params?.cwd === 'string' ? params.cwd.trim() : ''
+                if (!rawCwd) return { success: false, error: 'cwd is required' }
+
+                const resolvedCwd = await this.pathPolicy.resolveForCheck(rawCwd)
+                if (!this.pathPolicy.isWithinSpawnRoots(resolvedCwd)) {
+                    return { success: false, error: 'Path is outside workspace roots' }
+                }
+
+                return await listCopilotModelsForCwd(resolvedCwd)
             }
         )
 
@@ -274,8 +293,8 @@ export class ApiMachineClient {
                 if (!parsed.success) return { success: false, error: 'Invalid Codex sessions request' }
                 const rawCwd = typeof parsed.data.cwd === 'string' ? parsed.data.cwd.trim() : ''
                 if (rawCwd) {
-                    const resolvedCwd = await this.resolveForWorkspaceCheck(rawCwd)
-                    if (!this.isWithinWorkspaceRoots(resolvedCwd)) {
+                    const resolvedCwd = await this.pathPolicy.resolveForCheck(rawCwd)
+                    if (!this.pathPolicy.isWithinSpawnRoots(resolvedCwd)) {
                         return { success: false, error: 'Path is outside workspace roots' }
                     }
                 }
@@ -287,7 +306,7 @@ export class ApiMachineClient {
                     : listLocalCodexSessionSummaries()
                 const sessions = []
                 for (const session of allSessions) {
-                    if (await this.isCodexSessionWithinWorkspaceRoots(session)) {
+                    if (await this.isLocalSessionWithinWorkspaceRoots(session)) {
                         sessions.push(session)
                     }
                 }
@@ -302,70 +321,59 @@ export class ApiMachineClient {
                 if (!parsed.success) return { success: false, error: 'Invalid Codex archive request' }
                 const sessionId = parsed.data.sessionId.trim()
                 return await archiveLocalCodexSession(sessionId, {
-                    canArchive: (session) => this.isCodexSessionWithinWorkspaceRoots(session)
+                    canArchive: (session) => this.isLocalSessionWithinWorkspaceRoots(session)
                 })
+            }
+        )
+
+        this.rpcHandlerManager.registerHandler<unknown, ListPiSessionsRpcResponse>(
+            RPC_METHODS.ListPiSessions,
+            async (params) => {
+                const parsed = ListPiSessionsRpcRequestSchema.safeParse(params)
+                if (!parsed.success) return { success: false, error: 'Invalid Pi sessions request' }
+                const rawCwd = typeof parsed.data.cwd === 'string' ? parsed.data.cwd.trim() : ''
+                if (rawCwd) {
+                    const resolvedCwd = await this.pathPolicy.resolveForCheck(rawCwd)
+                    if (!this.pathPolicy.isWithinSpawnRoots(resolvedCwd)) {
+                        return { success: false, error: 'Path is outside workspace roots' }
+                    }
+                }
+                const requestedIds = parsed.data.sessionIds ? new Set(parsed.data.sessionIds) : null
+                const allSessions = requestedIds
+                    ? listLocalPiSessionsWithMessagesByIds(requestedIds)
+                    : listLocalPiSessionSummaries()
+                const sessions = []
+                for (const session of allSessions) {
+                    if (await this.isLocalSessionWithinWorkspaceRoots(session)) sessions.push(session)
+                }
+                return { success: true, sessions }
             }
         )
     }
 
-    private async isCodexSessionWithinWorkspaceRoots(session: { cwd?: string | null }): Promise<boolean> {
-        if (!this.normalizedWorkspaceRoots?.length) return true
+    private async isLocalSessionWithinWorkspaceRoots(session: { cwd?: string | null }): Promise<boolean> {
+        if (!this.pathPolicy.hasWorkspaceRoots()) return true
         const cwd = session.cwd?.trim()
         if (!cwd) return false
-        const resolvedCwd = await this.resolveForWorkspaceCheck(cwd)
-        return this.isWithinWorkspaceRoots(resolvedCwd)
-    }
-
-    private isWithinWorkspaceRoots(absolutePath: string): boolean {
-        if (!this.normalizedWorkspaceRoots?.length) return true
-        return this.normalizedWorkspaceRoots.some((workspaceRoot) => {
-            const rel = relative(workspaceRoot, absolutePath)
-            return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
-        })
-    }
-
-    /**
-     * Canonicalize a path for workspace-root containment checks. Resolves
-     * symlinks via realpath so a symlink such as `/safe/out -> /etc` cannot
-     * be used to escape the configured root with a lexical-only check.
-     *
-     * If the path doesn't exist (e.g. a session is being spawned in a
-     * directory we'll create), walks up to the nearest existing ancestor
-     * and realpaths *that*, joining the missing tail back on. This way the
-     * check still runs against the real on-disk location once any
-     * intermediate symlink in the parent chain has been resolved.
-     */
-    private async resolveForWorkspaceCheck(path: string): Promise<string> {
-        const absolute = resolvePath(path)
-        try {
-            return normalizeWindowsDriveRoot(await realpath(absolute))
-        } catch {
-            const missing: string[] = []
-            let cursor = absolute
-            while (cursor !== dirname(cursor)) {
-                missing.unshift(basename(cursor))
-                cursor = dirname(cursor)
-                try {
-                    return join(normalizeWindowsDriveRoot(await realpath(cursor)), ...missing)
-                } catch {
-                    // keep walking to the nearest existing parent
-                }
-            }
-            return normalizeWindowsDriveRoot(absolute)
-        }
+        const resolvedCwd = await this.pathPolicy.resolveForCheck(cwd)
+        return this.pathPolicy.isWithinSpawnRoots(resolvedCwd)
     }
 
     setRPCHandlers({ spawnSession, stopSession, requestShutdown }: MachineRpcHandlers): void {
         this.rpcHandlerManager.registerHandler(RPC_METHODS.SpawnHappySession, async (params: any) => {
-            const { directory, sessionId, existingSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, token, sessionType, worktreeName } = params || {}
+            const { directory, sessionId, existingSessionId, resumeSessionId, machineId, approvedNewDirectoryCreation, agent, model, effort, modelReasoningEffort, yolo, permissionMode, serviceTier, collaborationMode, copilotAgentMode, token, sessionType, worktreeName, startingMode, forkSession } = params || {}
 
             if (!directory) {
                 throw new Error('Directory is required')
             }
 
-            const resolvedDirectory = await this.resolveForWorkspaceCheck(directory)
-            if (!this.isWithinWorkspaceRoots(resolvedDirectory)) {
-                return { type: 'error', errorMessage: 'Directory is outside this machine\'s workspace roots' }
+            const resolvedDirectory = await this.pathPolicy.resolveForCheck(directory)
+            if (!this.pathPolicy.isWithinSpawnRoots(resolvedDirectory)) {
+                return {
+                    type: 'error',
+                    errorMessage: 'Directory is outside this machine\'s workspace roots',
+                    code: 'outside_workspace_roots',
+                }
             }
 
             const result = await spawnSession({
@@ -382,9 +390,14 @@ export class ApiMachineClient {
                 yolo,
                 permissionMode,
                 serviceTier,
+                collaborationMode,
+                copilotAgentMode,
                 token,
                 sessionType,
-                worktreeName
+                worktreeName,
+                startingMode,
+                forkSession: forkSession === true,
+                validateDirectory: async (path) => await this.pathPolicy.allowsSpawn(path),
             })
 
             switch (result.type) {
@@ -393,22 +406,23 @@ export class ApiMachineClient {
                 case 'requestToApproveDirectoryCreation':
                     return { type: 'requestToApproveDirectoryCreation', directory: result.directory }
                 case 'error':
-                    return { type: 'error', errorMessage: result.errorMessage }
+                    return {
+                        type: 'error',
+                        errorMessage: result.errorMessage,
+                        code: result.code,
+                        agent: result.agent,
+                    }
             }
         })
 
-        this.rpcHandlerManager.registerHandler(RPC_METHODS.StopSession, (params: any) => {
+        this.rpcHandlerManager.registerHandler(RPC_METHODS.StopSession, async (params: any) => {
             const { sessionId } = params || {}
             if (!sessionId) {
                 throw new Error('Session ID is required')
             }
 
-            const success = stopSession(sessionId)
-            if (!success) {
-                throw new Error('Session not found or failed to stop')
-            }
-
-            return { message: 'Session stopped' }
+            const status = await stopSession(sessionId)
+            return { status }
         })
 
         this.rpcHandlerManager.registerHandler(RPC_METHODS.StopRunner, () => {
@@ -506,7 +520,8 @@ export class ApiMachineClient {
                 status: 'running',
                 pid: process.pid,
                 httpPort: this.machine.runnerState?.httpPort,
-                startedAt: Date.now()
+                startedAt: Date.now(),
+                capabilities: { ...RUNNER_CAPABILITIES }
             })).catch((error) => {
                 logger.debug('[API MACHINE] Failed to update runner state on connect', error)
             })
@@ -604,6 +619,19 @@ export class ApiMachineClient {
                 time: Date.now(),
                 health: collectMachineHealth()
             })
+            const installedCliMtimeMs = getInstalledCliMtimeMs()
+            if (
+                typeof installedCliMtimeMs === 'number'
+                && this.machine.metadata
+                && this.machine.metadata.installedCliMtimeMs !== installedCliMtimeMs
+            ) {
+                void this.updateMachineMetadata((current) => ({
+                    ...(current ?? this.machine.metadata!),
+                    installedCliMtimeMs,
+                })).catch((error) => {
+                    logger.debug('[API MACHINE] Failed to refresh installedCliMtimeMs', error)
+                })
+            }
         }
         // Prime CPU sampling so the first heartbeat already includes CPU %.
         collectMachineHealth()

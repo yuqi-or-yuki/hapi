@@ -10,11 +10,14 @@ export type Capability = typeof Capabilities[keyof typeof Capabilities]
 
 // --- Per-flavor capability sets ---
 const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
+    agy: new Set([Capabilities.ModelChange]),
     claude: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     gemini: new Set([Capabilities.ModelChange]),
     kimi: new Set([Capabilities.ModelChange]),
+    copilot: new Set([Capabilities.ModelChange]),
     grok: new Set([Capabilities.ModelChange, Capabilities.Effort]),
     codex: new Set([Capabilities.ModelChange]),
+    dsh: new Set(),
     cursor: new Set([Capabilities.ModelChange]),
     opencode: new Set([Capabilities.ModelChange]),
     pi: new Set([Capabilities.ModelChange, Capabilities.Effort]),
@@ -25,11 +28,14 @@ const FLAVOR_CAPS: Record<AgentFlavor, ReadonlySet<Capability>> = {
 
 // --- Flavor display names ---
 const FLAVOR_LABELS: Record<AgentFlavor, string> = {
+    agy: 'Antigravity',
     claude: 'Claude',
     gemini: 'Gemini',
     kimi: 'Kimi',
+    copilot: 'Copilot',
     grok: 'Grok Build',
     codex: 'Codex',
+    dsh: 'DeepSeek Harness',
     cursor: 'Cursor',
     opencode: 'OpenCode',
     pi: 'Pi',
@@ -65,5 +71,6 @@ export function isCodexFamilyFlavor(flavor: string | null | undefined): boolean 
         || flavor === 'gemini'
         || flavor === 'grok'
         || flavor === 'kimi'
+        || flavor === 'copilot'
         || flavor === 'opencode'
 }

@@ -1,5 +1,44 @@
 import { describe, expect, it } from 'vitest'
-import { getEventPresentation, formatMessageTimestamp, formatResetTime } from './presentation'
+import { getEventPresentation, formatMessageTimestamp, formatOutlineTimestamp, formatResetTime } from './presentation'
+
+describe('formatOutlineTimestamp', () => {
+    it('shows only the time for same-day messages', () => {
+        const date = new Date(2026, 6, 21, 9, 55)
+        const now = new Date(2026, 6, 21, 12, 0)
+
+        expect(formatOutlineTimestamp(date, 'en', now)).toBe(
+            date.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+        )
+    })
+
+    it('zero-pads Chinese dates within the current year', () => {
+        const date = new Date(2026, 8, 9, 10, 31)
+        const now = new Date(2026, 6, 21, 12, 0)
+
+        expect(formatOutlineTimestamp(date, 'zh-CN', now)).toBe(
+            `09月09日 ${date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })}`
+        )
+    })
+
+    it('uses a zero-padded numeric date in English', () => {
+        const date = new Date(2026, 9, 1, 10, 31)
+        const now = new Date(2026, 6, 21, 12, 0)
+
+        expect(formatOutlineTimestamp(date, 'en', now)).toBe(
+            `10/01 ${date.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })}`
+        )
+    })
+
+    it('includes the year for older years in both locales', () => {
+        const date = new Date(2025, 8, 9, 10, 31)
+        const now = new Date(2026, 6, 21, 12, 0)
+        const zhTime = date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+        const enTime = date.toLocaleTimeString('en', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+
+        expect(formatOutlineTimestamp(date, 'zh-CN', now)).toBe(`2025年09月09日 ${zhTime}`)
+        expect(formatOutlineTimestamp(date, 'en', now)).toBe(`2025/09/09 ${enTime}`)
+    })
+})
 
 describe('getEventPresentation — agent errors', () => {
     it('formats error events with warning icon and message text', () => {
@@ -10,6 +49,61 @@ describe('getEventPresentation — agent errors', () => {
 
         expect(result.icon).toBe('⚠️')
         expect(result.text).toBe('Cursor Agent failed: authentication required')
+    })
+})
+
+describe('getEventPresentation — api-error', () => {
+    it('appends the reason to the retry wording rather than replacing it', () => {
+        // An agent that retries without announcing a ceiling. The reason is
+        // what tells a stuck-looking session apart from a rate-limited one,
+        // but "Retrying" is what says the agent has not given up — so both
+        // survive, and no producer has to encode the second one itself.
+        const result = getEventPresentation({
+            type: 'api-error',
+            retryAttempt: 2,
+            maxRetries: 0,
+            error: { message: 'Rate limit exceeded: free-models-per-day. (attempt 2)' }
+        })
+
+        expect(result).toEqual({
+            icon: '⏳',
+            text: 'API error: Retrying... Rate limit exceeded: free-models-per-day. (attempt 2)'
+        })
+    })
+
+    it('reads a reason attached as a bare string', () => {
+        const result = getEventPresentation({
+            type: 'api-error',
+            retryAttempt: 1,
+            maxRetries: 0,
+            error: 'Overloaded.'
+        })
+
+        expect(result.text).toBe('API error: Retrying... Overloaded.')
+    })
+
+    // Claude sessions reach this same branch set and must render exactly as
+    // they did before a reason was ever displayed here.
+    it('keeps the retry wording for an api error carrying no reason', () => {
+        expect(getEventPresentation({ type: 'api-error', retryAttempt: 1, maxRetries: 0, error: undefined }))
+            .toEqual({ icon: '⏳', text: 'API error: Retrying...' })
+    })
+
+    it('keeps the retry wording when the reason is empty or unreadable', () => {
+        expect(getEventPresentation({ type: 'api-error', retryAttempt: 1, maxRetries: 0, error: { message: '   ' } }).text)
+            .toBe('API error: Retrying...')
+        expect(getEventPresentation({ type: 'api-error', retryAttempt: 1, maxRetries: 0, error: { code: 429 } }).text)
+            .toBe('API error: Retrying...')
+    })
+
+    it('keeps the counted, exhausted and bare renderings untouched', () => {
+        const error = { message: 'Rate limit exceeded.' }
+        expect(getEventPresentation({ type: 'api-error', retryAttempt: 2, maxRetries: 10, error }))
+            .toEqual({ icon: '⏳', text: 'API error: Retrying (2/10)' })
+        expect(getEventPresentation({ type: 'api-error', retryAttempt: 10, maxRetries: 10, error }))
+            .toEqual({ icon: '⚠️', text: 'API error: Max retries reached' })
+        expect(getEventPresentation({ type: 'api-error', retryAttempt: 0, maxRetries: 0, error }))
+            .toEqual({ icon: '⚠️', text: 'API error' })
     })
 })
 
@@ -108,6 +202,18 @@ describe('getEventPresentation — token-count', () => {
     })
 })
 
+describe('getEventPresentation — agent error', () => {
+    it('formats agent error events with a warning icon', () => {
+        const result = getEventPresentation({
+            type: 'error',
+            message: 'Error: T: [canceled] http/2 stream closed with error code CANCEL (0x8)'
+        })
+
+        expect(result.icon).toBe('⚠️')
+        expect(result.text).toContain('http/2 stream closed')
+    })
+})
+
 describe('getEventPresentation — thread goals', () => {
     it('formats goal status updates', () => {
         const result = getEventPresentation({
@@ -127,6 +233,27 @@ describe('getEventPresentation — thread goals', () => {
         expect(result.text).toBe('Goal limited by budget · 4k / 5k')
     })
 
+    it.each([
+        ['blocked', 'Goal blocked'],
+        ['usageLimited', 'Goal limited by usage']
+    ] as const)('formats %s goal status', (status, expected) => {
+        const result = getEventPresentation({
+            type: 'thread-goal-updated',
+            goal: {
+                threadId: 'thread-1',
+                objective: 'ship goal support',
+                status,
+                tokenBudget: null,
+                tokensUsed: 0,
+                timeUsedSeconds: 0,
+                createdAt: 1,
+                updatedAt: 2
+            }
+        })
+
+        expect(result.text).toBe(expected)
+    })
+
     it('formats goal clear events', () => {
         const result = getEventPresentation({ type: 'thread-goal-cleared', threadId: 'thread-1' })
 
@@ -143,6 +270,20 @@ describe('getEventPresentation — recap (away_summary)', () => {
 
         expect(result.icon).toBe('💭')
         expect(result.text).toBe('recap: Building the login flow, next: wire up the submit handler.')
+    })
+})
+
+describe('getEventPresentation — compact-summary', () => {
+    it('keeps the label short (the chat renders the full summary as a block)', () => {
+        const result = getEventPresentation({
+            type: 'compact-summary',
+            summary: '## Goal\nLong summary content',
+            tokensBefore: 1000,
+            estimatedTokensAfter: 120
+        })
+
+        expect(result.icon).toBe('📦')
+        expect(result.text).toBe('Context compacted')
     })
 })
 
@@ -167,8 +308,13 @@ describe('formatResetTime', () => {
 describe('formatMessageTimestamp', () => {
     it('formats today without requiring a date prefix', () => {
         const now = new Date(2026, 4, 22, 14, 30)
-        const result = formatMessageTimestamp(new Date(2026, 4, 22, 9, 5), now)
-        expect(result).toBeTruthy()
+        const date = new Date(2026, 4, 22, 9, 5)
+        const result = formatMessageTimestamp(date, now)
+        expect(result).toBe(date.toLocaleTimeString(undefined, {
+            hour: '2-digit',
+            minute: '2-digit',
+            hourCycle: 'h23'
+        }))
         expect(result).not.toContain('2026')
     })
 

@@ -3,7 +3,7 @@ import { storageKey as STORAGE_KEY } from '@tanstack/router-core'
 
 import { installScrollRestorationGuard } from './scrollStorageGuard'
 
-const RETAIN_COUNT = 50
+const RETAIN_COUNT = 20
 
 class QuotaExceededError extends Error {
     constructor() {
@@ -41,8 +41,15 @@ describe('installScrollRestorationGuard', () => {
         uninstall()
     })
 
-    it('passes through writes to keys other than the scroll restoration key unchanged on quota error', () => {
+    it('frees the scroll cache and retries once when another key hits quota', () => {
         storage._setItem.mockImplementationOnce(() => { throw new QuotaExceededError() })
+        expect(() => storage.setItem('other-key', 'value')).not.toThrow()
+        expect(storage.removeItem).toHaveBeenCalledWith(STORAGE_KEY)
+        expect(storage._store['other-key']).toBe('value')
+    })
+
+    it('rethrows for other keys when freeing the scroll cache does not help', () => {
+        storage._setItem.mockImplementation(() => { throw new QuotaExceededError() })
         expect(() => storage.setItem('other-key', 'value')).toThrow(QuotaExceededError)
     })
 
@@ -129,8 +136,8 @@ describe('installScrollRestorationGuard', () => {
         const storedKeys = Object.keys(stored)
         expect(storedKeys.length).toBe(RETAIN_COUNT)
         expect(storedKeys).toContain('/route/99') // newest kept
-        expect(storedKeys).toContain('/route/50') // boundary kept
-        expect(storedKeys).not.toContain('/route/49') // boundary dropped
+        expect(storedKeys).toContain('/route/80') // boundary kept
+        expect(storedKeys).not.toContain('/route/79') // boundary dropped
         expect(storedKeys).not.toContain('/route/0') // oldest dropped
     })
 

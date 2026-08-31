@@ -57,7 +57,12 @@ export const claudeCommand: CommandDefinition = {
                     throw new Error('Missing --model value')
                 }
                 options.model = model
-                unknownArgs.push('--model', model)
+            } else if (arg.startsWith('--model=')) {
+                const model = arg.slice('--model='.length)
+                if (!model) {
+                    throw new Error('Missing --model value')
+                }
+                options.model = model
             } else if (arg === '--effort') {
                 const effort = args[++i]
                 if (!effort) {
@@ -67,6 +72,12 @@ export const claudeCommand: CommandDefinition = {
                 unknownArgs.push('--effort', effort)
             } else if (arg === '--started-by') {
                 options.startedBy = args[++i] as 'runner' | 'terminal'
+            } else if (arg === '--existing-session-id') {
+                const sessionId = args[++i]
+                if (!sessionId) {
+                    throw new Error('Missing --existing-session-id value')
+                }
+                options.existingSessionId = sessionId
             } else {
                 unknownArgs.push(arg)
                 if (i + 1 < args.length && !args[i + 1].startsWith('-')) {
@@ -89,6 +100,7 @@ ${chalk.bold('Usage:')}
   hapi codex             Start Codex mode
   hapi cursor            Start Cursor Agent mode
   hapi opencode          Start OpenCode ACP mode
+  hapi dsh               Start DeepSeek Harness ACP mode
   hapi resume [id]       Resume an existing HAPI session locally
   hapi mcp               Start MCP stdio bridge
   hapi connect           (not available in direct-connect mode)

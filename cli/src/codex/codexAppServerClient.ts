@@ -11,18 +11,24 @@ import type {
     InitializeResponse,
     ModelListParams,
     ModelListResponse,
+    SkillsListParams,
+    SkillsListResponse,
     ThreadStartParams,
     ThreadStartResponse,
     ThreadResumeParams,
     ThreadResumeResponse,
     ThreadForkParams,
     ThreadForkResponse,
+    ThreadReadParams,
+    ThreadReadResponse,
     TurnStartParams,
     TurnStartResponse,
     TurnInterruptParams,
     TurnInterruptResponse,
     ThreadRollbackParams,
     ThreadRollbackResponse,
+    TurnSteerParams,
+    TurnSteerResponse,
     ThreadCompactStartParams,
     ThreadCompactStartResponse,
     ThreadGoalSetParams,
@@ -61,7 +67,20 @@ type RequestHandler = (params: unknown) => Promise<unknown> | unknown;
 type PendingRequest = {
     resolve: (value: unknown) => void;
     reject: (error: Error) => void;
+    rejectDispatched: (error: Error) => void;
     cleanup: () => void;
+};
+
+/** Marks transport-level failures whose steer outcome is unknown. */
+export const INDETERMINATE_SYMBOL = Symbol('codex-app-server-indeterminate');
+
+export function isIndeterminateError(error: unknown): boolean {
+    return typeof error === 'object' && error !== null
+        && (error as Record<symbol, unknown>)[INDETERMINATE_SYMBOL] === true;
+}
+
+type CodexAppServerClientOptions = {
+    cwd?: string;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -263,14 +282,30 @@ export function resolveCodexAppServerCommand(): string {
 export class CodexAppServerClient extends JsonLineParser {
     private process: ChildProcessWithoutNullStreams | null = null;
     private connected = false;
+    private initialized = false;
+
+    /** True while the app-server process is connected. */
+    isConnected(): boolean {
+        return this.connected;
+    }
+
+    /** True after a successful initialize round-trip on the current process. */
+    isInitialized(): boolean {
+        return this.initialized;
+    }
     private nextId = 1;
     private readonly pending = new Map<number, PendingRequest>();
     private readonly requestHandlers = new Map<string, RequestHandler>();
     private notificationHandler: ((method: string, params: unknown) => void) | null = null;
+    private transportAbandonedHandler: (() => void) | null = null;
     private stderrHandler: ((text: string) => void) | null = null;
     private protocolError: Error | null = null;
 
     static readonly DEFAULT_TIMEOUT_MS = 14 * 24 * 60 * 60 * 1000;
+
+    constructor(private readonly options: CodexAppServerClientOptions = {}) {
+        super();
+    }
 
     setStderrHandler(handler: ((text: string) => void) | null): void {
         this.stderrHandler = handler;
@@ -283,7 +318,8 @@ export class CodexAppServerClient extends JsonLineParser {
 
         const codexCommand = resolveCodexAppServerCommand();
         logger.debug(`[CodexAppServer] Starting ${codexCommand} app-server`);
-        this.process = spawn(codexCommand, ['app-server'], {
+        const child = spawn(codexCommand, ['app-server'], {
+            cwd: this.options.cwd,
             env: Object.keys(process.env).reduce((acc, key) => {
                 const value = process.env[key];
                 if (typeof value === 'string') acc[key] = value;
@@ -293,12 +329,16 @@ export class CodexAppServerClient extends JsonLineParser {
             shell: process.platform === 'win32',
             windowsHide: process.platform === 'win32'
         });
+        this.process = child;
 
-        this.process.stdout.setEncoding('utf8');
-        this.process.stdout.on('data', (chunk) => this.feed(chunk));
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (chunk) => {
+            if (this.process === child) this.feed(chunk);
+        });
 
-        this.process.stderr.setEncoding('utf8');
-        this.process.stderr.on('data', (chunk) => {
+        child.stderr.setEncoding('utf8');
+        child.stderr.on('data', (chunk) => {
+            if (this.process !== child) return;
             const text = chunk.toString().trim();
             if (text.length > 0) {
                 logger.debug(`[CodexAppServer][stderr] ${text}`);
@@ -306,16 +346,20 @@ export class CodexAppServerClient extends JsonLineParser {
             }
         });
 
-        this.process.on('exit', (code, signal) => {
+        child.on('exit', (code, signal) => {
+            if (this.process !== child) return;
             const message = `Codex app-server exited (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
             logger.debug(message);
             this.rejectAllPending(new Error(message));
             this.connected = false;
+            this.initialized = false;
             this.resetParserState();
             this.process = null;
+            this.transportAbandonedHandler?.();
         });
 
-        this.process.on('error', (error) => {
+        child.on('error', (error) => {
+            if (this.process !== child) return;
             logger.debug('[CodexAppServer] Process error', error);
             const message = error instanceof Error ? error.message : String(error);
             this.rejectAllPending(new Error(
@@ -325,6 +369,7 @@ export class CodexAppServerClient extends JsonLineParser {
             this.connected = false;
             this.resetParserState();
             this.process = null;
+            this.transportAbandonedHandler?.();
         });
 
         this.connected = true;
@@ -335,6 +380,10 @@ export class CodexAppServerClient extends JsonLineParser {
         this.notificationHandler = handler;
     }
 
+    setTransportAbandonedHandler(handler: (() => void) | null): void {
+        this.transportAbandonedHandler = handler;
+    }
+
     registerRequestHandler(method: string, handler: RequestHandler): void {
         this.requestHandlers.set(method, handler);
     }
@@ -342,6 +391,7 @@ export class CodexAppServerClient extends JsonLineParser {
     async initialize(params: InitializeParams): Promise<InitializeResponse> {
         const response = await this.sendRequest('initialize', params, { timeoutMs: 30_000 });
         this.sendNotification('initialized');
+        this.initialized = true;
         return response as InitializeResponse;
     }
 
@@ -350,6 +400,13 @@ export class CodexAppServerClient extends JsonLineParser {
             timeoutMs: 30_000
         });
         return response as ModelListResponse;
+    }
+
+    async listSkills(params: SkillsListParams): Promise<SkillsListResponse> {
+        const response = await this.sendRequest('skills/list', params, {
+            timeoutMs: 30_000
+        });
+        return response as SkillsListResponse;
     }
 
     async listCollaborationModes(): Promise<CollaborationModeListResponse> {
@@ -392,6 +449,25 @@ export class CodexAppServerClient extends JsonLineParser {
         return response as ThreadForkResponse;
     }
 
+    async supportsMethod(method: 'thread/fork' | 'thread/rollback'): Promise<boolean> {
+        try {
+            await this.sendRequest(method, { threadId: '__hapi_capability_probe__' }, { timeoutMs: 30_000 });
+            return true;
+        } catch (error) {
+            return !/method not found|unknown method|unsupported/i.test(
+                error instanceof Error ? error.message : String(error)
+            );
+        }
+    }
+
+    async readThread(params: ThreadReadParams, options?: { signal?: AbortSignal }): Promise<ThreadReadResponse> {
+        const response = await this.sendRequest('thread/read', params, {
+            signal: options?.signal,
+            timeoutMs: CodexAppServerClient.DEFAULT_TIMEOUT_MS
+        });
+        return response as ThreadReadResponse;
+    }
+
     async startTurn(params: TurnStartParams, options?: { signal?: AbortSignal }): Promise<TurnStartResponse> {
         const response = await this.sendRequest('turn/start', params, {
             signal: options?.signal,
@@ -417,6 +493,24 @@ export class CodexAppServerClient extends JsonLineParser {
             timeoutMs: 30_000
         });
         return response as ThreadRollbackResponse;
+    }
+
+    async steerTurn(
+        params: TurnSteerParams,
+        options?: { signal?: AbortSignal }
+    ): Promise<{ dispatched: Promise<void>; completed: Promise<TurnSteerResponse> }> {
+        // Dispatch/complete split: the caller awaits acceptance before
+        // reporting success. Bound the wait below the hub's 30s RPC timeout so
+        // a lost response cannot strand the row in dispatching — a timeout is
+        // indeterminate and funnels into thread reconciliation.
+        const request = await this.sendRequestWithDispatch('turn/steer', params, {
+            signal: options?.signal,
+            timeoutMs: 20_000
+        });
+        return {
+            dispatched: request.dispatched,
+            completed: request.completed.then((response) => response as TurnSteerResponse)
+        };
     }
 
     async compactThread(
@@ -481,6 +575,7 @@ export class CodexAppServerClient extends JsonLineParser {
         } finally {
             this.rejectAllPending(new Error('Codex app-server disconnected'));
             this.connected = false;
+            this.initialized = false;
             this.resetParserState();
         }
 
@@ -492,8 +587,29 @@ export class CodexAppServerClient extends JsonLineParser {
         params?: unknown,
         options?: { signal?: AbortSignal; timeoutMs?: number }
     ): Promise<unknown> {
+        const request = await this.sendRequestWithDispatch(method, params, options);
+        void request.dispatched.catch(() => {});
+        return request.completed;
+    }
+
+    /**
+     * Split a request into transport dispatch (stdin accepted) and completion
+     * (JSON-RPC response). Lets callers commit queue state once stdin accepted
+     * the request without waiting for the (possibly long-running) response.
+     */
+    private async sendRequestWithDispatch(
+        method: string,
+        params?: unknown,
+        options?: { signal?: AbortSignal; timeoutMs?: number }
+    ): Promise<{ dispatched: Promise<void>; completed: Promise<unknown> }> {
+        if (options?.signal?.aborted) {
+            throw createAbortError();
+        }
         if (!this.connected) {
             await this.connect();
+        }
+        if (options?.signal?.aborted) {
+            throw createAbortError();
         }
 
         const id = this.nextId++;
@@ -505,60 +621,134 @@ export class CodexAppServerClient extends JsonLineParser {
 
         const timeoutMs = options?.timeoutMs ?? CodexAppServerClient.DEFAULT_TIMEOUT_MS;
 
-        return new Promise((resolve, reject) => {
-            let timeout: ReturnType<typeof setTimeout> | null = null;
-            let aborted = false;
+        let timeout: ReturnType<typeof setTimeout> | null = null;
+        let resolveDispatched!: () => void;
+        let rejectDispatched!: (error: Error) => void;
+        let resolveCompleted!: (value: unknown) => void;
+        let rejectCompleted!: (error: Error) => void;
+        const dispatched = new Promise<void>((resolve, reject) => {
+            resolveDispatched = resolve;
+            rejectDispatched = reject;
+        });
+        const completed = new Promise<unknown>((resolve, reject) => {
+            resolveCompleted = resolve;
+            rejectCompleted = reject;
+        });
+        let aborted = false;
+        let dispatchSettled = false;
 
-            const cleanup = () => {
-                if (timeout) {
-                    clearTimeout(timeout);
-                }
-                if (options?.signal) {
-                    options.signal.removeEventListener('abort', onAbort);
-                }
-            };
-
-            const onAbort = () => {
-                if (aborted) return;
-                aborted = true;
-                this.pending.delete(id);
-                cleanup();
-                reject(createAbortError());
-            };
-
+        const cleanup = () => {
+            if (timeout) {
+                clearTimeout(timeout);
+            }
             if (options?.signal) {
-                if (options.signal.aborted) {
-                    onAbort();
+                options.signal.removeEventListener('abort', onAbort);
+            }
+        };
+
+        const abandonUnconfirmedDispatch = (error: Error) => {
+            const child = this.process;
+            this.process = null;
+            this.connected = false;
+            this.initialized = false;
+            try {
+                child?.stdin.destroy();
+            } catch (destroyError) {
+                logger.debug('[CodexAppServer] Error destroying stalled stdin', destroyError);
+            }
+            this.rejectAllPending(error);
+            this.resetParserState();
+            this.transportAbandonedHandler?.();
+        };
+
+        const failRequest = (error: Error, abandon = false) => {
+            if (abandon) {
+                abandonUnconfirmedDispatch(error);
+                return;
+            }
+            this.pending.delete(id);
+            cleanup();
+            if (!dispatchSettled) {
+                dispatchSettled = true;
+                rejectDispatched(error);
+            }
+            rejectCompleted(error);
+        };
+
+        const onAbort = () => {
+            if (aborted) return;
+            aborted = true;
+            const error = this.markIndeterminate(createAbortError());
+            if (dispatchSettled) {
+                failRequest(error);
+            } else {
+                failRequest(error, true);
+            }
+        };
+
+        if (options?.signal) {
+            if (options.signal.aborted) {
+                onAbort();
+                return { dispatched, completed };
+            }
+            options.signal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        if (Number.isFinite(timeoutMs) && !aborted) {
+            timeout = setTimeout(() => {
+                if (this.pending.has(id)) {
+                    const error = this.markIndeterminate(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`));
+                    failRequest(error, !dispatchSettled);
+                }
+            }, timeoutMs);
+            timeout.unref();
+        }
+
+        this.pending.set(id, {
+            resolve: (value) => {
+                cleanup();
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    resolveDispatched();
+                }
+                resolveCompleted(value);
+            },
+            reject: (error) => {
+                cleanup();
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    resolveDispatched();
+                }
+                rejectCompleted(error);
+            },
+            rejectDispatched: (error) => {
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    rejectDispatched(error);
+                }
+            },
+            cleanup
+        });
+
+        try {
+            const serialized = JSON.stringify(payload);
+            this.process?.stdin.write(`${serialized}\n`, (error) => {
+                if (error) {
+                    const writeError = error instanceof Error ? error : new Error(String(error));
+                    failRequest(this.markIndeterminate(writeError), !dispatchSettled);
                     return;
                 }
-                options.signal.addEventListener('abort', onAbort, { once: true });
-            }
-
-            if (Number.isFinite(timeoutMs)) {
-                timeout = setTimeout(() => {
-                    if (this.pending.has(id)) {
-                        this.pending.delete(id);
-                        cleanup();
-                        reject(new Error(`Codex app-server request '${method}' timed out after ${timeoutMs}ms`));
-                    }
-                }, timeoutMs);
-                timeout.unref();
-            }
-
-            this.pending.set(id, {
-                resolve: (value) => {
-                    cleanup();
-                    resolve(value);
-                },
-                reject: (error) => {
-                    cleanup();
-                    reject(error);
-                },
-                cleanup
+                if (!dispatchSettled) {
+                    dispatchSettled = true;
+                    resolveDispatched();
+                }
             });
+        } catch (error) {
+            const writeError = error instanceof Error ? error : new Error(String(error));
+            failRequest(writeError);
+        }
 
-            this.writePayload(payload);
-        });
+        return { dispatched, completed };
     }
 
     private sendNotification(method: string, params?: unknown): void {
@@ -672,6 +862,15 @@ export class CodexAppServerClient extends JsonLineParser {
         pending.resolve(response.result);
     }
 
+    /** Marks transport-level failures (timeout, disconnect, spawn, protocol)
+     *  whose outcome is unknown — unlike an explicit JSON-RPC error response.
+     *  Steer completion uses this to distinguish definite rejection from
+     *  indeterminate outcomes. */
+    private markIndeterminate(error: Error): Error {
+        Object.defineProperty(error, INDETERMINATE_SYMBOL, { value: true });
+        return error;
+    }
+
     private writePayload(payload: JsonRpcLiteRequest | JsonRpcLiteNotification | JsonRpcLiteResponse): void {
         const serialized = JSON.stringify(payload);
         this.process?.stdin.write(`${serialized}\n`);
@@ -683,8 +882,10 @@ export class CodexAppServerClient extends JsonLineParser {
     }
 
     private rejectAllPending(error: Error): void {
-        for (const { reject, cleanup } of this.pending.values()) {
+        error = this.markIndeterminate(error);
+        for (const { reject, rejectDispatched, cleanup } of this.pending.values()) {
             cleanup();
+            rejectDispatched(error);
             reject(error);
         }
         this.pending.clear();

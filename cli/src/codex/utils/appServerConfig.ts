@@ -1,13 +1,15 @@
 import type { EnhancedMode } from '../loop';
 import type { CodexCliOverrides } from './codexCliOverrides';
 import type { McpServersConfig } from './buildHapiMcpBridge';
-import { codexSystemPrompt } from './systemPrompt';
+import { getCodexSystemPrompt } from './systemPrompt';
 import type {
     ApprovalPolicy,
     SandboxMode,
     SandboxPolicy,
+    SkillMetadata,
     ThreadStartParams,
-    TurnStartParams
+    TurnStartParams,
+    UserInput
 } from '../appServerTypes';
 import { resolveCodexPermissionModeConfig } from './permissionModeConfig';
 
@@ -112,19 +114,79 @@ function buildMcpServerConfig(mcpServers: McpServersConfig): Record<string, unkn
 function resolveInstructions(args: {
     baseInstructions?: string;
     developerInstructions?: string;
-}): { baseInstructions: string; developerInstructions: string } {
-    const baseInstructions = args.baseInstructions ?? codexSystemPrompt;
+}): { baseInstructions: string | undefined; developerInstructions: string } {
+    const baseInstructions = args.baseInstructions;
+    const hapiDeveloperInstructions = getCodexSystemPrompt();
     const developerInstructions = args.developerInstructions
-        ? `${baseInstructions}\n\n${args.developerInstructions}`
-        : baseInstructions;
+        ? `${hapiDeveloperInstructions}\n\n${args.developerInstructions}`
+        : hapiDeveloperInstructions;
     return {
         baseInstructions,
         developerInstructions
     };
 }
 
-function appendCollaborationInstructions(developerInstructions: string): string {
-    return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}`;
+function appendCollaborationInstructions(developerInstructions: string, proactiveMultiAgent?: boolean): string {
+    if (proactiveMultiAgent === undefined) {
+        return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}`;
+    }
+    const multiAgentMode = proactiveMultiAgent
+        ? 'Proactive multi-agent delegation is active. Any earlier instruction requiring an explicit user request before spawning sub-agents no longer applies. Use sub-agents when parallel work would materially improve speed or quality. This mode remains active until a later multi-agent mode developer message changes it.'
+        : 'Any earlier instruction enabling proactive multi-agent delegation no longer applies. Do not spawn sub-agents unless the user or applicable AGENTS.md/skill instructions explicitly ask for sub-agents, delegation, or parallel agent work.';
+    return `${developerInstructions}\n\n${codexCollaborationSpawnAgentInstructions}\n\n<multi_agent_mode>${multiAgentMode}</multi_agent_mode>`;
+}
+
+function mentionNameFromPath(path: string): string {
+    const parts = path.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] ?? path;
+}
+
+export function buildUserInputFromMessage(
+    message: string,
+    skills: readonly SkillMetadata[] = []
+): UserInput[] {
+    const inputs: UserInput[] = [];
+    const skillMatch = /^\s*\$([^\s]+)(?=\s|$)/.exec(message);
+    const skill = skillMatch
+        ? skills.find(candidate => candidate.enabled && candidate.name === skillMatch[1])
+        : undefined;
+    const inputMessage = skill && skillMatch
+        ? message.slice(skillMatch[0].length)
+        : message;
+    if (skill) {
+        inputs.push({ type: 'skill', name: skill.name, path: skill.path });
+    }
+    const mentionPattern = /(^|\s)@"((?:\\.|[^"\\])*)"/g;
+    let lastIndex = 0;
+    let match: RegExpExecArray | null;
+
+    while ((match = mentionPattern.exec(inputMessage)) !== null) {
+        const prefix = match[1] ?? '';
+        const rawPath = match[2] ?? '';
+        const pathText = rawPath;
+        const path = pathText.replace(/\\(["\\])/g, '$1');
+        if (!path) continue;
+
+        const atIndex = match.index + prefix.length;
+        const textBeforeMention = inputMessage.slice(lastIndex, atIndex);
+        if (textBeforeMention) {
+            inputs.push({ type: 'text', text: textBeforeMention });
+        }
+
+        inputs.push({
+            type: 'mention',
+            name: mentionNameFromPath(path),
+            path
+        });
+        lastIndex = mentionPattern.lastIndex - (rawPath.length - pathText.length);
+    }
+
+    const remainder = inputMessage.slice(lastIndex);
+    if (remainder || inputs.length === 0) {
+        inputs.push({ type: 'text', text: remainder });
+    }
+
+    return inputs;
 }
 
 export function buildThreadStartParams(args: {
@@ -157,13 +219,16 @@ export function buildThreadStartParams(args: {
         cwd: args.cwd,
         approvalPolicy: resolvedApprovalPolicy,
         sandbox: resolvedSandbox,
-        baseInstructions,
+        ...(baseInstructions !== undefined ? { baseInstructions } : {}),
         developerInstructions: resolvedDeveloperInstructions,
         ...(Object.keys(configWithInstructions).length > 0 ? { config: configWithInstructions } : {})
     };
 
     if (args.mode.model) {
         params.model = args.mode.model;
+    }
+    if (args.mode.personality) {
+        params.personality = args.mode.personality;
     }
 
     const threadServiceTier = toAppServerServiceTier(args.mode.serviceTier);
@@ -182,6 +247,8 @@ export function buildTurnStartParams(args: {
     cliOverrides?: CodexCliOverrides;
     baseInstructions?: string;
     developerInstructions?: string;
+    clientUserMessageId?: string;
+    skills?: readonly SkillMetadata[];
     overrides?: {
         approvalPolicy?: TurnStartParams['approvalPolicy'];
         sandboxPolicy?: TurnStartParams['sandboxPolicy'];
@@ -192,8 +259,12 @@ export function buildTurnStartParams(args: {
     const params: TurnStartParams = {
         threadId: args.threadId,
         cwd: args.cwd,
-        input: [{ type: 'text', text: args.message }]
+        input: buildUserInputFromMessage(args.message, args.skills)
     };
+
+    if (args.clientUserMessageId) {
+        params.clientUserMessageId = args.clientUserMessageId;
+    }
 
     const allowCliOverrides = args.mode?.permissionMode === 'default';
     const cliOverrides = allowCliOverrides ? args.cliOverrides : undefined;
@@ -228,13 +299,14 @@ export function buildTurnStartParams(args: {
         if (!model) {
             throw new Error(`Collaboration mode '${collaborationMode}' requires a resolved model`);
         }
-        const { developerInstructions } = resolveInstructions(args);
         params.collaborationMode = {
             mode: collaborationMode,
             settings: {
                 model,
-                reasoning_effort: modelReasoningEffort ?? null,
-                developer_instructions: appendCollaborationInstructions(developerInstructions)
+                ...(modelReasoningEffort !== undefined ? { reasoning_effort: modelReasoningEffort } : {}),
+                developer_instructions: collaborationMode === 'plan'
+                    ? null
+                    : appendCollaborationInstructions(resolveInstructions(args).developerInstructions, args.mode?.proactiveMultiAgent)
             }
         };
     } else if (model) {
@@ -244,6 +316,10 @@ export function buildTurnStartParams(args: {
     const turnServiceTier = toAppServerServiceTier(args.mode?.serviceTier);
     if (turnServiceTier !== undefined) {
         params.serviceTier = turnServiceTier;
+    }
+
+    if (args.mode?.personality) {
+        params.personality = args.mode.personality;
     }
 
     return params;

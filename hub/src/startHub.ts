@@ -6,13 +6,23 @@ import type { NotificationChannel } from './notifications/notificationTypes'
 import { HappyBot } from './telegram/bot'
 import { startWebServer } from './web/server'
 import { getOrCreateJwtSecret } from './config/jwtSecret'
+import { getOrCreateOwnerId } from './config/ownerId'
 import { createSocketServer } from './socket/server'
 import { SSEManager } from './sse/sseManager'
 import { getOrCreateVapidKeys } from './config/vapidKeys'
 import { PushService } from './push/pushService'
 import { PushNotificationChannel } from './push/pushNotificationChannel'
+import { FcmService } from './fcm/fcmService'
+import { FcmNotificationChannel } from './fcm/fcmNotificationChannel'
+import { resolveFcmConfig } from './fcm/fcmConfig'
+import { ApnsClient } from './push-ios/apnsClient'
+import { RelayClient } from './push-ios/relayClient'
+import { IosPushService } from './push-ios/iosPushService'
+import { IosPushNotificationChannel } from './push-ios/iosPushChannel'
+import { resolveIosPushConfig } from './push-ios/iosPushConfig'
 import { VisibilityTracker } from './visibility/visibilityTracker'
 import { TunnelManager } from './tunnel'
+import { refreshRejectedRelayAuthKey, resolveRelayAuthKey } from './tunnel/relayAuth'
 import { waitForTunnelTlsReady } from './tunnel/tlsGate'
 import { ServerChanChannel } from './serverchan/channel'
 import { NtfyChannel } from './ntfy/channel'
@@ -154,8 +164,10 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     if (config.serverChanSendKey) {
         const source = formatSource(config.sources.serverChanSendKey)
         const notificationSource = formatSource(config.sources.serverChanNotification)
+        const backgroundOnlySource = formatSource(config.sources.serverChanBackgroundOnly)
         console.log(`[Hub] ServerChan: enabled (${source})`)
         console.log(`[Hub] ServerChan notifications: ${config.serverChanNotification ? 'enabled' : 'disabled'} (${notificationSource})`)
+        console.log(`[Hub] ServerChan background-only: ${config.serverChanBackgroundOnly ? 'enabled' : 'disabled'} (${backgroundOnlySource})`)
     } else {
         console.log('[Hub] ServerChan: disabled (no SERVERCHAN_SENDKEY)')
     }
@@ -198,13 +210,60 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     })
 
     syncEngine = new SyncEngine(store, socketServer.io, socketServer.rpcRegistry, sseManager)
+    // Accountable principal for A2A work-graph notify ingest (P3).
+    syncEngine.setHubOwnerUserId(await getOrCreateOwnerId())
 
-    const notificationChannels: NotificationChannel[] = [
-        new PushNotificationChannel(pushService, sseManager, visibilityTracker, config.publicUrl)
-    ]
+    const fcmConfig = resolveFcmConfig(config)
+
+    // Build the optional FCM service early so the native-fallback probe
+    // can consult its health gate. When FCM is configured, `fcmService` is
+    // shared between the FcmNotificationChannel and the probe so a broken
+    // pipeline (expired credentials, sustained 5xx) lets web-push run as
+    // a last-resort surface for the namespace instead of silently muting
+    // both channels.
+    const fcmService = fcmConfig
+        ? new FcmService(fcmConfig.projectId, fcmConfig.serviceAccount, store)
+        : null
+
+    const notificationChannels: NotificationChannel[] = []
+
+    if (fcmConfig && fcmService) {
+        notificationChannels.push(new FcmNotificationChannel(fcmService, sseManager, visibilityTracker, store))
+        console.log('[Fcm] Native companion push enabled (project:', fcmConfig.projectId + ')')
+    }
+
+    // iOS push (P1): encrypt-then-route sibling of the FCM channel. Ordering
+    // matters - both native channels run before PushNotificationChannel so a
+    // successful native send sets the nativeGate and suppresses web-push.
+    const iosPushConfig = resolveIosPushConfig(config)
+    if (iosPushConfig.mode === 'relay') {
+        const iosPushService = new IosPushService(new RelayClient(iosPushConfig.relayUrl), store)
+        notificationChannels.push(new IosPushNotificationChannel(iosPushService, store))
+        console.log(`[Hub] iOS push: relay (${iosPushConfig.source}, url: ${iosPushConfig.relayUrl})`)
+    } else if (iosPushConfig.mode === 'apns') {
+        const iosPushService = new IosPushService(new ApnsClient(iosPushConfig), store)
+        notificationChannels.push(new IosPushNotificationChannel(iosPushService, store))
+        console.log(`[Hub] iOS push: apns (${iosPushConfig.env}, topic: ${iosPushConfig.bundleId})`)
+    } else {
+        console.log(`[Hub] iOS push: off (${iosPushConfig.reason})`)
+    }
+
+    notificationChannels.push(
+        new PushNotificationChannel(
+            pushService,
+            sseManager,
+            visibilityTracker,
+            config.publicUrl
+        )
+    )
 
     if (config.serverChanSendKey && config.serverChanNotification) {
-        notificationChannels.push(new ServerChanChannel(config.serverChanSendKey, config.publicUrl))
+        notificationChannels.push(new ServerChanChannel(
+            config.serverChanSendKey,
+            config.publicUrl,
+            visibilityTracker,
+            config.serverChanBackgroundOnly
+        ))
     }
 
     if (config.ntfyTopic && config.ntfyNotification) {
@@ -258,15 +317,19 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     // Initialize tunnel AFTER web service is ready
     let tunnelUrl: string | null = null
     if (relayFlag.enabled) {
-        tunnelManager = new TunnelManager({
-            localPort: config.listenPort,
-            enabled: true,
-            apiDomain: relayApiDomain,
-            authKey: process.env.HAPI_RELAY_AUTH || null,
-            useRelay: process.env.HAPI_RELAY_FORCE_TCP === 'true' || process.env.HAPI_RELAY_FORCE_TCP === '1'
-        })
-
         try {
+            tunnelManager = new TunnelManager({
+                localPort: config.listenPort,
+                enabled: true,
+                apiDomain: relayApiDomain,
+                authKey: await resolveRelayAuthKey(relayApiDomain, config.settingsFile),
+                refreshAuthKey: rejectedKey => refreshRejectedRelayAuthKey(
+                    relayApiDomain,
+                    config.settingsFile,
+                    rejectedKey
+                ),
+                useRelay: process.env.HAPI_RELAY_FORCE_TCP === 'true' || process.env.HAPI_RELAY_FORCE_TCP === '1'
+            })
             tunnelUrl = await tunnelManager.start()
         } catch (error) {
             console.error('[Tunnel] Failed to start:', error instanceof Error ? error.message : error)
@@ -310,6 +373,28 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
                 console.log(qrString)
             } catch {
                 // QR code generation failure should not affect main flow
+            }
+
+            // Companion app pairing QR (deeplink scheme; PWA users ignore, native app picks up).
+            const companionParams = new URLSearchParams({
+                hub: tunnelUrl,
+                code: config.cliApiToken
+            })
+            const companionDeeplink = `hapicompanion://bind?${companionParams.toString()}`
+            console.log('')
+            console.log('Or pair the HAPI companion app (iOS / Android / Wear OS):')
+            console.log(`  ${companionDeeplink}`)
+            try {
+                const companionQrString = await QRCode.toString(companionDeeplink, {
+                    type: 'terminal',
+                    small: true,
+                    margin: 1,
+                    errorCorrectionLevel: 'L'
+                })
+                console.log('')
+                console.log(companionQrString)
+            } catch {
+                // Non-fatal; deeplink text above is sufficient if QR rendering fails.
             }
         }
 

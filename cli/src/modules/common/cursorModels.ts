@@ -1,6 +1,13 @@
 import { spawn } from 'node:child_process';
+import { getAgentLaunchCommand } from '@/agent/agentLaunchCommand';
 import type { CursorModelsResponse, CursorModelSummary } from '@hapi/protocol/apiTypes';
+import {
+    releaseAgentCliSpawnLeaseSync,
+    tryAcquireAgentCliSpawnLeaseSync
+} from '@hapi/protocol/agentCliSpawnLease';
 import { isAgentAcpTransportActive } from '@/agent/backends/acp/agentCliGuard';
+import { resolveHapiHomeDir } from '@/configuration';
+import { killProcessByChildProcess } from '@/utils/process';
 import { getCursorAcpModelsSnapshot } from '@/cursor/utils/cursorAcpModelsBridge';
 import { getErrorMessage } from './rpcResponses';
 import {
@@ -11,6 +18,7 @@ import {
 import {
     cursorCliSkuBaseId,
     cursorModelBaseId,
+    isCursorAcpCatalogModelId,
     isCursorAcpWireModelId
 } from '@hapi/protocol';
 import {
@@ -66,6 +74,7 @@ function filterCliSkusForWireBases(
 
     return cliSkus.filter((entry) => {
         const modelId = entry.modelId.trim();
+        // Keep bare base SKUs (composer-2.5); drop parameterized ACP wires only.
         if (!modelId || modelId === 'auto' || isCursorAcpWireModelId(modelId)) {
             return false;
         }
@@ -77,22 +86,42 @@ function attachCliSkusToResponse(
     response: ListCursorModelsResponse,
     cliSkus: readonly CursorModelSummary[]
 ): ListCursorModelsResponse {
-    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpWireModelId(entry.modelId));
-    const filtered = filterCliSkusForWireBases([...cliSkus], wires);
-    const merged = mergeCliModelSkus(response.cliModelSkus ?? [], filtered);
-    if (merged.length === 0) {
+    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpCatalogModelId(entry.modelId));
+    // Suffixed CLI variants (effort/speed) only apply when ACP exposes parameterized
+    // wires for that base. Bare-only catalogs cannot express those variants
+    // (apply path is model + fast at most), so attaching them creates dead picker rows.
+    const parameterizedBases = new Set(
+        wires
+            .filter((entry) => isCursorAcpWireModelId(entry.modelId))
+            .map((entry) => cursorModelBaseId(entry.modelId))
+            .filter((base) => base.length > 0)
+    );
+    const filtered = filterCliSkusForWireBases(
+        mergeCliModelSkus(response.cliModelSkus ?? [], [...cliSkus]),
+        wires
+    ).filter((entry) => {
+        const modelId = entry.modelId.trim();
+        const base = cursorCliSkuBaseId(modelId);
+        return modelId === base || parameterizedBases.has(base);
+    });
+    if (filtered.length === 0) {
+        return response.cliModelSkus?.length
+            ? { ...response, cliModelSkus: undefined }
+            : response;
+    }
+    if (
+        filtered.length === (response.cliModelSkus?.length ?? 0)
+        && filtered.every((entry, index) => entry.modelId === response.cliModelSkus?.[index]?.modelId)
+    ) {
         return response;
     }
-    if (merged.length === (response.cliModelSkus?.length ?? 0)) {
-        return response;
-    }
-    return { ...response, cliModelSkus: merged };
+    return { ...response, cliModelSkus: filtered };
 }
 
 async function enrichCursorModelsWithCliSkus(
     response: ListCursorModelsResponse
 ): Promise<ListCursorModelsResponse> {
-    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpWireModelId(entry.modelId));
+    const wires = (response.availableModels ?? []).filter((entry) => isCursorAcpCatalogModelId(entry.modelId));
     if (wires.length === 0) {
         return response;
     }
@@ -121,6 +150,11 @@ async function enrichCursorModelsWithCliSkus(
 }
 
 export type ListCursorModelsResponse = CursorModelsResponse;
+
+function responseHasParameterizedWireIds(response: ListCursorModelsResponse): boolean {
+    // CLI `--list-models` returns bare/SKU slugs; only treat bracket wires as an ACP catalog.
+    return (response.availableModels ?? []).some((model) => isCursorAcpWireModelId(model.modelId));
+}
 
 interface CacheEntry {
     expiresAt: number;
@@ -175,12 +209,25 @@ export function parseCursorModelsOutput(output: string): {
 }
 
 async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
+    if (!tryAcquireAgentCliSpawnLeaseSync(resolveHapiHomeDir())) {
+        throw new Error('Cursor ACP transport is active');
+    }
     if (isAgentAcpTransportActive()) {
+        releaseAgentCliSpawnLeaseSync();
         throw new Error('Cursor ACP transport is active');
     }
 
+    let leaseReleased = false;
+    const releaseLeaseOnce = (): void => {
+        if (leaseReleased) {
+            return;
+        }
+        leaseReleased = true;
+        releaseAgentCliSpawnLeaseSync();
+    };
+
     return await new Promise((resolve, reject) => {
-        const child = spawn('agent', ['--list-models'], {
+        const child = spawn(getAgentLaunchCommand('cursor'), ['--list-models'], {
             env: process.env,
             stdio: ['ignore', 'pipe', 'pipe'],
             shell: process.platform === 'win32',
@@ -190,11 +237,21 @@ async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
         let stderr = '';
         let settled = false;
 
-        const timeout = setTimeout(() => {
-            if (settled) return;
+        let timeoutError: Error | null = null;
+
+        const finish = (handler: () => void): void => {
+            if (settled) {
+                return;
+            }
             settled = true;
-            child.kill('SIGTERM');
-            reject(new Error('Cursor model discovery timed out'));
+            clearTimeout(timeout);
+            releaseLeaseOnce();
+            handler();
+        };
+
+        const timeout = setTimeout(() => {
+            timeoutError = new Error('Cursor model discovery timed out');
+            void killProcessByChildProcess(child, true);
         }, PROBE_TIMEOUT_MS);
 
         child.stdout?.on('data', (chunk) => {
@@ -204,23 +261,23 @@ async function runCursorModelProbe(): Promise<ListCursorModelsResponse> {
             stderr += chunk.toString();
         });
         child.on('error', (error) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
-            reject(error);
+            finish(() => reject(error));
         });
         child.on('exit', (code) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timeout);
-            if (code !== 0) {
-                reject(new Error(stderr.trim() || `agent --list-models exited with code ${code}`));
-                return;
-            }
+            finish(() => {
+                if (timeoutError) {
+                    reject(timeoutError);
+                    return;
+                }
+                if (code !== 0) {
+                    reject(new Error(stderr.trim() || `agent --list-models exited with code ${code}`));
+                    return;
+                }
 
-            resolve({
-                success: true,
-                ...parseCursorModelsOutput(stdout)
+                resolve({
+                    success: true,
+                    ...parseCursorModelsOutput(stdout)
+                });
             });
         });
     });
@@ -291,7 +348,8 @@ export async function listCursorModels(): Promise<ListCursorModelsResponse> {
             let probeResponse: ListCursorModelsResponse | null = null;
             if (!isAgentAcpTransportActive()) {
                 probeResponse = await runCursorModelProbe();
-                if (cursorProbeResponseHasWireCatalog(probeResponse)) {
+                // Never promote CLI `--list-models` slug catalogs into the ACP wire cache.
+                if (responseHasParameterizedWireIds(probeResponse)) {
                     return applyInMemoryCache(probeResponse);
                 }
             }

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import type { KeyboardEvent, RefObject } from 'react'
+import type { KeyboardEvent, ReactNode, RefObject } from 'react'
 import type { SessionSummary } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { useQueryClient } from '@tanstack/react-query'
@@ -721,12 +721,17 @@ function SessionDateRangePicker(props: {
     )
 }
 
-function SessionListSearch(props: {
+export function SessionListSearch(props: {
     value: string
     onChange: (value: string) => void
     customStart: string
     customEnd: string
     onDateRangeChange: (start: string, end: string) => void
+    /** Upstream's share picker supplies these; this fork's bar doesn't surface
+     *  activity-date highlighting or a controlled expanded state yet. */
+    sessionActivityDates?: Set<string>
+    expanded?: boolean
+    onExpandedChange?: (expanded: boolean) => void
 }) {
     const { t } = useTranslation()
     const [datePickerOpen, setDatePickerOpen] = useState(false)
@@ -1037,7 +1042,7 @@ function SessionItem(props: {
                                     {ZEROSHOT_STAGE_BADGES[s.metadata.zeroshotStage]?.label ?? s.metadata.zeroshotStage}
                                 </span>
                             ) : null}
-                            {s.scheduledDueAts.map((dueAt, index) => (
+                            {(s.scheduledDueAts ?? []).map((dueAt, index) => (
                                 <span key={`${dueAt}-${index}`} className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-teal-500/10 text-teal-500">
                                     ⏰ {formatFutureRelativeTime(dueAt, t)}
                                 </span>
@@ -1109,6 +1114,8 @@ function SessionItem(props: {
                     <SessionActionMenu
                         isOpen={menuOpen}
                         onClose={() => setMenuOpen(false)}
+                        sessionId={s.id}
+                        sessionTitle={sessionName}
                         sessionActive={s.active}
                         onRename={() => setRenameOpen(true)}
                         onExport={() => setExportOpen(true)}
@@ -1300,6 +1307,10 @@ export function SessionList(props: {
     onCloned?: (newSessionId: string) => void
     unreadDoneOrders?: Record<string, number>
     onMarkReviewed?: (sessionId: string) => void
+    /** Extra controls rendered in the list header (used by the sessions route). */
+    headerActions?: ReactNode
+    /** Hub-side title suggestion availability, forwarded to the rename dialog. */
+    titleSuggestionAvailable?: boolean
 }) {
     const { t } = useTranslation()
     const { renderHeader = true, api, selectedSessionId, machineLabelsById = {}, machinesById = {}, onNewSessionInDirectory, onCloned } = props

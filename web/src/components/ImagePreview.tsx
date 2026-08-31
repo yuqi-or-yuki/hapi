@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type PointerEvent, type ReactNode, type SyntheticEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type MouseEvent, type PointerEvent, type ReactNode, type SyntheticEvent, type WheelEvent } from 'react'
 import { CloseIcon } from '@/components/icons'
 
 const MIN_IMAGE_SCALE = 0.25
@@ -11,6 +11,12 @@ function clampImageScale(value: number): number {
 }
 
 type ImagePoint = { x: number; y: number }
+
+type PreviewImage = {
+    src: string
+    fileName: string
+    label: string
+}
 
 function getPointDistance(a: ImagePoint, b: ImagePoint): number {
     return Math.hypot(a.x - b.x, a.y - b.y)
@@ -29,9 +35,16 @@ export function ImagePreview(props: {
     label: string
     buttonClassName?: string
     imageClassName?: string
+    imageStyle?: CSSProperties
     caption?: ReactNode
+    galleryId?: string
+    onTriggerPointerDown?: (event: PointerEvent<HTMLButtonElement>) => void
+    onTriggerContextMenu?: (event: MouseEvent<HTMLButtonElement>) => void
+    onTriggerClick?: (event: MouseEvent<HTMLButtonElement>) => void
 }) {
     const [viewerOpen, setViewerOpen] = useState(false)
+    const [previewImages, setPreviewImages] = useState<PreviewImage[]>([])
+    const [previewIndex, setPreviewIndex] = useState(0)
     const [scale, setScale] = useState(1)
     const [offset, setOffset] = useState({ x: 0, y: 0 })
     const scaleRef = useRef(scale)
@@ -45,11 +58,37 @@ export function ImagePreview(props: {
         event.stopPropagation()
     }, [])
 
-    const openViewer = useCallback((event: SyntheticEvent) => {
+    const openViewer = useCallback((event: MouseEvent<HTMLButtonElement>) => {
         event.preventDefault()
         event.stopPropagation()
+        const galleryId = props.galleryId ?? ''
+        const triggers = Array.from(document.querySelectorAll<HTMLButtonElement>('[data-image-preview-trigger]'))
+            .filter((trigger) => (trigger.dataset.imagePreviewGallery ?? '') === galleryId)
+        const images = triggers.flatMap((trigger): PreviewImage[] => {
+            const image = trigger.querySelector('img')
+            if (!image) return []
+            return [{
+                src: image.getAttribute('src') ?? image.src,
+                fileName: trigger.dataset.imagePreviewFileName ?? image.alt,
+                label: trigger.dataset.imagePreviewLabel ?? image.alt
+            }]
+        })
+        const index = triggers.indexOf(event.currentTarget)
+        setPreviewImages(images)
+        setPreviewIndex(index >= 0 ? index : 0)
         setViewerOpen(true)
-    }, [])
+    }, [props.galleryId])
+
+    const handleTriggerPointerDown = useCallback((event: PointerEvent<HTMLButtonElement>) => {
+        props.onTriggerPointerDown?.(event)
+        stopEvent(event)
+    }, [props.onTriggerPointerDown, stopEvent])
+
+    const handleTriggerClick = useCallback((event: MouseEvent<HTMLButtonElement>) => {
+        props.onTriggerClick?.(event)
+        if (event.defaultPrevented) return
+        openViewer(event)
+    }, [openViewer, props.onTriggerClick])
 
     const updateScale = useCallback((next: number | ((current: number) => number)) => {
         setScale((current) => {
@@ -75,6 +114,11 @@ export function ImagePreview(props: {
         dragRef.current = null
         pinchRef.current = null
         backdropPressRef.current = null
+        resetView()
+    }, [resetView])
+
+    const showPreview = useCallback((index: number) => {
+        setPreviewIndex(index)
         resetView()
     }, [resetView])
 
@@ -206,20 +250,38 @@ export function ImagePreview(props: {
             if (event.key === '-') {
                 zoomBy(-IMAGE_SCALE_STEP)
             }
+            if (event.key === 'ArrowLeft' && previewIndex > 0) {
+                showPreview(previewIndex - 1)
+            }
+            if (event.key === 'ArrowRight' && previewIndex < previewImages.length - 1) {
+                showPreview(previewIndex + 1)
+            }
         }
 
         window.addEventListener('keydown', handleKeyDown)
         return () => window.removeEventListener('keydown', handleKeyDown)
-    }, [closeViewer, resetView, viewerOpen, zoomBy])
+    }, [closeViewer, previewImages.length, previewIndex, resetView, showPreview, viewerOpen, zoomBy])
+
+    const activePreview = previewImages[previewIndex] ?? {
+        src: props.src,
+        fileName: props.fileName,
+        label: props.label
+    }
+    const hasMultiplePreviews = previewImages.length > 1
 
     return (
         <>
             <button
                 type="button"
-                onPointerDown={stopEvent}
+                onPointerDown={handleTriggerPointerDown}
                 onMouseDown={stopEvent}
                 onTouchStart={stopEvent}
-                onClick={openViewer}
+                onContextMenu={props.onTriggerContextMenu}
+                onClick={handleTriggerClick}
+                data-image-preview-trigger=""
+                data-image-preview-file-name={props.fileName}
+                data-image-preview-label={props.label}
+                data-image-preview-gallery={props.galleryId ?? ''}
                 className={props.buttonClassName ?? 'group flex min-h-[18rem] w-full items-center justify-center overflow-auto rounded-md border border-[var(--app-border)] bg-[var(--app-code-bg)] p-3 text-left'}
                 title="Click to zoom"
             >
@@ -227,6 +289,7 @@ export function ImagePreview(props: {
                     src={props.src}
                     alt={props.label}
                     className={props.imageClassName ?? 'max-h-[calc(100vh-14rem)] max-w-full object-contain transition-transform group-hover:scale-[1.01]'}
+                    style={props.imageStyle}
                     draggable={false}
                 />
                 {props.caption}
@@ -238,10 +301,37 @@ export function ImagePreview(props: {
                     className="fixed inset-0 z-50 flex flex-col bg-black/90 text-white"
                     role="dialog"
                     aria-modal="true"
-                    aria-label={props.label}
+                    aria-label={activePreview.label}
                 >
-                    <div className="flex items-center gap-2 border-b border-white/10 bg-black/50 px-3 py-2">
-                        <div className="min-w-0 flex-1 truncate text-sm font-medium">{props.fileName}</div>
+                    <div className="flex items-center gap-2 border-b border-white/10 bg-black/50 px-3 pb-2 pt-[calc(env(safe-area-inset-top)+0.5rem)]">
+                        <div className="min-w-0 flex-1 truncate text-sm font-medium">{activePreview.fileName}</div>
+                        {hasMultiplePreviews ? (
+                            <>
+                                <button
+                                    type="button"
+                                    onClick={() => showPreview(previewIndex - 1)}
+                                    className="flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20 disabled:opacity-40"
+                                    disabled={previewIndex === 0}
+                                    title="Previous image"
+                                    aria-label="Previous image"
+                                >
+                                    ←
+                                </button>
+                                <span className="min-w-10 text-center text-xs tabular-nums text-white/70">
+                                    {previewIndex + 1} / {previewImages.length}
+                                </span>
+                                <button
+                                    type="button"
+                                    onClick={() => showPreview(previewIndex + 1)}
+                                    className="flex h-8 w-8 items-center justify-center rounded bg-white/10 text-lg hover:bg-white/20 disabled:opacity-40"
+                                    disabled={previewIndex === previewImages.length - 1}
+                                    title="Next image"
+                                    aria-label="Next image"
+                                >
+                                    →
+                                </button>
+                            </>
+                        ) : null}
                         <button
                             type="button"
                             onClick={() => zoomBy(-IMAGE_SCALE_STEP)}
@@ -287,8 +377,8 @@ export function ImagePreview(props: {
                         onDoubleClick={resetView}
                     >
                         <img
-                            src={props.src}
-                            alt={props.label}
+                            src={activePreview.src}
+                            alt={activePreview.label}
                             draggable={false}
                             className="absolute left-1/2 top-1/2 max-h-[90vh] max-w-[90vw] select-none object-contain"
                             style={{

@@ -1,11 +1,27 @@
 import { useCallback } from 'react'
 import { useLocation, useNavigate, useRouter } from '@tanstack/react-router'
+import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
 
 export function getSettingsBackTarget(pathname: string): string | null {
     if (pathname === '/settings') return '/sessions'
     if (pathname === '/settings/voice/advanced' || pathname === '/settings/voice/voices') return '/settings/voice'
     if (pathname.startsWith('/settings/')) return '/settings'
     return null
+}
+
+export function getSessionFilesBackSearch(search: unknown): {
+    tab?: 'directories'
+    query?: string
+} {
+    if (!search || typeof search !== 'object') return {}
+
+    const currentSearch = search as { tab?: unknown; query?: unknown }
+    return {
+        ...(currentSearch.tab === 'directories' ? { tab: 'directories' as const } : {}),
+        ...(typeof currentSearch.query === 'string' && currentSearch.query.length > 0
+            ? { query: currentSearch.query }
+            : {}),
+    }
 }
 
 export function useAppGoBack(): () => void {
@@ -17,7 +33,10 @@ export function useAppGoBack(): () => void {
     return useCallback(() => {
         // Use explicit path navigation for consistent behavior across all environments
         if (pathname === '/sessions/new') {
-            navigate({ to: '/sessions' })
+            navigate({
+                to: '/sessions',
+                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+            })
             return
         }
 
@@ -28,23 +47,36 @@ export function useAppGoBack(): () => void {
             return
         }
 
-        // For single file view, go back to files list
+        // Chat file links return to the conversation; file-browser previews
+        // retain their deterministic parent route and browsing context.
         if (pathname.match(/^\/sessions\/[^/]+\/file$/)) {
-            const filesPath = pathname.replace(/\/file$/, '/files')
-
-            const tab = (search && typeof search === 'object' && 'tab' in search)
-                ? (search as { tab?: unknown }).tab
+            const origin = search && typeof search === 'object' && 'origin' in search
+                ? (search as { origin?: unknown }).origin
                 : undefined
-            const nextSearch = tab === 'directories' ? { tab: 'directories' as const } : {}
+            if (origin === 'chat') {
+                navigate({
+                    to: pathname.replace(/\/file$/, ''),
+                    ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                })
+                return
+            }
 
-            navigate({ to: filesPath, search: nextSearch })
+            const filesPath = pathname.replace(/\/file$/, '/files')
+            navigate({
+                to: filesPath,
+                search: getSessionFilesBackSearch(search),
+                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+            })
             return
         }
 
         // For session routes, navigate to parent path
         if (pathname.startsWith('/sessions/')) {
             const parentPath = pathname.replace(/\/[^/]+$/, '') || '/sessions'
-            navigate({ to: parentPath })
+            navigate({
+                to: parentPath,
+                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+            })
             return
         }
 

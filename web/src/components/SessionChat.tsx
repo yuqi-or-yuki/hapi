@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { useNavigate } from '@tanstack/react-router'
-import { AssistantRuntimeProvider, useAssistantApi, useAssistantState } from '@assistant-ui/react'
+import { PRESERVE_SESSION_SIDEBAR_SCROLL } from '@/lib/sessionNavigation'
+import { AssistantRuntimeProvider, useAui, useAuiState } from '@assistant-ui/react'
 import { DragDropZone } from '@/components/AssistantChat/DragDropZone'
 import type { ApiClient } from '@/api/client'
 import type {
     AttachmentMetadata,
     CodexCollaborationMode,
+    CopilotAgentMode,
     DecryptedMessage,
     PermissionMode,
     Session,
@@ -19,30 +22,68 @@ import { reduceChatBlocks } from '@/chat/reducer'
 import { reconcileChatBlocks } from '@/chat/reconcile'
 import { buildConversationOutline } from '@/chat/outline'
 import { buildVisibleChatBlocks, isToolGroupBlock, type ToolGroupBlock } from '@/chat/toolGroups'
-import { isQueuedForInvocation, mergeMessages } from '@/lib/messages'
+import { useUnseenBlockCount } from '@/hooks/useUnseenBlockCount'
+import { useCodexExplorationCollapse } from '@/hooks/useCodexExplorationCollapse'
+import { isQueuedForInvocation } from '@/lib/messages'
 import { inactiveSessionCanResume } from '@/lib/sessionResume'
 import {
     getCodexModelReasoningEfforts,
     supportsCodexReasoningEffort
 } from '@/lib/codexModelCapabilities'
+import { createSerialAsyncQueue } from '@/lib/serialAsyncQueue'
 import { HappyComposer, type ComposerSendError } from '@/components/AssistantChat/HappyComposer'
-import { codexModelAdvertisesFastTier } from '@/components/AssistantChat/codexFastMode'
+import { codexModelAdvertisesFastTier, getEffectiveCodexServiceTier } from '@/components/AssistantChat/codexFastMode'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { HappyThread } from '@/components/AssistantChat/HappyThread'
 import { QueuedMessagesBar } from '@/components/AssistantChat/QueuedMessagesBar'
 import { ScratchlistDrawer } from '@/components/AssistantChat/ScratchlistPanel'
-import { useScratchlist } from '@/lib/use-scratchlist'
-import { useHappyRuntime } from '@/lib/assistant-runtime'
+import { useHubScratchlist } from '@/lib/use-hub-scratchlist'
+import { useSessions } from '@/hooks/queries/useSessions'
+import { getSessionTitle } from '@/lib/sessionTitle'
+import { formatSessionMentionTooltip } from '@/lib/sessionReference'
+import { classifySessionAttention, getSessionAttentionLabelKey } from '@/lib/sessionAttention'
+import { getSessionLastSeenAt } from '@/lib/sessionLastSeen'
+import { formatRelativeTime } from '@/lib/relativeTime'
+import { ScratchlistMigrationBanner } from '@/components/AssistantChat/ScratchlistMigrationBanner'
+import { findLatestCompletedBoundaryId, useHappyRuntime } from '@/lib/assistant-runtime'
+import {
+    getRestoredComposerSendIntent,
+    resolveMessageDeliveryMode,
+    type ComposerSendIntent,
+} from '@/lib/messageDelivery'
+import type { MessageDeliveryMode } from '@hapi/protocol'
+import { isSteeringSupportedForSession } from '@hapi/protocol'
+import type { OlderLoadOutcome } from '@/lib/message-window-store'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
-import { consumeSharePendingTransfer } from '@/lib/sharePendingState'
-import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
-import { getDraft } from '@/lib/composer-drafts'
+import { ShareSeedConsumer } from '@/components/ShareSeedConsumer'
+import {
+    createScratchlistAttachmentAdapter,
+    type ScratchlistAttachmentAdapter,
+} from '@/lib/scratchlistAttachmentAdapter'
+import {
+    attachmentsNeedScratchlistMigration,
+    finalizeMigratedScratchlistParkCleanup,
+    prepareScratchlistParkAttachments,
+    rehydrateScratchlistAttachmentsToComposer,
+    stageScratchlistAttachmentsForComposeSend,
+    type PendingParkAttachment,
+    type ScratchlistParkResult,
+} from '@/lib/scratchlistAttachmentFlow'
+import type { ScratchlistEntry } from '@/lib/scratchlist'
+import { isHubScratchlistAttachmentPath } from '@hapi/protocol'
+import {
+    type AttachmentDraftInput,
+} from '@/lib/composer-attachment-drafts'
 import { useTranslation } from '@/lib/use-translation'
+import type { SendMessageAcceptance, SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
+import { handoffComposerDraft, transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import { SessionHeader } from '@/components/SessionHeader'
 import { ZeroshotTimeline, buildZeroshotTimeline } from '@/components/ZeroshotTimeline'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
 import { TeamPanel } from '@/components/TeamPanel'
+import { SessionStatusPanel } from '@/components/SessionStatusPanel'
+import { buildSessionStatusData } from '@/chat/sessionStatus'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
 import { useClaudeModels } from '@/hooks/queries/useClaudeModels'
@@ -62,13 +103,15 @@ import {
     resolveSessionCursorModelChange,
     resolveSessionCursorVariantSelectValue
 } from '@/lib/sessionChatCursorModel'
-import { buildCursorEffortPickerOptions, resolveCursorVariantOptions } from '@/lib/cursorModelOptions'
+import { buildCursorEffortPickerOptionsWithDefaultFirst } from '@/lib/cursorModelOptions'
 import { useOpencodeModels } from '@/hooks/queries/useOpencodeModels'
 import { useGrokModels } from '@/hooks/queries/useGrokModels'
+import { useCopilotModels } from '@/hooks/queries/useCopilotModels'
 import { useGrokReasoningEffortOptions } from '@/hooks/queries/useGrokReasoningEffortOptions'
 import { usePiModels } from '@/hooks/queries/usePiModels'
 import { useOpencodeReasoningEffortOptions } from '@/hooks/queries/useOpencodeReasoningEffortOptions'
 import { useVoiceOptional } from '@/lib/voice-context'
+import { AgentTerminalView } from '@/components/AgentTerminal/AgentTerminalView'
 import { VoiceBackendSession, registerSessionStore, registerVoiceHooksStore, voiceHooks } from '@/realtime'
 import { isRemoteTerminalSupported } from '@/utils/terminalSupport'
 
@@ -213,16 +256,80 @@ export function isScratchlistHotkeyBlockedTarget(target: EventTarget | null): bo
 }
 
 /**
- * Decide whether a submit should be routed to the per-session scratchlist
- * or to the regular chat send. Scratchlist entries are pure text - they
- * don't carry attachments or schedules - so any submit that includes
- * either of those MUST fall through to the normal chat path even if the
- * scratchlist toggle is on. Otherwise the wrapper would silently drop
- * attachments / scheduled-send metadata while telling the composer the
- * submission succeeded (which then clears the composer state, losing
- * the user's data).
+ * True when a global select-all shortcut (Ctrl/Cmd+A) should be left to
+ * the browser default: focus is inside the rich composer
+ * (contentEditable), a textarea (the fallback composer), a single-line
+ * input/select, or a modal dialog. In every other case the app takes
+ * over the shortcut because Chromium's SelectAll collapses to an empty
+ * caret when the page contains a contenteditable (the rich composer)
+ * but focus is outside it — plain Ctrl+A would select nothing and
+ * Ctrl+C would copy nothing (see applyGlobalSelectAll).
  *
- * Per upstream review on PR #798 (github-actions[bot] [Major]).
+ * Deliberately differs from isScratchlistHotkeyBlockedTarget: textareas
+ * are blocked here (textarea select-all works natively) while the
+ * scratchlist hotkey must keep firing from the composer textarea.
+ *
+ * Pure / exported for unit tests.
+ */
+export function isSelectAllTargetBlocked(target: EventTarget | null): boolean {
+    if (!(target instanceof HTMLElement)) return false
+    if (target.closest('[role="dialog"]') !== null) return true
+    if (target instanceof HTMLInputElement) return true
+    if (target instanceof HTMLTextAreaElement) return true
+    if (target instanceof HTMLSelectElement) return true
+    // isContentEditable is the authoritative check in real browsers but
+    // jsdom doesn't implement it; the attribute fallback also covers
+    // `plaintext-only` composers, which is what the rich composer uses
+    // on modern Chromium.
+    if (target.isContentEditable === true) return true
+    const contenteditable = target.getAttribute('contenteditable')
+    return contenteditable !== null && contenteditable !== 'false'
+}
+
+/**
+ * Chromium quirk: when a page contains a contenteditable element (the
+ * rich composer), Ctrl/Cmd+A with focus OUTSIDE the editable collapses
+ * to an empty caret instead of selecting the page — Ctrl+C then copies
+ * nothing. Reproduced in headless and headed Chrome with both
+ * `contenteditable="true"` and `"plaintext-only"`; the bare presence of
+ * the editable root is what breaks SelectAll, while focus inside it
+ * selects the composer text correctly.
+ *
+ * This takes over Ctrl/Cmd+A whenever focus is outside the composer
+ * (see isSelectAllTargetBlocked) and selects the message thread
+ * manually, so select-all + copy restores the expected
+ * "select the conversation" behavior.
+ *
+ * Returns true when the keystroke was handled (preventDefault + range
+ * selection). Pure / exported for unit tests and the Playwright fixture.
+ */
+export function applyGlobalSelectAll(e: KeyboardEvent): boolean {
+    if (e.defaultPrevented || e.repeat) return false
+    if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return false
+    if (e.key !== 'a' && e.key !== 'A') return false
+    if (isSelectAllTargetBlocked(e.target)) return false
+    // The thread container is rendered by HappyThread; its class is the
+    // stable handle between the page-level shortcut and the message DOM.
+    const thread = document.querySelector<HTMLElement>('.happy-thread-messages')
+    if (!thread || !thread.textContent) return false
+    e.preventDefault()
+    const range = document.createRange()
+    range.selectNodeContents(thread)
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    selection?.addRange(range)
+    return true
+}
+
+/**
+ * Decide whether a submit should be routed to the per-session scratchlist
+ * or to the regular chat send. Scratchlist entries support text and hub-
+ * stored attachments; scheduled sends still fall through to chat.
+ *
+ * Chat-path chips attached before scratchlist mode are migrated in the
+ * park-before-clear path (`prepareScratchlistParkAttachments`, #1226).
+ * This predicate still rejects non-hub paths as a fail-closed backstop
+ * for any leftover composer.send() route.
  *
  * Pure / exported so it can be unit tested without mounting SessionChat.
  */
@@ -232,9 +339,19 @@ export function shouldRouteToScratchlist(
     scheduledAt: number | null | undefined,
 ): boolean {
     if (!scratchlistMode) return false
-    if (attachments && attachments.length > 0) return false
     if (scheduledAt != null) return false
-    return true
+    // Only park when every attachment is already hub-resident. Composer
+    // uploads made before scratchlist mode was enabled still have normal
+    // CLI paths; the hub rejects those as scratchlist metadata.
+    return (attachments ?? []).every((att) => isHubScratchlistAttachmentPath(att.path))
+}
+
+export function mergeStagedAttachmentsInOrder(
+    attachments: readonly AttachmentMetadata[],
+    staged: readonly AttachmentMetadata[],
+): AttachmentMetadata[] {
+    const stagedById = new Map(staged.map((attachment) => [attachment.id, attachment]))
+    return attachments.map((attachment) => stagedById.get(attachment.id) ?? attachment)
 }
 
 function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
@@ -242,92 +359,46 @@ function isUninvokedScheduledMessage(message: DecryptedMessage): boolean {
 }
 
 /**
- * Consumes a pending Web Share Target transfer once the assistant runtime
- * is mounted and the session is active enough to accept attachments.
- *
- * Lifecycle:
- *  - A mount effect reads the transfer id out of sessionStorage *once*
- *    via consumeSharePendingTransfer() (not during render — StrictMode
- *    would consume on the discarded pass). The id is stashed in a ref.
- *  - The actual seed (composer.setText + composer.addAttachment per file)
- *    runs once `props.sessionActive` is true. Inactive sessions disable
- *    the attachmentAdapter, so writing attachments while inactive would
- *    no-op and leak Blobs in IDB. The seed waits in a re-renderable
- *    effect for the active flip.
- *  - `consumedRef` gates the effect to a single seed per component
- *    instance — refs survive a StrictMode mount/cleanup/remount pair, so
- *    the second invoke early-returns and the first invoke's async chain
- *    completes naturally (we deliberately don't cancel on cleanup; the
- *    upload is idempotent and the only side effects on the composer are
- *    no-ops once the runtime is unmounted).
- *  - The IDB row is deleted after the seed completes so a back-button
- *    refresh of /sessions/:id doesn't re-attach the same payload.
+ * Watches for incoming `abort-restore` events (emitted by the PTY launcher
+ * when the user aborts a running turn) and surfaces the aborted prompt text —
+ * carried on the event itself — via the existing sendError path
+ * (onAbortRestore prop). Acts only when no user message has been sent after the
+ * abort-restore event, so we never replay a prompt the user already resubmitted.
  */
-function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean }) {
-    const assistantApi = useAssistantApi()
-    const composerText = useAssistantState(({ composer }) => composer.text)
-    const composerTextRef = useRef(composerText)
-    const initRef = useRef(false)
-    const transferIdRef = useRef<string | null>(null)
-    const consumedRef = useRef(false)
-    const [transferReady, setTransferReady] = useState(false)
+function AbortRestoreConsumer(props: {
+    messages: NormalizedMessage[]
+    onAbortRestore: (text: string) => void
+}) {
+    const lastHandledIdRef = useRef<string | null>(null)
 
     useEffect(() => {
-        composerTextRef.current = composerText
-    }, [composerText])
-
-    // Consume in an effect, not during render — React.StrictMode double-
-    // invokes render functions in dev; a render-time consume deletes the
-    // sessionStorage key on the discarded pass and the committed render
-    // then sees no transfer.
-    useEffect(() => {
-        if (initRef.current) return
-        initRef.current = true
-        transferIdRef.current = consumeSharePendingTransfer()
-        setTransferReady(true)
-    }, [])
-
-    useEffect(() => {
-        if (!transferReady) return
-        if (consumedRef.current) return
-        const transferId = transferIdRef.current
-        if (!transferId) return
-        if (!props.sessionActive) return
-        consumedRef.current = true
-
-        void (async () => {
-            try {
-                const payload = await getShareTransfer(transferId)
-                if (!payload) return
-                const seedText = [payload.title, payload.text, payload.url]
-                    .filter((part) => typeof part === 'string' && part.length > 0)
-                    .join('\n')
-                    .trim()
-                if (seedText.length > 0) {
-                    const existingText = composerTextRef.current.trim().length > 0
-                        ? composerTextRef.current
-                        : getDraft(props.sessionId)
-                    const nextText = [existingText.trim(), seedText]
-                        .filter((part) => part.length > 0)
-                        .join('\n\n')
-                    if (nextText.length > 0) {
-                        assistantApi.composer().setText(nextText)
-                    }
-                }
-                for (const file of payload.files) {
-                    const reconstructed = new File([file.blob], file.name, { type: file.type })
-                    try {
-                        await assistantApi.composer().addAttachment(reconstructed)
-                    } catch (err) {
-                        console.error('share-seed addAttachment failed', err)
-                    }
-                }
-                await deleteShareTransfer(transferId).catch(() => {})
-            } catch (err) {
-                console.error('share-seed pull failed', err)
+        // Walk backwards: find an abort-restore event with no user message after it.
+        // If a user message comes after the abort-restore, the restore was already
+        // acted on — treat it as consumed regardless of page reload.
+        let abortRestore: { id: string; text: string } | null = null
+        for (let i = props.messages.length - 1; i >= 0; i--) {
+            const msg = props.messages[i]
+            if (!msg) continue
+            if (msg.role === 'user') break  // user message after abort-restore → stale
+            if (msg.role !== 'event') continue
+            if (msg.content.type === 'abort-restore') {
+                // The exact in-flight prompt rides on the event; no need to guess
+                // it by scanning historical user turns.
+                const text = typeof msg.content.text === 'string' ? msg.content.text : ''
+                abortRestore = { id: msg.id, text }
+                break
             }
-        })()
-    }, [transferReady, props.sessionActive, props.sessionId, assistantApi])
+        }
+        if (!abortRestore) return
+        if (lastHandledIdRef.current === abortRestore.id) return
+        lastHandledIdRef.current = abortRestore.id
+
+        // Surface it via the sendError path so HappyComposer restores it the
+        // same way it handles a failed send.
+        if (abortRestore.text.length > 0) {
+            props.onAbortRestore(abortRestore.text)
+        }
+    }, [props.messages, props.onAbortRestore])
 
     return null
 }
@@ -345,67 +416,95 @@ function ShareSeedConsumer(props: { sessionId: string; sessionActive: boolean })
  * composer-toolbar counter and the drawer share one source of truth.
  */
 export function ScratchlistDrawerHost(props: {
-    entries: ReturnType<typeof useScratchlist>['entries']
-    onMove: ReturnType<typeof useScratchlist>['move']
-    onDelete: ReturnType<typeof useScratchlist>['remove']
-    onSend: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => Promise<boolean>
-    /**
-     * Called when the operator promotes an entry to the composer.
-     *
-     * Promoting means "I want to send this for real now" - so the host
-     * MUST exit scratchlist mode, otherwise the next composer submit
-     * routes back to scratchlist (per the v1.1 modal-mode contract) and
-     * the user re-adds the same text instead of sending it to chat.
-     * Per upstream review on PR #798 (HAPI Bot, v6 follow-up).
-     */
+    sessionId: string
+    api: ApiClient
+    entries: ReturnType<typeof useHubScratchlist>['entries']
+    onMove: ReturnType<typeof useHubScratchlist>['move']
+    onDelete: ReturnType<typeof useHubScratchlist>['remove']
+    onSend: (
+        text: string,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        deliveryMode?: MessageDeliveryMode,
+    ) => Promise<boolean | SendMessageAcceptance>
     onExitScratchlistMode: () => void
+    disabled?: boolean
 }) {
-    const assistantApi = useAssistantApi()
-    const handlePromoteToComposer = useCallback((text: string) => {
-        assistantApi.composer().setText(text)
-        props.onExitScratchlistMode()
-    }, [assistantApi, props.onExitScratchlistMode])
-    const handlePromoteToQueue = useCallback(async (text: string) => {
-        // Promote-to-queue bypasses the scratchlist-mode wrapper by
-        // calling props.onSend directly (the chat send), so the queue
-        // entry lands in the conversation regardless of scratchlist
-        // mode. Mode itself stays on - the operator may still be
-        // capturing related notes.
-        return await props.onSend(text)
-    }, [props.onSend])
+    const assistantApi = useAui()
+    const handlePromoteToComposer = useCallback(async (entry: ScratchlistEntry) => {
+        if (props.disabled) return
+        assistantApi.composer().setText(entry.text)
+        // Exit scratchlist mode before rehydrating attachments so addAttachment
+        // uses the normal chat upload adapter (not the scratchlist hub adapter).
+        flushSync(() => {
+            props.onExitScratchlistMode()
+        })
+        if (entry.attachments && entry.attachments.length > 0) {
+            await rehydrateScratchlistAttachmentsToComposer(
+                props.api,
+                props.sessionId,
+                entry.attachments,
+                assistantApi.composer()
+            )
+        }
+    }, [assistantApi, props.api, props.disabled, props.onExitScratchlistMode, props.sessionId])
+    const handlePromoteToQueue = useCallback(async (entry: ScratchlistEntry) => {
+        if (props.disabled) return false
+        let attachments: AttachmentMetadata[] | undefined
+        if (entry.attachments && entry.attachments.length > 0) {
+            attachments = await stageScratchlistAttachmentsForComposeSend(
+                props.api,
+                props.sessionId,
+                entry.attachments
+            )
+        }
+        // This action is explicitly labelled “Send to queue”. It must retain
+        // that contract even when the Pi session is actively thinking.
+        const accepted = await props.onSend(entry.text, attachments, undefined, 'queue')
+        if (accepted) {
+            props.onExitScratchlistMode()
+        }
+        return Boolean(accepted)
+    }, [props.api, props.disabled, props.onSend, props.onExitScratchlistMode, props.sessionId])
     return (
         <ScratchlistDrawer
             entries={props.entries}
+            sessionId={props.sessionId}
+            api={props.api}
             onMove={props.onMove}
             onDelete={props.onDelete}
             onPromoteToComposer={handlePromoteToComposer}
             onPromoteToQueue={handlePromoteToQueue}
+            disabled={props.disabled}
         />
     )
 }
 
 export function buildGoalStateMessages(
-    messages: DecryptedMessage[],
-    pendingMessages: DecryptedMessage[] = []
+    messages: DecryptedMessage[]
 ): DecryptedMessage[] {
-    const eligibleMessages = messages.filter((message) => !isUninvokedScheduledMessage(message))
-    const eligiblePendingMessages = pendingMessages.filter((message) => !isUninvokedScheduledMessage(message))
-    return eligiblePendingMessages.length > 0
-        ? mergeMessages(eligibleMessages, eligiblePendingMessages)
-        : eligibleMessages
+    return messages.filter((message) => !isUninvokedScheduledMessage(message))
 }
 
-function getOutlineTitle(session: Session): string {
-    if (session.metadata?.name) {
-        return session.metadata.name
+/**
+ * Keep the latest completed fork boundary available while reading history.
+ * The history window can no longer contain the tail after older pages are
+ * loaded, so recomputing a boundary from that window would either hide the
+ * current Fork action or incorrectly mark an older message as current.
+ * A live tail revision invalidates the remembered boundary until tail view
+ * observes the authoritative current boundary again.
+ */
+export function resolveLatestCompletedBoundaryIdForView(
+    viewMode: 'tail' | 'history',
+    currentTailBoundaryId: string | null,
+    rememberedTailBoundary: { id: string | null; tailRevision: number } | null,
+    currentTailRevision: number
+): string | null {
+    if (viewMode === 'tail') return currentTailBoundaryId
+    if (!rememberedTailBoundary || rememberedTailBoundary.tailRevision !== currentTailRevision) {
+        return null
     }
-    if (session.metadata?.summary?.text) {
-        return session.metadata.summary.text
-    }
-    if (session.metadata?.path) {
-        return session.metadata.path
-    }
-    return session.id.slice(0, 8)
+    return rememberedTailBoundary.id
 }
 
 function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
@@ -427,28 +526,39 @@ function hasAbortableAgentRun(blocks: readonly ChatBlock[]): boolean {
 
 type SessionChatProps = {
     api: ApiClient
+    titleSuggestionAvailable?: boolean
     session: Session
     cursorChatOnDisk?: boolean
     reopenDisabledReason?: string
+    reopenHint?: string
     messages: DecryptedMessage[]
-    pendingMessages?: DecryptedMessage[]
     messagesWarning: string | null
     hasMoreMessages: boolean
-    isLoadingMessages: boolean
+    isSyncingTail: boolean
     isLoadingMoreMessages: boolean
     isSending: boolean
-    pendingCount: number
+    sendSettlement: SendMessageSettlement | null
+    viewMode: 'tail' | 'history'
     messagesVersion: number
+    historyVersion: number
+    tailRevision: number
     onBack: () => void
     onRefresh: () => void
-    onLoadMore: () => Promise<unknown>
-    // Resolves true when the send was accepted by the underlying mutation, false when
+    onLoadMore: (onBeforeApply?: (historyVersion: number) => boolean) => Promise<OlderLoadOutcome>
+    onCancelLoadMore: () => void
+    // Returns the accepted mutation's attempt id, or false when
     // pre-mutation guards (no-api / no-session / pending) rejected the call OR async
     // inactive-session resume failed. Composer state that should only be cleared on
     // actual send (pendingSchedule) must await this — see handleSend below.
-    onSend: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => Promise<boolean>
-    onFlushPending: () => void
-    onAtBottomChange: (atBottom: boolean) => void
+    onSend: (
+        text: string,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        deliveryMode?: MessageDeliveryMode,
+    ) => Promise<SendMessageAcceptance | false>
+    resolveSessionIdForUpload?: (sessionId: string) => Promise<string>
+    onUploadSessionResolved?: (sessionId: string) => void
+    onViewModeChange: (mode: 'tail' | 'history') => void
     onRetryMessage?: (localId: string) => void
     autocompleteSuggestions?: (query: string) => Promise<Suggestion[]>
     availableSlashCommands?: readonly SlashCommand[]
@@ -459,8 +569,12 @@ type SessionChatProps = {
     // user dismisses or starts editing.
     sendError?: ComposerSendError | null
     onClearSendError?: () => void
+    onSuppressSendErrorRestore?: (id: number) => void
     initialOutlineOpen?: boolean
     onInitialOutlineConsumed?: () => void
+    // Called when an `abort-restore` event arrives and the composer is not empty,
+    // so the caller can surface the aborted text via the existing sendError path.
+    onAbortRestore?: (text: string) => void
 }
 
 /**
@@ -486,7 +600,33 @@ export function SessionChat(props: SessionChatProps) {
 function SessionChatInner(props: SessionChatProps) {
     const { haptic } = usePlatform()
     const { t } = useTranslation()
+    const { codexExplorationCollapsed } = useCodexExplorationCollapse()
     const navigate = useNavigate()
+    const [historyActionPending, setHistoryActionPending] = useState(false)
+
+    const onForkConversation = useCallback(async (messageLocalId?: string) => {
+        setHistoryActionPending(true)
+        try {
+            const result = await props.api.forkConversation(props.session.id, messageLocalId)
+            await navigate({
+                to: '/sessions/$sessionId',
+                params: { sessionId: result.sessionId },
+                ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+            })
+        } finally {
+            setHistoryActionPending(false)
+        }
+    }, [navigate, props.api, props.session.id])
+
+    const onRewindConversation = useCallback(async (messageLocalId: string) => {
+        setHistoryActionPending(true)
+        try {
+            await props.api.rewindConversation(props.session.id, messageLocalId)
+            props.onRefresh()
+        } finally {
+            setHistoryActionPending(false)
+        }
+    }, [props.api, props.onRefresh, props.session.id])
     const sessionInactive = !props.session.active
     const inactiveCanResume = inactiveSessionCanResume(
         props.session,
@@ -494,12 +634,28 @@ function SessionChatInner(props: SessionChatProps) {
         props.cursorChatOnDisk
     )
     const terminalSupported = isRemoteTerminalSupported(props.session.metadata)
+    // Offer the agent terminal only for an ACTIVE PTY session: a 'remote'/SDK
+    // session has no agent PTY, and an archived/inactive one has no live PTY (and
+    // no buffer once the runner exits), so its terminal would just be an empty,
+    // misleadingly "connected" view. Matches the composer terminal button, which
+    // is likewise gated on `session.active`.
+    const canViewAgentTerminal =
+        props.session.metadata?.startingMode === 'pty' && props.session.active
     const normalizedCacheRef = useRef<Map<string, { source: DecryptedMessage; normalized: NormalizedMessage | null }>>(new Map())
     const blocksByIdRef = useRef<Map<string, ChatBlock>>(new Map())
     const visibleGroupsRef = useRef<ToolGroupBlock[]>([])
+    const [rememberedTailBoundary, setRememberedTailBoundary] = useState<{
+        id: string | null
+        tailRevision: number
+    } | null>(null)
     const [forceScrollToken, setForceScrollToken] = useState(0)
+    const uploadDraftSnapshotRef = useRef<{ text: string; attachments: AttachmentDraftInput[] }>({
+        text: '',
+        attachments: [],
+    })
     const [outlineOpen, setOutlineOpen] = useState(props.initialOutlineOpen ?? false)
     const [showUsagePanel, setShowUsagePanel] = useState(false)
+    const [terminalVisible, setTerminalVisible] = useState(false)
     useEffect(() => {
         if (!props.initialOutlineOpen) {
             return
@@ -507,19 +663,58 @@ function SessionChatInner(props: SessionChatProps) {
         setOutlineOpen(true)
         props.onInitialOutlineConsumed?.()
     }, [props.initialOutlineOpen, props.onInitialOutlineConsumed])
-
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
+    // Serialize Cursor setModel RPCs so drill-down default apply cannot finish
+    // after a later explicit variant click and overwrite it.
+    const enqueueCursorModelApply = useMemo(() => createSerialAsyncQueue(), [])
     const lastSyncedCursorModelRef = useRef<string | null | undefined>(undefined)
-    const scratchlist = useScratchlist(props.session.id)
+    const scratchlist = useHubScratchlist(props.session.id, props.api)
+    const { sessions: allSessions } = useSessions(props.api)
+    const resolveSessionMentionTooltip = useCallback((id: string, title: string) => {
+        const hit = allSessions.find((s) => s.id === id) ?? null
+        if (!hit) {
+            return {
+                model: formatSessionMentionTooltip(null, title, id),
+                session: null,
+            }
+        }
+        const attention = classifySessionAttention(hit, {
+            selected: false,
+            lastSeenAt: getSessionLastSeenAt(hit.id),
+        })
+        const attentionLabel = attention
+            ? t(getSessionAttentionLabelKey(attention))
+            : null
+        return {
+            model: formatSessionMentionTooltip(
+                {
+                    id: hit.id,
+                    title: getSessionTitle(hit),
+                    active: hit.active,
+                    lifecycleState: hit.metadata?.lifecycleState ?? null,
+                    path: hit.metadata?.path ?? null,
+                    worktreePath: hit.metadata?.worktree?.worktreePath ?? null,
+                    relativeTime: formatRelativeTime(hit.updatedAt, t),
+                    thinking: hit.thinking,
+                    attentionLabel,
+                },
+                title,
+                id
+            ),
+            session: hit,
+        }
+    }, [allSessions, t])
     const [scratchlistMode, setScratchlistMode] = useState(false)
+    const [isScratchlistParking, setIsScratchlistParking] = useState(false)
     // Mode resets across sessions implicitly: SessionChat is keyed by
     // session.id at the public-export boundary, so a session switch
     // remounts SessionChatInner from scratch and `scratchlistMode`
     // initializes to false again. (Previous effect-based reset was
     // racy on first paint - see public-export comment for context.)
     const handleScratchlistToggle = useCallback(() => {
+        if (isScratchlistParking) return
         setScratchlistMode((m) => !m)
-    }, [])
+    }, [isScratchlistParking])
     /**
      * Global keyboard shortcut: Ctrl/Cmd + Shift + S toggles scratchlist
      * mode (open/close drawer + flip composer routing).
@@ -544,6 +739,7 @@ function SessionChatInner(props: SessionChatProps) {
      */
     useEffect(() => {
         const onKeyDown = (e: globalThis.KeyboardEvent) => {
+            if (isScratchlistParking) return
             if (!isScratchlistToggleHotkey(e)) return
             if (isScratchlistHotkeyBlockedTarget(e.target)) return
             e.preventDefault()
@@ -551,17 +747,20 @@ function SessionChatInner(props: SessionChatProps) {
         }
         window.addEventListener('keydown', onKeyDown)
         return () => window.removeEventListener('keydown', onKeyDown)
+    }, [isScratchlistParking])
+    /**
+     * Global select-all takeover: see applyGlobalSelectAll. Bound at
+     * window scope because the broken case is focus on the page body /
+     * message thread, which never routes keydown through the composer or
+     * the thread viewport.
+     */
+    useEffect(() => {
+        window.addEventListener('keydown', applyGlobalSelectAll)
+        return () => window.removeEventListener('keydown', applyGlobalSelectAll)
     }, [])
     /**
      * onSend wrapper: when scratchlist mode is on AND the submission is
-     * pure text (no attachments, no scheduledAt), the operator's submit
-     * is treated as "add to scratchlist" instead of "send to chat".
-     *
-     * If the submission carries attachments or a scheduledAt value,
-     * scratchlist can't represent it (entries are text-only), so we
-     * fall through to the normal chat send. Silently dropping
-     * attachments / schedule while reporting success to the composer
-     * caused PR #798 review's [Major] data-loss finding.
+     * not scheduled, route to scratchlist (text and/or hub attachments).
      *
      * The composer (HappyComposer) uses the boolean return value to
      * decide whether to clear text/attachments/schedule, so we resolve
@@ -569,19 +768,130 @@ function SessionChatInner(props: SessionChatProps) {
      * they can keep adding entries while sticky-mode is on. If add()
      * returns false (empty after trim, at-cap), we resolve false so
      * the composer keeps its text and the operator can fix it.
+     *
+     * Chat-path chips attached before scratchlist mode are migrated in
+     * the scratchlist attachment adapter's send() (#1226). If any
+     * non-hub path still reaches this wrapper, fail closed — never park
+     * text-only and clear chips.
      */
+    // Stable handle so HappyComposer can release parked chips without
+    // deleting hub blobs when clearAttachments() calls adapter.remove().
+    const scratchlistAdapterRef = useRef<ScratchlistAttachmentAdapter | null>(null)
+
+    /**
+     * Park from a live composer snapshot *before* assistant-ui's
+     * `composer.send()` empties text/chips. Returning false leaves the
+     * composer intact for retry (at-cap / hub error).
+     */
+    const onParkScratchlist = useCallback(
+        async (
+            text: string,
+            pending: readonly PendingParkAttachment[],
+        ): Promise<ScratchlistParkResult> => {
+            let prepared
+            try {
+                prepared = await prepareScratchlistParkAttachments(
+                    props.api,
+                    props.session.id,
+                    pending,
+                )
+            } catch {
+                return false
+            }
+            let aborted = false
+            const abort = async () => {
+                if (aborted) return
+                aborted = true
+                await finalizeMigratedScratchlistParkCleanup(
+                    props.api,
+                    props.session.id,
+                    prepared,
+                    false,
+                )
+            }
+            return {
+                abort,
+                commit: async () => {
+                    const accepted = await scratchlist.add(text, prepared)
+                    if (!accepted) {
+                        await abort()
+                        return false
+                    }
+                    return true
+                },
+                beforeClear: async () => {
+                    await finalizeMigratedScratchlistParkCleanup(
+                        props.api,
+                        props.session.id,
+                        prepared,
+                        true,
+                    )
+                    scratchlistAdapterRef.current?.releaseWithoutDelete(
+                        pending.map((chip) => chip.id),
+                    )
+                },
+            }
+        },
+        [props.api, props.session.id, scratchlist],
+    )
+
     const onSendForComposer = useCallback(
         async (
             text: string,
             attachments?: AttachmentMetadata[],
             scheduledAt?: number | null,
-        ): Promise<boolean> => {
-            if (shouldRouteToScratchlist(scratchlistMode, attachments, scheduledAt)) {
-                return scratchlist.add(text)
+            deliveryMode: MessageDeliveryMode = 'queue',
+        ): Promise<{ attemptId: string | null } | false> => {
+            if (
+                scratchlistMode
+                && scheduledAt == null
+                && attachmentsNeedScratchlistMigration(attachments)
+            ) {
+                return false
             }
-            return props.onSend(text, attachments, scheduledAt)
+            if (shouldRouteToScratchlist(scratchlistMode, attachments, scheduledAt)) {
+                // Legacy path if something still calls composer.send() while
+                // scratchlist mode is on. Prefer onParkScratchlist (clears
+                // only after accept).
+                const accepted = await scratchlist.add(text, attachments)
+                await finalizeMigratedScratchlistParkCleanup(
+                    props.api,
+                    props.session.id,
+                    attachments,
+                    accepted,
+                )
+                return accepted ? { attemptId: null } : false
+            }
+            // If the user uploaded while scratchlist mode was on, then toggled
+            // it off before send, pending items still carry hub paths. Stage
+            // those through the normal CLI upload dir before chat send.
+            const list = attachments ?? []
+            const hubItems = list.filter((att) => isHubScratchlistAttachmentPath(att.path))
+            if (hubItems.length > 0) {
+                const staged = await stageScratchlistAttachmentsForComposeSend(
+                    props.api,
+                    props.session.id,
+                    hubItems,
+                )
+                const ordered = mergeStagedAttachmentsInOrder(list, staged)
+                const accepted = await props.onSend(
+                    text,
+                    ordered,
+                    scheduledAt,
+                    deliveryMode,
+                )
+                if (accepted) {
+                    // Hub blobs were copied into the normal upload dir; drop the
+                    // scratchlist copies so they stop counting against the session cap.
+                    await Promise.allSettled(
+                        hubItems.map((att) => props.api.deleteScratchlistAttachment(props.session.id, att.id))
+                    )
+                }
+                return accepted
+            }
+            return props.onSend(text, attachments, scheduledAt, deliveryMode)
         },
-        [props.onSend, scratchlist, scratchlistMode],
+        [props.onSend, props.api, props.session.id, scratchlist, scratchlistMode],
     )
     const agentFlavor = props.session.metadata?.flavor ?? null
     const controlledByUser = props.session.agentState?.controlledByUser === true
@@ -589,8 +899,16 @@ function SessionChatInner(props: SessionChatProps) {
     const codexModelsState = useCodexModels({
         api: props.api,
         sessionId: props.session.id,
+        machineId: props.session.metadata?.machineId ?? null,
         enabled: agentFlavor === 'codex' && props.session.active && !controlledByUser
     })
+    const effectiveCodexServiceTier = agentFlavor === 'codex'
+        ? getEffectiveCodexServiceTier(
+            props.session.serviceTier,
+            props.session.model,
+            codexModelsState.models
+        )
+        : undefined
     const codexModelOptions = useMemo(() => {
         if (agentFlavor !== 'codex') {
             return undefined
@@ -674,6 +992,24 @@ function SessionChatInner(props: SessionChatProps) {
             ]
             : undefined
     ), [agentFlavor, grokModelsState.availableModels])
+    const copilotModelsState = useCopilotModels({
+        api: props.api,
+        sessionId: props.session.id,
+        enabled: agentFlavor === 'copilot' && props.session.active && !controlledByUser
+    })
+    const copilotModelOptions = useMemo(() => (
+        agentFlavor === 'copilot'
+            ? [
+                { value: null, label: 'Auto' },
+                ...copilotModelsState.availableModels
+                    .filter((model) => model.modelId !== 'auto')
+                    .map((model) => ({
+                        value: model.modelId,
+                        label: model.name ?? model.modelId
+                    }))
+            ]
+            : undefined
+    ), [agentFlavor, copilotModelsState.availableModels])
     const cursorModelsState = useCursorModels({
         api: props.api,
         sessionId: props.session.id,
@@ -790,10 +1126,17 @@ function SessionChatInner(props: SessionChatProps) {
     }, [agentFlavor, props.session.model, cursorPicker])
 
     const cursorSelectedBaseValue = useMemo(() => (
-        agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
+        agentFlavor === 'cursor' && cursorPicker
             ? resolveSessionCursorBaseSelectValue(cursorPicker, cursorSelectedBase)
             : undefined
     ), [agentFlavor, cursorPicker, cursorSelectedBase])
+
+    const resolveCursorVariantsForBase = useCallback((baseKey: string) => {
+        if (!cursorPicker) {
+            return []
+        }
+        return buildCursorEffortPickerOptionsWithDefaultFirst(baseKey, cursorPicker.catalog)
+    }, [cursorPicker])
 
     const cursorModelEffortOptions = useMemo(() => {
         if (agentFlavor !== 'cursor' || !cursorPicker) {
@@ -805,7 +1148,10 @@ function SessionChatInner(props: SessionChatProps) {
         const baseKey = cursorSelectedBaseValue && cursorSelectedBaseValue !== 'auto'
             ? cursorSelectedBaseValue
             : cursorPicker.baseKey
-        return buildCursorEffortPickerOptions(resolveCursorVariantOptions(baseKey ?? null, cursorPicker.catalog))
+        if (!baseKey || baseKey === 'auto') {
+            return undefined
+        }
+        return buildCursorEffortPickerOptionsWithDefaultFirst(baseKey, cursorPicker.catalog)
     }, [agentFlavor, cursorPicker, cursorSelectedBaseValue])
 
     const cursorVariantSelectValue = useMemo(() => (
@@ -818,6 +1164,7 @@ function SessionChatInner(props: SessionChatProps) {
         switchSession,
         setPermissionMode,
         setCollaborationMode,
+        setCopilotAgentMode,
         setModel,
         setModelReasoningEffort,
         setEffort,
@@ -974,8 +1321,8 @@ function SessionChatInner(props: SessionChatProps) {
     }, [visibleMessages])
 
     const goalStateSourceMessages = useMemo(
-        () => buildGoalStateMessages(props.messages, props.pendingMessages ?? []),
-        [props.messages, props.pendingMessages]
+        () => buildGoalStateMessages(props.messages),
+        [props.messages]
     )
 
     const normalizedGoalStateMessages: NormalizedMessage[] = useMemo(() => {
@@ -1025,6 +1372,22 @@ function SessionChatInner(props: SessionChatProps) {
         () => reconcileChatBlocks(reduced.blocks, blocksByIdRef.current),
         [reduced.blocks]
     )
+    const sessionStatus = useMemo(
+        () => buildSessionStatusData({
+            goal: reduced.latestGoal,
+            tasks: props.session.todos,
+            blocks: reconciled.blocks,
+            messages: normalizedMessages,
+            backgroundTaskCount: props.session.backgroundTaskCount
+        }),
+        [
+            reduced.latestGoal,
+            props.session.todos,
+            props.session.backgroundTaskCount,
+            reconciled.blocks,
+            normalizedMessages
+        ]
+    )
     const hasRunningChildAgent = useMemo(
         () => hasAbortableAgentRun(reduced.blocks),
         [reduced.blocks]
@@ -1054,23 +1417,61 @@ function SessionChatInner(props: SessionChatProps) {
     const visibleBlocks = useMemo(
         () => buildVisibleChatBlocks(threadBlocks, {
             hasMoreMessages: props.hasMoreMessages,
-            previousGroups: visibleGroupsRef.current
+            previousGroups: visibleGroupsRef.current,
+            codexExplorationCollapsed
         }),
-        [threadBlocks, props.hasMoreMessages]
+        [threadBlocks, props.hasMoreMessages, codexExplorationCollapsed]
     )
+
+    // Fork-current must compare against assistant-ui message ids (`kind:id`),
+    // not raw hub message ids — MessageActions receive the rendered card id,
+    // and adjacent assistant blocks join under the first block's id.
+    //
+    // Calculate the boundary from the tail window, then remember it while the
+    // operator reads history. Otherwise changing viewMode to `history` hides
+    // a valid current Fork action, and loading older pages can make the last
+    // visible historical message look like the current fork boundary.
+    const currentTailBoundaryId = useMemo(() => {
+        if (props.viewMode !== 'tail') return null
+        return findLatestCompletedBoundaryId(
+            visibleBlocks,
+            props.session.thinking,
+            props.session.activeTurnStartedAt ?? null
+        )
+    }, [props.viewMode, props.session.activeTurnStartedAt, props.session.thinking, visibleBlocks])
+
+    useEffect(() => {
+        if (props.viewMode !== 'tail') return
+        setRememberedTailBoundary((previous) => (
+            previous?.id === currentTailBoundaryId && previous.tailRevision === props.tailRevision
+                ? previous
+                : { id: currentTailBoundaryId, tailRevision: props.tailRevision }
+        ))
+    }, [currentTailBoundaryId, props.tailRevision, props.viewMode])
+
+    const latestCompletedBoundaryId = resolveLatestCompletedBoundaryIdForView(
+        props.viewMode,
+        currentTailBoundaryId,
+        rememberedTailBoundary,
+        props.tailRevision
+    )
+
+    const isLatestCompletedBoundary = useCallback((messageId: string) => {
+        return latestCompletedBoundaryId === messageId
+    }, [latestCompletedBoundaryId])
 
     useEffect(() => {
         visibleGroupsRef.current = visibleBlocks.filter(isToolGroupBlock)
     }, [visibleBlocks])
 
+    // "N new messages" counts rendered blocks, not raw messages: a subagent run
+    // is dozens of sidechain messages but a single Task card, and a tool_use +
+    // tool_result pair is one card.
+    const unseenCount = useUnseenBlockCount(props.viewMode, visibleBlocks)
+
     const outlineItems = useMemo(
         () => buildConversationOutline(reconciled.blocks),
         [reconciled.blocks]
-    )
-
-    const outlineTitle = useMemo(
-        () => getOutlineTitle(props.session),
-        [props.session]
     )
 
     const lastPrompt = useMemo(() => {
@@ -1115,6 +1516,17 @@ function SessionChatInner(props: SessionChatProps) {
         }
     }, [setCollaborationMode, props.onRefresh, haptic])
 
+    const handleCopilotAgentModeChange = useCallback(async (mode: CopilotAgentMode) => {
+        try {
+            await setCopilotAgentMode(mode)
+            haptic.notification('success')
+            props.onRefresh()
+        } catch (e) {
+            haptic.notification('error')
+            console.error('Failed to set Copilot agent mode:', e)
+        }
+    }, [setCopilotAgentMode, props.onRefresh, haptic])
+
     // Model mode change handler
     const handleModelChange = useCallback(async (model: SessionModelSelection) => {
         const previousModelReasoningEffort = props.session.modelReasoningEffort
@@ -1152,7 +1564,7 @@ function SessionChatInner(props: SessionChatProps) {
 
     const handleCursorBaseModelChange = useCallback(async (baseKey: string | null) => {
         if (!cursorPicker) {
-            await handleModelChange(baseKey)
+            await enqueueCursorModelApply(() => handleModelChange(baseKey))
             return
         }
         const plan = resolveSessionCursorModelChange({
@@ -1167,13 +1579,13 @@ function SessionChatInner(props: SessionChatProps) {
         }
         setCursorSelectedBase(plan.nextSelectedBase)
         if (plan.shouldApply) {
-            await handleModelChange(plan.wireId)
+            await enqueueCursorModelApply(() => handleModelChange(plan.wireId))
         }
-    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
+    }, [cursorPicker, cursorSelectedBase, enqueueCursorModelApply, handleModelChange, props.session.model])
 
     const handleCursorEffortChange = useCallback(async (wireId: string | null) => {
         if (!cursorPicker) {
-            await handleModelChange(wireId)
+            await enqueueCursorModelApply(() => handleModelChange(wireId))
             return
         }
         const plan = resolveSessionCursorModelChange({
@@ -1188,8 +1600,8 @@ function SessionChatInner(props: SessionChatProps) {
             return
         }
         setCursorSelectedBase(plan.nextSelectedBase)
-        await handleModelChange(plan.wireId)
-    }, [cursorPicker, cursorSelectedBase, handleModelChange, props.session.model])
+        await enqueueCursorModelApply(() => handleModelChange(plan.wireId))
+    }, [cursorPicker, cursorSelectedBase, enqueueCursorModelApply, handleModelChange, props.session.model])
 
     const handleModelReasoningEffortChange = useCallback(async (modelReasoningEffort: string | null) => {
         try {
@@ -1240,7 +1652,8 @@ function SessionChatInner(props: SessionChatProps) {
         setOutlineOpen(false)
         navigate({
             to: '/sessions/$sessionId/files',
-            params: { sessionId: props.session.id }
+            params: { sessionId: props.session.id },
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
         })
     }, [navigate, props.session.id])
 
@@ -1251,7 +1664,8 @@ function SessionChatInner(props: SessionChatProps) {
     const handleViewTerminal = useCallback(() => {
         navigate({
             to: '/sessions/$sessionId/terminal',
-            params: { sessionId: props.session.id }
+            params: { sessionId: props.session.id },
+            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
         })
     }, [navigate, props.session.id])
 
@@ -1261,9 +1675,41 @@ function SessionChatInner(props: SessionChatProps) {
     // The ref is read at send time; resolvePendingSchedule converts it to an
     // absolute epoch-ms using Date.now() at that moment (send-time base for presets).
     const [pendingSchedule, setPendingSchedule] = useState<PendingSchedule | null>(null)
+    const [pendingScheduleRevision, setPendingScheduleRevision] = useState(0)
+    const [sendAcceptance, setSendAcceptance] = useState<{ attemptId: string | null } | null>(null)
+    const updatePendingSchedule = useCallback((next: PendingSchedule | null) => {
+        setPendingSchedule(next)
+        setPendingScheduleRevision((revision) => revision + 1)
+    }, [])
     const pendingScheduleRef = useRef<PendingSchedule | null>(null)
     // Keep render ref in sync so onNew can snapshot at send time
     pendingScheduleRef.current = pendingSchedule
+    // The single, shared intent ref travels HappyComposer -> useHappyRuntime
+    // -> handleSend. The runtime consumes and resets it in the same submit
+    // turn, so explicit or retry-safe queue intents never stick to later
+    // ordinary sends.
+    const pendingSendIntentRef = useRef<ComposerSendIntent>('default')
+    const attachmentOrderRef = useRef<string[]>([])
+    const restoredSendErrorIdRef = useRef<number | null>(null)
+
+    useEffect(() => {
+        const error = props.sendError
+        if (!error) {
+            restoredSendErrorIdRef.current = null
+            return
+        }
+        if (restoredSendErrorIdRef.current === error.id) return
+        // A retry cannot carry the original Pi streaming generation. Preserve
+        // queue, but deliberately downgrade a failed turn-scoped steer to the
+        // HAPI queue so a later active turn is never steered by stale text.
+        pendingSendIntentRef.current = getRestoredComposerSendIntent(error.deliveryMode)
+        restoredSendErrorIdRef.current = error.id
+    }, [props.sendError])
+
+    const handleClearSendError = useCallback(() => {
+        pendingSendIntentRef.current = 'default'
+        props.onClearSendError?.()
+    }, [props.onClearSendError])
 
     // Auto-clear absolute-type pendingSchedule when the chosen time expires so
     // the composer clock button doesn't stay active past the scheduled instant.
@@ -1276,14 +1722,19 @@ function SessionChatInner(props: SessionChatProps) {
         const ms = (pendingSchedule as Extract<PendingSchedule, { type: 'absolute' }>).ms
         const remaining = ms - Date.now()
         if (remaining <= 0) {
-            setPendingSchedule(null)
+            updatePendingSchedule(null)
             return
         }
-        const timer = setTimeout(() => setPendingSchedule(null), remaining)
+        const timer = setTimeout(() => updatePendingSchedule(null), remaining)
         return () => clearTimeout(timer)
-    }, [pendingSchedule])
+    }, [pendingSchedule, updatePendingSchedule])
 
-    const handleSend = useCallback(async (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => {
+    const handleSend = useCallback(async (
+        text: string,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        intent: ComposerSendIntent = 'default',
+    ) => {
         if (text.trim() === '/usage' && !attachments?.length) {
             setShowUsagePanel(true)
             return
@@ -1301,8 +1752,18 @@ function SessionChatInner(props: SessionChatProps) {
         // upstream review on PR #798: [Major] "Clear accepted scheduled
         // chat sends after scratchlist fallback".)
         const routedToScratchlist = shouldRouteToScratchlist(scratchlistMode, attachments, scheduledAt)
-        const accepted = await onSendForComposer(text, attachments, scheduledAt)
+        const deliveryMode = resolveMessageDeliveryMode({
+            agentFlavor,
+            // Do not use assistant-ui's broader `isRunning` here: a
+            // child-agent run is not the Pi main session's steer target.
+            isSessionThinking: props.session.thinking,
+            intent,
+            scheduledAt,
+            routesToScratchlist: routedToScratchlist,
+        })
+        const accepted = await onSendForComposer(text, attachments, scheduledAt, deliveryMode)
         if (!accepted) return
+        setSendAcceptance({ attemptId: accepted.attemptId })
         if (!routedToScratchlist) {
             // Clear pendingSchedule only after the mutation is actually
             // accepted - covers both pre-mutation guards AND async
@@ -1311,67 +1772,127 @@ function SessionChatInner(props: SessionChatProps) {
             // its own send path). Schedule clear / forced scroll only
             // matter for chat sends; scratchlist adds don't have a
             // schedule and shouldn't move the chat viewport.
-            setPendingSchedule(null)
+            updatePendingSchedule(null)
             setForceScrollToken((token) => token + 1)
         }
-    }, [onSendForComposer, scratchlistMode])
+    }, [agentFlavor, onSendForComposer, props.session.thinking, scratchlistMode, updatePendingSchedule])
 
     const attachmentAdapter = useMemo(() => {
-        if (!props.session.active) {
+        if (props.session.active && scratchlistMode) {
+            const adapter = createScratchlistAttachmentAdapter(props.api, props.session.id)
+            scratchlistAdapterRef.current = adapter
+            return adapter
+        }
+        scratchlistAdapterRef.current = null
+        if (props.session.active) {
+            return createAttachmentAdapter(props.api, props.session.id)
+        }
+        // Only offer attachments on inactive sessions that can actually resume;
+        // otherwise file picks become stuck error attachments that cannot send.
+        if (!inactiveCanResume || !props.resolveSessionIdForUpload) {
             return undefined
         }
-        return createAttachmentAdapter(props.api, props.session.id)
-    }, [props.api, props.session.id, props.session.active])
+        // Keep one resume promise for every generator created by this adapter
+        // instance. Preview generation can outlive navigation; a remount clears
+        // the router cache, so a second file must reuse this closure's promise
+        // instead of starting a fresh resume against the retired source id.
+        let uploadResolution: Promise<string> | undefined
+        const resolveUploadSession = () => {
+            uploadResolution ??= props.resolveSessionIdForUpload!(props.session.id).catch((error) => {
+                uploadResolution = undefined
+                throw error
+            })
+            return uploadResolution
+        }
+        return createAttachmentAdapter(
+            props.api,
+            props.session.id,
+            resolveUploadSession,
+            async (resolvedSessionId, pending) => {
+                // Include the in-flight file and coalesce multi-file drops into
+                // one transfer + navigation before the source composer unmounts.
+                // isCancelled is sampled at save time so a mid-handoff remove
+                // still drops the file (and any prior inactive persist of it).
+                await handoffComposerDraft(
+                    props.session.id,
+                    resolvedSessionId,
+                    pending,
+                    async (targetSessionId) => {
+                        props.onUploadSessionResolved?.(targetSessionId)
+                    },
+                )
+            },
+        )
+    }, [props.api, props.session.id, props.session.active, props.resolveSessionIdForUpload, scratchlistMode, inactiveCanResume])
+
 
     const runtime = useHappyRuntime({
         session: props.session,
         blocks: visibleBlocks,
+        messagesVersion: props.messagesVersion,
+        historyVersion: props.historyVersion,
+        viewMode: props.viewMode,
+        isSyncingTail: props.isSyncingTail,
+        isLoadingMore: props.isLoadingMoreMessages,
         isSending: props.isSending,
         isRunning: props.session.thinking || hasRunningChildAgent,
         onSendMessage: handleSend,
+        attachmentOrderRef,
         onAbort: handleAbort,
         attachmentAdapter,
         allowSendWhenInactive: true,
-        pendingScheduleRef
+        pendingScheduleRef,
+        pendingSendIntentRef,
     })
 
     return (
         <div className="flex h-full min-h-0 flex-col">
             <SessionHeader
                 session={props.session}
+                serviceTier={effectiveCodexServiceTier}
                 onBack={props.onBack}
                 onToggleFiles={props.session.metadata?.path ? handleToggleFiles : undefined}
                 filesActive={false}
                 onToggleOutline={handleToggleOutline}
                 outlineActive={outlineOpen}
+                onToggleTerminal={canViewAgentTerminal ? () => setTerminalVisible(v => !v) : undefined}
+                terminalActive={terminalVisible}
                 api={props.api}
+                titleSuggestionAvailable={props.titleSuggestionAvailable}
                 canReopen={inactiveCanResume}
                 reopenDisabledReason={props.reopenDisabledReason}
+                reopenHint={props.reopenHint}
                 onSessionDeleted={props.onBack}
                 onCloned={props.onCloned}
                 lastPrompt={lastPrompt}
-                onSessionReopened={(newSessionId) => {
-                    navigate({
-                        to: '/sessions/$sessionId',
-                        params: { sessionId: newSessionId },
-                        replace: true
-                    })
+                onSessionReopened={async (newSessionId) => {
+                    await transferComposerDraftThenNavigate(
+                        props.session.id,
+                        newSessionId,
+                        () => navigate({
+                            to: '/sessions/$sessionId',
+                            params: { sessionId: newSessionId },
+                            replace: true,
+                            ...PRESERVE_SESSION_SIDEBAR_SCROLL,
+                        }),
+                    )
                 }}
             />
 
             <CursorMigrationBanner metadata={props.session.metadata} />
 
+            {sessionStatus ? <SessionStatusPanel data={sessionStatus} /> : null}
+
+            <div className="flex flex-col min-h-0 flex-1">
             {props.session.teamState && (
                 <TeamPanel teamState={props.session.teamState} />
             )}
 
             {sessionInactive ? (
-                <div className="px-3 pt-3">
-                    <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-[var(--app-hint)]">
-                        {inactiveCanResume
-                            ? t('session.inactive.autoResume')
-                            : t('session.inactive.cannotResume')}
-                    </div>
+                <div className="mx-auto w-full max-w-content bg-[var(--app-subtle-bg)] p-3 text-sm text-[var(--app-hint)]">
+                    {inactiveCanResume
+                        ? t('session.inactive.autoResume')
+                        : t('session.inactive.cannotResume')}
                 </div>
             ) : null}
 
@@ -1384,7 +1905,19 @@ function SessionChatInner(props: SessionChatProps) {
 
             <AssistantRuntimeProvider runtime={runtime}>
                 <ShareSeedConsumer sessionId={props.session.id} sessionActive={props.session.active} />
-                <DragDropZone disabled={sessionInactive || props.isSending || pendingSchedule != null}>
+                <AbortRestoreConsumer messages={normalizedMessages} onAbortRestore={props.onAbortRestore ?? (() => {})} />
+                <DragDropZone disabled={(!props.session.active && !inactiveCanResume) || props.isSending || pendingSchedule != null || isScratchlistParking}>
+                    <div className="relative flex min-h-0 flex-1 flex-col">
+                        {canViewAgentTerminal && (
+                            // SessionChatInner is keyed by session.id, so switching sessions remounts this subtree.
+                            <AgentTerminalView
+                                sessionId={props.session.id}
+                                visible={terminalVisible}
+                                className={terminalVisible ? 'flex-1 min-h-0' : 'hidden'}
+                            />
+                        )}
+                        <div className={(terminalVisible && canViewAgentTerminal) ? 'hidden' : 'flex min-h-0 flex-1 flex-col'}>
+
                     <HappyThread
                         // Key with prefix: different components under the same session
                         // (thread, scratchlist, composer) must have distinct keys to avoid
@@ -1392,62 +1925,34 @@ function SessionChatInner(props: SessionChatProps) {
                         // Without prefixes, React may reuse the wrong component's DOM/localStorage.
                         key={`thread-${props.session.id}`}
                         api={props.api}
+                        session={props.session}
+                        serviceTier={effectiveCodexServiceTier}
                         sessionId={props.session.id}
                         metadata={props.session.metadata}
                         disabled={sessionInactive}
                         onRefresh={props.onRefresh}
                         onRetryMessage={props.onRetryMessage}
-                        onFlushPending={props.onFlushPending}
-                        onAtBottomChange={props.onAtBottomChange}
-                        isLoadingMessages={props.isLoadingMessages}
+                        historyActionPending={historyActionPending}
+                        onForkConversation={controlledByUser ? undefined : onForkConversation}
+                        onRewindConversation={controlledByUser ? undefined : onRewindConversation}
+                        isLatestCompletedBoundary={isLatestCompletedBoundary}
+                        onViewModeChange={props.onViewModeChange}
+                        isSyncingTail={props.isSyncingTail}
                         messagesWarning={props.messagesWarning}
                         hasMoreMessages={props.hasMoreMessages}
                         isLoadingMoreMessages={props.isLoadingMoreMessages}
                         onLoadMore={props.onLoadMore}
-                        pendingCount={props.pendingCount}
+                        onCancelLoadMore={props.onCancelLoadMore}
+                        unseenCount={unseenCount}
                         rawMessagesCount={visibleMessages.length}
                         normalizedMessagesCount={normalizedMessages.length}
                         messagesVersion={props.messagesVersion}
+                        historyVersion={props.historyVersion}
                         forceScrollToken={forceScrollToken}
                         outlineOpen={outlineOpen}
-                        outlineTitle={outlineTitle}
                         outlineItems={outlineItems}
                         onOutlineOpenChange={setOutlineOpen}
                     />
-
-                    {codexCollaborationModeSupported && codexModelsState.error ? (
-                        <div className="px-3 pb-2">
-                            <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-red-600">
-                                {t('session.codexModelsLoadFailed')}: {codexModelsState.error}
-                            </div>
-                        </div>
-                    ) : null}
-
-                    <div className="px-3">
-                        {/*
-                         * Scratchlist drawer - composer-controlled. Only
-                         * mounted when the operator clicks the notepad icon
-                         * in the composer toolbar. State lives in the
-                         * useScratchlist hook above (so the toolbar counter
-                         * and the drawer share one source of truth).
-                         */}
-                        {scratchlistMode ? (
-                            <ScratchlistDrawerHost
-                                entries={scratchlist.entries}
-                                onMove={scratchlist.move}
-                                onDelete={scratchlist.remove}
-                                onSend={props.onSend}
-                                onExitScratchlistMode={() => setScratchlistMode(false)}
-                            />
-                        ) : null}
-                        <QueuedMessagesBar
-                            sessionId={props.session.id}
-                            api={props.api}
-                            onEdit={({ pendingSchedule: restored }) => {
-                                // Restore the schedule so the clock button re-activates
-                                setPendingSchedule(restored)
-                            }}
-                        />
                     </div>
 
                     {showUsagePanel && (
@@ -1508,16 +2013,83 @@ function SessionChatInner(props: SessionChatProps) {
                         </div>
                     )}
 
-                    <HappyComposer
+                    <div className={outlineOpen ? 'max-sm:hidden' : undefined}>
+                        {codexCollaborationModeSupported && codexModelsState.error ? (
+                            <div className="px-3 pb-2">
+                                <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-red-600">
+                                    {t('session.codexModelsLoadFailed')}: {codexModelsState.error}
+                                </div>
+                            </div>
+                        ) : null}
+
+                        {/*
+                         * tiann/hapi#893: one-time banner shown on first
+                         * v2-load when localStorage entries got migrated to
+                         * the hub. Sits above the drawer so the operator
+                         * sees it whether or not the drawer is open.
+                         * Auto-renders nothing unless `migrationStatus ===
+                         * 'completed'`.
+                         */}
+                        <ScratchlistMigrationBanner
+                            migrationStatus={scratchlist.migrationStatus}
+                            onDismiss={scratchlist.dismissMigrationBanner}
+                        />
+
+                        <div className="px-3">
+                            {/*
+                             * Scratchlist drawer - composer-controlled. Only
+                             * mounted when the operator clicks the notepad icon
+                             * in the composer toolbar. State lives in the
+                             * useScratchlist hook above (so the toolbar counter
+                             * and the drawer share one source of truth).
+                             */}
+                            {scratchlistMode ? (
+                                <ScratchlistDrawerHost
+                                    sessionId={props.session.id}
+                                    api={props.api}
+                                    entries={scratchlist.entries}
+                                    onMove={scratchlist.move}
+                                    onDelete={scratchlist.remove}
+                                    onSend={props.onSend}
+                                    onExitScratchlistMode={() => setScratchlistMode(false)}
+                                    disabled={props.isSending || isScratchlistParking}
+                                />
+                            ) : null}
+                            <QueuedMessagesBar
+                                sessionId={props.session.id}
+                                api={props.api}
+                                pendingSchedule={pendingSchedule}
+                                pendingScheduleRevision={pendingScheduleRevision}
+                                onEdit={({ pendingSchedule: restored }) => {
+                                    // Restore the schedule so the clock button re-activates
+                                    updatePendingSchedule(restored)
+                                }}
+                                canSteer={isSteeringSupportedForSession(props.session.metadata)
+                                    && (agentFlavor === 'pi'
+                                        ? props.session.thinking
+                                        : props.session.agentState?.steeringActive === true)
+                                    && !controlledByUser}
+                            />
+                        </div>
+
+                        <HappyComposer
                         key={`composer-${props.session.id}`}
                         sessionId={props.session.id}
+                        canRestoreAttachments={props.session.active}
+                        onUploadDraftSnapshot={(text, attachments) => {
+                            uploadDraftSnapshotRef.current = { text, attachments }
+                        }}
+                        attachmentOrderRef={attachmentOrderRef}
+                        resolveSessionMentionTooltip={resolveSessionMentionTooltip}
                         disabled={props.isSending}
                         pendingSchedule={pendingSchedule}
-                        onSchedule={setPendingSchedule}
-                        onClearSchedule={() => setPendingSchedule(null)}
+                        sendAcceptance={sendAcceptance}
+                        sendSettlement={props.sendSettlement}
+                        onSchedule={updatePendingSchedule}
+                        onClearSchedule={() => updatePendingSchedule(null)}
                         permissionMode={props.session.permissionMode}
                         collaborationMode={codexCollaborationModeSupported ? props.session.collaborationMode : undefined}
-                        threadGoal={reduced.latestGoal}
+                        copilotAgentMode={agentFlavor === 'copilot' ? props.session.copilotAgentMode : undefined}
                         model={props.session.model}
                         modelReasoningEffort={agentFlavor === 'codex' || agentFlavor === 'opencode' ? props.session.modelReasoningEffort : undefined}
                         effort={props.session.effort}
@@ -1539,13 +2111,15 @@ function SessionChatInner(props: SessionChatProps) {
                                             ? opencodeModelOptions
                                             : agentFlavor === 'grok'
                                                 ? grokModelOptions
-                                            // Pi uses its own provider-qualified picker (piModels prop).
-                                            // Feeding piModelOptions here would make the generic Ctrl/Cmd+M
-                                            // cycler (getNextModelForFlavor) post a bare modelId string,
-                                            // which loses the provider and can pick the wrong cached
-                                            // match or throw in runPi. undefined makes the shortcut a no-op
-                                            // so Pi model changes go through the dedicated picker only.
-                                                : undefined
+                                                : agentFlavor === 'copilot'
+                                                    ? copilotModelOptions
+                                                // Pi gets its provider-qualified model list from the piModels prop;
+                                                // feeding piModelOptions here would make the generic Ctrl/Cmd+M
+                                                // cycler (getNextModelForFlavor) post a bare modelId string,
+                                                // which loses the provider and can pick the wrong cached
+                                                // match or throw in runPi. undefined makes the shortcut a no-op
+                                                // so Pi model changes go through the settings sheet only.
+                                                    : undefined
                         }
                         piModels={piModels}
                         piSelectedModel={agentFlavor === 'pi' ? piSelectedModel : undefined}
@@ -1563,21 +2137,32 @@ function SessionChatInner(props: SessionChatProps) {
                         }
                         active={props.session.active}
                         allowSendWhenInactive
+                        onResumeStoredDraft={() => handleSend('', undefined, null)}
                         thinking={props.session.thinking}
                         agentState={props.session.agentState}
                         backgroundTaskCount={props.session.backgroundTaskCount}
                         contextSize={reduced.latestUsage?.contextSize}
                         contextCacheRead={reduced.latestUsage?.cacheRead}
                         contextWindow={reduced.latestUsage?.contextWindow ?? piContextWindow}
+                        contextModel={reduced.latestUsage?.model ?? props.session.model}
                         controlledByUser={controlledByUser}
                         onCollaborationModeChange={
                             codexCollaborationModeSupported && props.session.active && !controlledByUser
                                 ? handleCollaborationModeChange
                                 : undefined
                         }
-                        onPermissionModeChange={handlePermissionModeChange}
+                        onCopilotAgentModeChange={
+                            agentFlavor === 'copilot' && props.session.active && !controlledByUser
+                                ? handleCopilotAgentModeChange
+                                : undefined
+                        }
+                        onPermissionModeChange={
+                            agentFlavor === 'copilot' && controlledByUser
+                                ? undefined
+                                : handlePermissionModeChange
+                        }
                         selectedModelBase={
-                            agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
+                            agentFlavor === 'cursor' && cursorPicker
                                 ? cursorSelectedBaseValue
                                 : undefined
                         }
@@ -1593,6 +2178,11 @@ function SessionChatInner(props: SessionChatProps) {
                                 && cursorModelEffortOptions
                                 && cursorModelEffortOptions.length > 1
                                 ? cursorModelEffortOptions
+                                : undefined
+                        }
+                        resolveModelVariantsForBase={
+                            agentFlavor === 'cursor' && cursorPicker?.mode === 'dual'
+                                ? resolveCursorVariantsForBase
                                 : undefined
                         }
                         onModelChange={
@@ -1611,6 +2201,10 @@ function SessionChatInner(props: SessionChatProps) {
                                         ? (props.session.active && !piModelsState.error ? handleModelChange : undefined)
                                         : agentFlavor === 'grok'
                                             ? (props.session.active && !controlledByUser && !grokModelsState.error
+                                                ? handleModelChange
+                                                : undefined)
+                                        : agentFlavor === 'copilot'
+                                            ? (props.session.active && !controlledByUser
                                                 ? handleModelChange
                                                 : undefined)
                                         : handleModelChange
@@ -1639,7 +2233,7 @@ function SessionChatInner(props: SessionChatProps) {
                                     : undefined)
                                 : handleEffortChange
                         }
-                        serviceTier={agentFlavor === 'codex' ? props.session.serviceTier : undefined}
+                        serviceTier={effectiveCodexServiceTier}
                         onServiceTierChange={
                             agentFlavor === 'codex'
                                 && props.session.active
@@ -1657,14 +2251,22 @@ function SessionChatInner(props: SessionChatProps) {
                         voiceMicMuted={voice?.micMuted}
                         onVoiceToggle={voice && voiceBackendReady ? handleVoiceToggle : undefined}
                         onVoiceMicToggle={voice && voiceBackendReady ? handleVoiceMicToggle : undefined}
+                        voiceTranscriptionApi={props.api}
                         scratchlistMode={scratchlistMode}
                         scratchlistCount={scratchlist.entries.length}
                         onScratchlistToggle={handleScratchlistToggle}
+                        onParkScratchlist={onParkScratchlist}
+                        onScratchlistParkingChange={setIsScratchlistParking}
                         sendError={props.sendError ?? null}
-                        onClearSendError={props.onClearSendError}
-                    />
+                        onClearSendError={handleClearSendError}
+                        onSuppressSendErrorRestore={props.onSuppressSendErrorRestore}
+                        pendingSendIntentRef={pendingSendIntentRef}
+                        />
+                    </div>
+                    </div>
                 </DragDropZone>
             </AssistantRuntimeProvider>
+            </div>
 
             {/* Voice session component - renders nothing but initializes voice backend */}
             {voice && (

@@ -1,5 +1,23 @@
-import { afterEach, describe, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, describe, expect, test, vi } from 'vitest'
 import { setCursorAcpModelsSnapshot } from '@/cursor/utils/cursorAcpModelsBridge'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+// Isolate the on-disk cursor-models cache to this file's own HAPI_HOME so
+// parallel vitest workers don't race on the shared $HAPI_HOME/cache path
+// (see heavygee/hapi#101).
+const previousHapiHome = process.env.HAPI_HOME
+const testHapiHome = mkdtempSync(join(tmpdir(), 'hapi-cursor-models-'))
+process.env.HAPI_HOME = testHapiHome
+
+// Remove the per-file temp root after the suite so runs don't leak dirs into
+// the system temp dir (afterEach only clears the cache file inside it).
+afterAll(() => {
+    if (previousHapiHome === undefined) delete process.env.HAPI_HOME
+    else process.env.HAPI_HOME = previousHapiHome
+    rmSync(testHapiHome, { recursive: true, force: true })
+})
 
 const { spawnMock } = vi.hoisted(() => ({
     spawnMock: vi.fn()
@@ -23,7 +41,12 @@ vi.mock('./cursorAcpModelProbe', () => ({
     runCursorAcpModelProbe: acpProbeMock.runCursorAcpModelProbe,
     cursorProbeResponseHasWireCatalog: (response: { success?: boolean; availableModels?: Array<{ modelId: string }> }) =>
         response.success === true
-        && (response.availableModels ?? []).some((model) => model.modelId.includes('['))
+        && (response.availableModels ?? []).some((model) => {
+            const id = model.modelId.trim();
+            if (!id || id === 'auto' || id === 'default') return false;
+            if (id === 'default[]' || id.includes('[')) return true;
+            return !/(?:-extra-high-fast|-extra-high|-xhigh-fast|-xhigh|-high-fast|-high|-medium-fast|-medium|-low-fast|-low|-none-fast|-none|-thinking-high-fast|-thinking-high|-thinking|-fast)$/.test(id);
+        })
 }));
 
 import { isAgentAcpTransportActive } from '@/agent/backends/acp/agentCliGuard';
@@ -214,6 +237,42 @@ describe('listCursorModels', () => {
         expect(spawnMock).not.toHaveBeenCalled()
     })
 
+    test('enriches bare ACP snapshot with base cliModelSkus only (#1129)', async () => {
+        vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)
+        setCursorAcpModelsSnapshot({
+            availableModels: [
+                { modelId: 'composer-2.5', name: 'composer-2.5' },
+                { modelId: 'gpt-5.5', name: 'gpt-5.5' }
+            ],
+            currentModelId: 'default'
+        })
+        writeSharedCursorModelsCache({
+            success: true,
+            availableModels: [
+                { modelId: 'composer-2.5', name: 'composer-2.5' },
+                { modelId: 'gpt-5.5', name: 'gpt-5.5' }
+            ],
+            currentModelId: 'default',
+            cliModelSkus: [
+                { modelId: 'composer-2.5', name: 'Composer 2.5' },
+                { modelId: 'composer-2.5-fast', name: 'Composer 2.5 Fast' },
+                { modelId: 'gpt-5.5-high-fast', name: 'GPT-5.5 High Fast' }
+            ]
+        })
+
+        const result = await listCursorModels()
+
+        expect(result.availableModels?.map((row) => row.modelId)).toEqual([
+            'composer-2.5',
+            'gpt-5.5'
+        ])
+        // Bare catalogs cannot apply effort/speed SKUs — keep base rows only.
+        expect(result.cliModelSkus?.map((row) => row.modelId)).toEqual([
+            'composer-2.5'
+        ])
+        expect(spawnMock).not.toHaveBeenCalled()
+    })
+
     test('enriches live ACP snapshot with fuller shared cliModelSkus while lock is active', async () => {
         vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)
         setCursorAcpModelsSnapshot({
@@ -345,20 +404,41 @@ describe('listCursorModels', () => {
         });
     });
 
-    test('skips CLI slug probe when ACP lock is active after ACP probe', async () => {
-        vi.mocked(isAgentAcpTransportActive)
-            .mockReturnValueOnce(false)
-            .mockReturnValueOnce(true);
+    test('skips CLI slug probe when spawn lease is held after guard reads inactive', async () => {
+        const { acquireAgentCliSpawnLeaseSync, _resetAgentCliSpawnLeaseForTests } = await import(
+            '@hapi/protocol/agentCliSpawnLease'
+        )
+        acquireAgentCliSpawnLeaseSync(testHapiHome)
+        vi.mocked(isAgentAcpTransportActive).mockReturnValueOnce(false)
         acpProbeMock.runCursorAcpModelProbe.mockResolvedValue({
             success: false,
             error: 'no wires'
-        });
+        })
 
-        const result = await listCursorModels();
+        const result = await listCursorModels()
 
-        expect(spawnMock).not.toHaveBeenCalled();
-        expect(result).toEqual({ success: false, error: 'no wires' });
-    });
+        expect(spawnMock).not.toHaveBeenCalled()
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('ACP transport is active')
+        _resetAgentCliSpawnLeaseForTests(testHapiHome)
+    })
+
+    test('does not spawn list-models when ACP marker appears after lease acquire', async () => {
+        vi.mocked(isAgentAcpTransportActive)
+            .mockReturnValueOnce(false)
+            .mockReturnValueOnce(false)
+            .mockReturnValueOnce(true)
+        acpProbeMock.runCursorAcpModelProbe.mockResolvedValue({
+            success: false,
+            error: 'no wires'
+        })
+
+        const result = await listCursorModels()
+
+        expect(spawnMock).not.toHaveBeenCalled()
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('ACP transport is active')
+    })
 
     test('prefers live ACP snapshot over cache while ACP transport is active', async () => {
         vi.mocked(isAgentAcpTransportActive).mockReturnValue(true)

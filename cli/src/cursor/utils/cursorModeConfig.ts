@@ -1,5 +1,5 @@
 import type { CursorPermissionMode } from '@hapi/protocol/types';
-import { cursorCliSkuBaseId, cursorModelBaseId, matchCliSkuToAcpWireId } from '@hapi/protocol';
+import { cursorCliSkuBaseId, cursorModelBaseId, matchCliSkuToAcpWireId, resolveCursorLegacyModelBase } from '@hapi/protocol';
 import type { AcpSdkBackend } from '@/agent/backends/acp';
 import { logger } from '@/ui/logger';
 
@@ -16,6 +16,20 @@ export function toCursorAcpMode(mode: CursorPermissionMode | undefined): CursorA
     if (mode === 'debug') return 'debug';
     // autoReview / yolo / default map to agent; auto-review is a spawn flag + slash, not ACP mode.
     return 'agent';
+}
+
+/**
+ * Permission mode to use after the operator accepts a CreatePlan request.
+ * Plan/ask are read-only planning modes — leave them for an executable mode so
+ * "Yes" means continue the task, not "plan complete, stop".
+ */
+export function resolveCursorModeAfterPlanApproval(
+    mode: CursorPermissionMode | undefined
+): CursorPermissionMode {
+    if (mode === 'plan' || mode === 'ask' || mode === undefined) {
+        return 'default';
+    }
+    return mode;
 }
 
 /** True when HAPI permission mode should spawn/toggle Cursor Auto-review. */
@@ -80,18 +94,39 @@ export type ApplyCursorAcpModelResult = {
 type ConfigOption = NonNullable<ReturnType<AcpSdkBackend['getConfigOptionByCategory']>>;
 type ParameterizedCursorModelResult = ApplyCursorAcpModelResult | 'unsupported' | 'failed';
 
-/** Wire id stored on session + keepalive (preserve explicit variant picks). */
+/**
+ * Wire id stored on session + keepalive.
+ * Spawn-safe requested ids (bare / CLI SKU) must stay spawn-safe — do not
+ * re-persist ACP parameterized wires after apply (#1428 / #1430).
+ */
 export function wireIdForCursorSessionState(requested: string, resolved: string): string {
-    const trimmed = requested.trim();
-    if (trimmed.includes('[')) {
-        return trimmed;
+    const trimmedRequested = requested.trim();
+    const trimmedResolved = resolved.trim();
+
+    // Bare/SKU request: keep it even when ACP resolved a bracket wire.
+    if (trimmedRequested && !trimmedRequested.includes('[')) {
+        return trimmedRequested;
     }
-    return resolved;
+
+    // Prefer a spawn-safe resolved id when the request was a wire.
+    if (trimmedResolved && !trimmedResolved.includes('[')) {
+        return trimmedResolved;
+    }
+
+    if (trimmedRequested.includes('[')) {
+        const legacyBase = resolveCursorLegacyModelBase(cursorModelBaseId(trimmedRequested));
+        if (legacyBase !== cursorModelBaseId(trimmedRequested)) {
+            return trimmedResolved || trimmedRequested;
+        }
+        return trimmedRequested;
+    }
+
+    return trimmedResolved || trimmedRequested;
 }
 
 /**
  * Map a spawn / hub wire id onto a live ACP configOptions entry.
- * Exact wire ids only — no legacy alias, base-only, or nearest-variant fallback.
+ * Uses exact match, then SKU/wire remap (including non-legacy bracket strip).
  */
 export function resolveCursorAcpWireId(
     requested: string,
@@ -191,11 +226,25 @@ export async function applyCursorAcpModel(
         return parameterized;
     }
 
+    // Prefer the live model-option value list for set_config_option. Merging in
+    // metadata bare bases first lets spawn-safe remap return a bare id that the
+    // option catalog rejects (wire-only options).
     const optionWireIds = modelOption?.options?.map((option) => ({ modelId: option.value })) ?? [];
-    const catalog = [...available, ...optionWireIds];
-    const resolved = resolveCursorAcpWireId(trimmed, catalog);
+    const resolved = (
+        optionWireIds.length > 0
+            ? resolveCursorAcpWireId(trimmed, optionWireIds)
+            : null
+    ) ?? resolveCursorAcpWireId(trimmed, [...available, ...optionWireIds]);
     if (!resolved) {
         logger.debug(`[cursor-acp] Model ${trimmed} is not in ACP configOptions; skipping`);
+        return { applied: false };
+    }
+    if (
+        modelOption?.options
+        && modelOption.options.length > 0
+        && !optionHasValue(modelOption, resolved)
+    ) {
+        logger.debug(`[cursor-acp] Model ${resolved} is not an ACP model option value; skipping`);
         return { applied: false };
     }
 

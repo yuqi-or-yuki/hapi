@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import type { AgentMessage } from '@/agent/types';
 import { AcpMessageHandler } from './AcpMessageHandler';
 import { ACP_SESSION_UPDATE_TYPES } from './constants';
+import { clearGeneratedImages } from '@/modules/common/generatedImages';
 
 function getToolResult(messages: AgentMessage[], id: string): Extract<AgentMessage, { type: 'tool_result' }> {
     const result = messages.find((message): message is Extract<AgentMessage, { type: 'tool_result' }> =>
@@ -444,6 +445,7 @@ describe('AcpMessageHandler', () => {
         );
         expect(toolCall).toBeDefined();
         expect(toolCall!.input).toEqual({ command: 'df -hT' });
+        expect(toolCall).toMatchObject({ title: 'df -hT', kind: 'execute' });
     });
 
     it('strips "Shell: " prefix from title when deriving execute input (Kimi)', () => {
@@ -1064,6 +1066,84 @@ describe('AcpMessageHandler', () => {
         // Should only have the converted warning, no raw JSON prefix
         expect(messages).toHaveLength(1);
         expect((messages[0] as { text: string }).text).toMatch(/^Claude AI usage limit warning\|/);
+    });
+
+    it('drops a metadata envelope split across delta chunks', () => {
+        // In delta mode every chunk is a fragment, so no individual chunk ever
+        // parses as JSON and the per-chunk filter never fires. Only the flush
+        // boundary sees the reassembled envelope.
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler(
+            (message) => messages.push(message),
+            { textChunkMode: 'delta' }
+        );
+
+        const metadataJson = JSON.stringify({
+            type: 'output',
+            data: {
+                parentUuid: null,
+                isSidechain: true,
+                userType: 'external',
+                sessionId: '5605239b-3ca8-4cf4-bf06-a234f7984f2f',
+                type: 'tool_progress',
+                tool_name: 'Bash',
+                elapsed_time_seconds: 30,
+                heartbeat: true,
+            },
+        });
+
+        for (let i = 0; i < metadataJson.length; i += 17) {
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: metadataJson.slice(i, i + 17) }
+            });
+        }
+
+        handler.flushText();
+
+        expect(messages).toEqual([]);
+    });
+
+    it('drops a metadata envelope that arrives with leading whitespace', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+
+        const metadataJson = JSON.stringify({
+            type: 'output',
+            data: {
+                parentUuid: null,
+                sessionId: 'session-789',
+                userType: 'external',
+            },
+        });
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: { type: 'text', text: `\n  ${metadataJson}` }
+        });
+
+        handler.flushText();
+
+        expect(messages).toEqual([]);
+    });
+
+    it('still emits genuine assistant text that happens to be JSON', () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler(
+            (message) => messages.push(message),
+            { textChunkMode: 'delta' }
+        );
+
+        const answer = '{"name":"hapi","version":"0.23.4"}';
+        for (const chunk of [answer.slice(0, 10), answer.slice(10)]) {
+            handler.handleUpdate({
+                sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+                content: { type: 'text', text: chunk }
+            });
+        }
+
+        handler.flushText();
+
+        expect(messages).toEqual([{ type: 'text', text: answer }]);
     });
 
     it('forwards agent_thought_chunk as a reasoning message after flush', () => {
@@ -2337,5 +2417,94 @@ describe('AcpMessageHandler', () => {
                 new_string: expect.any(String)
             });
         });
+    });
+
+    it('emits generated_image agent messages from ACP image content blocks', async () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+        const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00]);
+
+        handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: {
+                type: 'image',
+                mimeType: 'image/png',
+                data: pngHeader.toString('base64')
+            }
+        });
+
+        await vi.waitFor(() => {
+            expect(messages.some((message) => message.type === 'generated_image')).toBe(true);
+        });
+
+        const imageMessage = messages.find(
+            (message): message is Extract<AgentMessage, { type: 'generated_image' }> =>
+                message.type === 'generated_image'
+        );
+        expect(imageMessage?.mimeType).toBe('image/png');
+        expect(imageMessage?.fileName).toBeTruthy();
+        expect(imageMessage?.imageId).toBeTruthy();
+        expect(imageMessage?.source).toEqual({ ingress: 'acp' });
+        clearGeneratedImages();
+    });
+
+    it('emits generated_image before later tool_call when image registration is async', async () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message));
+        const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00]);
+
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: {
+                type: 'image',
+                mimeType: 'image/png',
+                data: pngHeader.toString('base64'),
+            },
+        });
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.toolCall,
+            toolCallId: 'call-after-image',
+            title: 'Read',
+            kind: 'read',
+            status: 'in_progress',
+        });
+
+        const imageIndex = messages.findIndex((message) => message.type === 'generated_image');
+        const toolIndex = messages.findIndex((message) => message.type === 'tool_call');
+        expect(imageIndex).toBeGreaterThanOrEqual(0);
+        expect(toolIndex).toBeGreaterThan(imageIndex);
+        clearGeneratedImages();
+    });
+
+    it('emits buffered text before generated_image when text precedes an ACP image block', async () => {
+        const messages: AgentMessage[] = [];
+        const handler = new AcpMessageHandler((message) => messages.push(message), { flavor: 'cursor' });
+        const pngHeader = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x00]);
+
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: { type: 'text', text: 'Here is the screenshot:' }
+        });
+        await handler.handleUpdate({
+            sessionUpdate: ACP_SESSION_UPDATE_TYPES.agentMessageChunk,
+            content: {
+                type: 'image',
+                mimeType: 'image/png',
+                data: pngHeader.toString('base64')
+            }
+        });
+
+        await vi.waitFor(() => {
+            expect(messages.some((message) => message.type === 'generated_image')).toBe(true);
+        });
+
+        const textIndex = messages.findIndex((message) => message.type === 'text');
+        const imageIndex = messages.findIndex((message) => message.type === 'generated_image');
+        expect(textIndex).toBeGreaterThanOrEqual(0);
+        expect(imageIndex).toBeGreaterThan(textIndex);
+        if (messages[imageIndex]?.type === 'generated_image') {
+            expect(messages[imageIndex].source).toEqual({ ingress: 'acp', flavor: 'cursor' });
+        }
+        clearGeneratedImages();
     });
 });

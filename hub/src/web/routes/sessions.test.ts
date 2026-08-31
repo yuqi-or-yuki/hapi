@@ -66,21 +66,22 @@ function createApp(session: Session, opts?: {
     reopenSession?: (sessionId: string, namespace: string) => Promise<ReopenResultMock>
     listSlashCommands?: SyncEngine['listSlashCommands']
     pendingScheduledMessages?: Partial<ScheduledMessageRow>[]
-    getSessionExport?: (sessionId: string, session: Session) => unknown
+    getSessionExport?: (sessionId: string, session: Session, options?: { force?: boolean }) => unknown
     sessionExists?: boolean
     archiveSession?: (sessionId: string) => Promise<void>
     getCursorChatStoreStatus?: SyncEngine['getCursorChatStoreStatus']
+    listCodexModelsForSession?: SyncEngine['listCodexModelsForSession']
+    forkConversation?: SyncEngine['forkConversation']
+    rewindConversation?: SyncEngine['rewindConversation']
+    suggestSessionTitle?: SyncEngine['suggestSessionTitle']
+    updateSessionSummary?: SyncEngine['updateSessionSummary']
+    setSessionPinned?: (sessionId: string, pinned: boolean) => void
+    setSessionPinMode?: (sessionId: string, mode: 'none' | 'project' | 'global') => void
 }) {
     const applySessionConfigCalls: Array<[string, Record<string, unknown>]> = []
     const applySessionConfig = async (sessionId: string, config: Record<string, unknown>) => {
         applySessionConfigCalls.push([sessionId, config])
     }
-    const listCodexModelsForSession = async () => ({
-        success: true,
-        models: [
-            { id: 'gpt-5.5', displayName: 'GPT-5.5', isDefault: true }
-        ]
-    })
     const listOpencodeModelsForSession = async () => ({
         success: true,
         availableModels: [
@@ -137,8 +138,11 @@ function createApp(session: Session, opts?: {
             ? { ok: true, sessionId: session.id, session }
             : { ok: false, reason: 'not-found' },
         applySessionConfig,
-        listCodexModelsForSession,
         listCursorModelsForSession,
+        listCodexModelsForSession: opts?.listCodexModelsForSession ?? (async () => ({
+            success: true,
+            models: []
+        })),
         listOpencodeModelsForSession,
         listOpencodeReasoningEffortOptionsForSession,
         listGrokModelsForSession,
@@ -150,19 +154,26 @@ function createApp(session: Session, opts?: {
             status: { onDisk: true, store: 'acp' as const }
         })),
         archiveSession: archiveSessionMock,
+        setSessionPinned: opts?.setSessionPinned ?? (() => {}),
+        setSessionPinMode: opts?.setSessionPinMode ?? (() => {}),
         getSessionExport: opts?.getSessionExport ?? (() => ({
             type: 'success',
             payload: {
-                schemaVersion: 1,
+                schemaVersion: 2,
                 exportedAt: 1_762_000_000_000,
                 session,
-                messages: []
+                messages: [],
+                scratchlist: []
             }
         })),
         listSlashCommands: opts?.listSlashCommands ?? (async () => ({
             success: true,
             commands: []
-        }))
+        })),
+        forkConversation: opts?.forkConversation ?? (async () => ({ type: 'success', sessionId: 'child-1' })),
+        rewindConversation: opts?.rewindConversation ?? (async () => ({ type: 'success' })),
+        suggestSessionTitle: opts?.suggestSessionTitle ?? (async () => 'Generated title'),
+        updateSessionSummary: opts?.updateSessionSummary ?? (async () => {})
     } as Partial<SyncEngine>
 
     const store = {
@@ -285,6 +296,106 @@ describe('sessions routes', () => {
         ])
     })
 
+    it('generates a title suggestion without changing session metadata', async () => {
+        const suggest = async (sessionId: string) => {
+            expect(sessionId).toBe('session-1')
+            return 'Generated title'
+        }
+        const { app } = createApp(createSession(), { suggestSessionTitle: suggest })
+
+        const response = await app.request('/api/sessions/session-1/title-suggestion', { method: 'POST' })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ title: 'Generated title' })
+    })
+
+    it('writes generated titles through the summary metadata endpoint', async () => {
+        const updates: Array<[string, string]> = []
+        const { app } = createApp(createSession(), {
+            updateSessionSummary: async (sessionId, text) => {
+                updates.push([sessionId, text])
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/summary', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: '  Generated title  ' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(updates).toEqual([['session-1', 'Generated title']])
+    })
+
+    it('rejects an empty summary', async () => {
+        const { app } = createApp(createSession())
+
+        const response = await app.request('/api/sessions/session-1/summary', {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: '   ' })
+        })
+
+        expect(response.status).toBe(400)
+    })
+
+    it('updates the persisted pin mode', async () => {
+        const calls: Array<[string, 'none' | 'project' | 'global']> = []
+        const { app } = createApp(createSession(), {
+            setSessionPinMode: (sessionId, mode) => calls.push([sessionId, mode])
+        })
+
+        const response = await app.request('/api/sessions/session-1/pin', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'global' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(calls).toEqual([['session-1', 'global']])
+    })
+
+    it('rejects an invalid pin body', async () => {
+        const { app } = createApp(createSession())
+        const response = await app.request('/api/sessions/session-1/pin', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'yes' })
+        })
+
+        expect(response.status).toBe(400)
+    })
+
+    it('uses session-scoped Codex model discovery for the fallback endpoint', async () => {
+        const session = createSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                machineId: 'machine-1'
+            }
+        })
+        const captured: string[] = []
+        const { app } = createApp(session, {
+            listCodexModelsForSession: async (sessionId) => {
+                captured.push(sessionId)
+                return {
+                    success: true,
+                    models: [{ id: 'gpt-5.5', displayName: 'GPT-5.5', isDefault: true }]
+                }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/codex-models')
+
+        expect(response.status).toBe(200)
+        expect(captured).toEqual(['session-1'])
+        expect(await response.json()).toEqual({
+            success: true,
+            models: [{ id: 'gpt-5.5', displayName: 'GPT-5.5', isDefault: true }]
+        })
+    })
+
     it('returns the machine-scoped Cursor chat store status', async () => {
         const session = createSession({
             active: false,
@@ -316,10 +427,11 @@ describe('sessions routes', () => {
 
         expect(response.status).toBe(200)
         expect(await response.json()).toEqual({
-            schemaVersion: 1,
+            schemaVersion: 2,
             exportedAt: 1_762_000_000_000,
             session,
-            messages: []
+            messages: [],
+            scratchlist: []
         })
     })
 
@@ -349,10 +461,11 @@ describe('sessions routes', () => {
             getSessionExport: () => ({
                 type: 'success',
                 payload: {
-                    schemaVersion: 1,
+                    schemaVersion: 2,
                     exportedAt: 1_762_000_000_000,
                     session,
-                    messages
+                    messages,
+                    scratchlist: []
                 }
             })
         })
@@ -364,23 +477,69 @@ describe('sessions routes', () => {
         expect(body.messages.map((message) => message.id)).toEqual(['msg-1', 'msg-2'])
     })
 
-    it('returns 413 when the export exceeds the hard message cap', async () => {
+    it('returns a structured warning instead of rejecting an export above the message threshold', async () => {
+        const session = createSession()
+        const warning = {
+            type: 'warning' as const,
+            count: 20_001,
+            limit: 20_000,
+            estimatedBytes: 12_345_678
+        }
+        const { app } = createApp(session, {
+            getSessionExport: () => warning
+        })
+
+        const response = await app.request('/api/sessions/session-1/export')
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual(warning)
+    })
+
+    it('passes an explicit force confirmation through for the complete export', async () => {
+        const session = createSession()
+        let receivedOptions: { force?: boolean } | undefined
+        const payload = {
+            schemaVersion: 2 as const,
+            exportedAt: 1_762_000_000_000,
+            session,
+            messages: [],
+            scratchlist: []
+        }
+        const { app } = createApp(session, {
+            getSessionExport: (_sessionId, _session, options) => {
+                receivedOptions = options
+                return { type: 'success', payload }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/export?force=true')
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual(payload)
+        expect(receivedOptions).toEqual({ force: true })
+    })
+
+    it('returns structured 413 details for exports over the resource limit', async () => {
         const session = createSession()
         const { app } = createApp(session, {
             getSessionExport: () => ({
                 type: 'too-large',
                 count: 20_001,
-                limit: 20_000
+                estimatedBytes: 104_857_601,
+                maxBytes: 104_857_600
             })
         })
 
-        const response = await app.request('/api/sessions/session-1/export')
+        const response = await app.request('/api/sessions/session-1/export?force=true')
 
         expect(response.status).toBe(413)
         expect(await response.json()).toEqual({
-            error: 'Session export too large',
+            type: 'too-large',
+            error: 'Session export exceeds the resource limit',
+            code: 'session_export_too_large',
             count: 20_001,
-            limit: 20_000
+            estimatedBytes: 104_857_601,
+            maxBytes: 104_857_600
         })
     })
 
@@ -835,20 +994,6 @@ describe('sessions routes', () => {
         expect(localApp.applySessionConfigCalls).toEqual([])
     })
 
-    it('returns Codex models for active Codex sessions', async () => {
-        const { app } = createApp(createSession())
-
-        const response = await app.request('/api/sessions/session-1/codex-models')
-
-        expect(response.status).toBe(200)
-        expect(await response.json()).toEqual({
-            success: true,
-            models: [
-                { id: 'gpt-5.5', displayName: 'GPT-5.5', isDefault: true }
-            ]
-        })
-    })
-
     it('returns OpenCode reasoning effort options for active OpenCode sessions', async () => {
         const session = createSession({
             metadata: { path: '/tmp/project', host: 'localhost', flavor: 'opencode' }
@@ -1289,6 +1434,34 @@ describe('sessions routes', () => {
             expect(calls).toEqual(['session-1'])
         })
 
+        it('archives an active session with stale archived lifecycle metadata', async () => {
+            const calls: string[] = []
+            const session = createSession({
+                active: true,
+                metadata: {
+                    path: '/tmp/project',
+                    host: 'localhost',
+                    flavor: 'codex',
+                    lifecycleState: 'archived'
+                }
+            })
+            const { app } = createApp(session, {
+                archiveSession: async (sessionId: string) => { calls.push(sessionId) }
+            })
+
+            // This fork gates archive behind an explicit confirmation body
+            // (see archiveSessionSchema), same as every sibling case here.
+            const response = await app.request('/api/sessions/session-1/archive', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ confirmed: true })
+            })
+
+            expect(response.status).toBe(200)
+            expect(calls).toEqual(['session-1'])
+            expect(await response.json()).toEqual({ ok: true })
+        })
+
         it('returns 2xx and skips archiveSession when the row is already archived (idempotent)', async () => {
             let called = false
             const session = createSession({
@@ -1413,6 +1586,134 @@ describe('sessions routes', () => {
             expect(await response.json()).toEqual({ ok: true })
             expect(calls).toEqual(['session-1'])
         })
+    })
+
+    it('forks via POST /sessions/:id/fork and returns the child session id', async () => {
+        const calls: Array<{ sessionId: string; namespace: string; messageLocalId?: string }> = []
+        const session = createSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                capabilities: { conversationHistory: { forkCurrent: true } }
+            }
+        })
+        const { app } = createApp(session, {
+            forkConversation: async (sessionId, namespace, messageLocalId) => {
+                calls.push({ sessionId, namespace, messageLocalId })
+                return { type: 'success', sessionId: 'forked-child' }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/fork', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({})
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ sessionId: 'forked-child' })
+        expect(calls).toEqual([{ sessionId: 'session-1', namespace: 'default', messageLocalId: undefined }])
+    })
+
+    it('rewinds via POST /sessions/:id/rewind', async () => {
+        const calls: Array<{ sessionId: string; messageLocalId: string }> = []
+        const session = createSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'codex',
+                capabilities: { conversationHistory: { rewindToMessage: true } }
+            }
+        })
+        const { app } = createApp(session, {
+            rewindConversation: async (sessionId, _namespace, messageLocalId) => {
+                calls.push({ sessionId, messageLocalId })
+                return { type: 'success' }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/rewind', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ messageLocalId: 'local-2' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({ success: true })
+        expect(calls).toEqual([{ sessionId: 'session-1', messageLocalId: 'local-2' }])
+    })
+
+    it('rejects rewind without messageLocalId', async () => {
+        const { app } = createApp(createSession())
+        const response = await app.request('/api/sessions/session-1/rewind', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({})
+        })
+        expect(response.status).toBe(400)
+    })
+
+    it('honors optional limit on GET /sessions after sort', async () => {
+        const sessions = [
+            createSession({ id: 'older-active', active: true, updatedAt: 10 }),
+            createSession({ id: 'newer-active', active: true, updatedAt: 20 }),
+            createSession({ id: 'inactive', active: false, updatedAt: 30 })
+        ]
+        const scheduledIds: string[][] = []
+        const engine = {
+            getSessionsByNamespace: () => sessions,
+            getFutureScheduledMessageCounts: (ids: string[]) => {
+                scheduledIds.push(ids)
+                return new Map(ids.map((id) => [id, 0]))
+            },
+            getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
+        } as unknown as Partial<SyncEngine>
+
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createSessionsRoutes(() => engine as SyncEngine))
+
+        const limited = await app.request('/api/sessions?limit=2')
+        expect(limited.status).toBe(200)
+        const limitedBody = await limited.json() as { sessions: Array<{ id: string }> }
+        expect(limitedBody.sessions.map((s) => s.id)).toEqual(['newer-active', 'older-active'])
+        expect(scheduledIds.at(-1)).toEqual(['newer-active', 'older-active'])
+
+        const unlimited = await app.request('/api/sessions')
+        expect(unlimited.status).toBe(200)
+        const unlimitedBody = await unlimited.json() as { sessions: Array<{ id: string }> }
+        expect(unlimitedBody.sessions).toHaveLength(3)
+    })
+
+    it('order=updatedAt truncates newest-first including inactive peers', async () => {
+        const sessions = [
+            createSession({ id: 'old-active', active: true, updatedAt: 10 }),
+            createSession({ id: 'new-inactive', active: false, updatedAt: 50 }),
+            createSession({ id: 'mid-active', active: true, updatedAt: 20 })
+        ]
+        const engine = {
+            getSessionsByNamespace: () => sessions,
+            getFutureScheduledMessageCounts: (ids: string[]) => new Map(ids.map((id) => [id, 0])),
+            getNextScheduledAtBySessionIds: (_ids: string[]) => new Map<string, number>(),
+            resolveSessionAccess: () => ({ ok: false, reason: 'not-found' as const })
+        } as unknown as Partial<SyncEngine>
+
+        const app = new Hono<WebAppEnv>()
+        app.use('*', async (c, next) => {
+            c.set('namespace', 'default')
+            await next()
+        })
+        app.route('/api', createSessionsRoutes(() => engine as SyncEngine))
+
+        const response = await app.request('/api/sessions?limit=1&order=updatedAt')
+        expect(response.status).toBe(200)
+        const body = await response.json() as { sessions: Array<{ id: string }> }
+        expect(body.sessions.map((s) => s.id)).toEqual(['new-inactive'])
     })
 
 })

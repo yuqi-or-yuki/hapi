@@ -1,7 +1,7 @@
 /**
  * HAPI MCP STDIO Bridge
  *
- * Minimal STDIO MCP server exposing HAPI tools such as `change_title` and `display_image`.
+ * Minimal STDIO MCP server exposing HAPI tools such as `change_title`, `display_image`, `display_video`, `display_media`, `list_peers`, `ping_peer`, and `inspect_peer`.
  * On invocation it forwards the tool call to an existing HAPI HTTP MCP server
  * using the StreamableHTTPClientTransport.
  *
@@ -16,8 +16,14 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
+import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from '@/modules/common/displayImagePrompt';
+import {
+  INSPECT_PEER_TOOL_DESCRIPTION,
+  PING_PEER_TOOL_DESCRIPTION,
+  SESSION_ID_PREFIX_PARAM_DESCRIPTION,
+} from '@hapi/protocol/sessionCitation';
 
-const DEFAULT_TOOL_NAMES = ['change_title', 'display_image'];
+const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer'];
 
 function parseArgs(argv: string[]): { url: string | null; toolNames: Set<string> } {
   let url: string | null = null;
@@ -104,15 +110,15 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
 
 
     const displayImageInputSchema: z.ZodTypeAny = z.object({
-      path: z.string().describe('Local filesystem path of the image to display to the user'),
-      title: z.string().optional().describe('Optional display title or filename for the image'),
+      path: z.string().describe('Absolute filesystem path of the local image to display to the human user. This file is sent for user display, not provided to the model for image inspection'),
+      title: z.string().optional().describe('Optional display title or filename shown to the human user'),
     });
 
     if (toolNames.has('display_image')) {
       server.registerTool<any, any>(
         'display_image',
         {
-          description: 'Display a local image file inline in the current HAPI chat session',
+          description: `Display a local image file to the human user inline in the current HAPI chat session. ${DISPLAY_IMAGE_PROMPT_CURSOR}`,
           title: 'Display Image',
           inputSchema: displayImageInputSchema,
         },
@@ -125,6 +131,156 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
             return {
               content: [
                 { type: 'text' as const, text: `Failed to display image: ${error instanceof Error ? error.message : String(error)}` },
+              ],
+              isError: true,
+            };
+          }
+        }
+      );
+    }
+
+    const displayVideoInputSchema: z.ZodTypeAny = z.object({
+      path: z.string().describe('Local filesystem path of the video to display inline (mp4 or webm)'),
+      title: z.string().optional().describe('Optional display title or filename for the video'),
+    });
+
+    if (toolNames.has('display_video')) {
+      server.registerTool<any, any>(
+        'display_video',
+        {
+          description: `Display a local mp4 or webm file inline in the current HAPI chat session. ${DISPLAY_VIDEO_PROMPT_CURSOR}`,
+          title: 'Display Video',
+          inputSchema: displayVideoInputSchema,
+        },
+        async (args: Record<string, unknown>) => {
+          try {
+            const client = await ensureHttpClient();
+            const response = await client.callTool({ name: 'display_video', arguments: args });
+            return response as any;
+          } catch (error) {
+            return {
+              content: [
+                { type: 'text' as const, text: `Failed to display video: ${error instanceof Error ? error.message : String(error)}` },
+              ],
+              isError: true,
+            };
+          }
+        }
+      );
+    }
+
+    const displayMediaInputSchema: z.ZodTypeAny = z.object({
+      path: z.string().describe('Local filesystem path of the media or file to send to the user'),
+      title: z.string().trim().min(1).max(255).optional().describe('Optional display title or filename'),
+    });
+
+    if (toolNames.has('display_media')) {
+      server.registerTool<any, any>(
+        'display_media',
+        {
+          description: `Send a local image, video, audio, or other file to the current HAPI chat session. ${DISPLAY_MEDIA_PROMPT_CURSOR}`,
+          title: 'Display Media',
+          inputSchema: displayMediaInputSchema,
+        },
+        async (args: Record<string, unknown>) => {
+          try {
+            const client = await ensureHttpClient();
+            return await client.callTool({ name: 'display_media', arguments: args }) as any;
+          } catch (error) {
+            return {
+              content: [{ type: 'text' as const, text: `Failed to display media: ${error instanceof Error ? error.message : String(error)}` }],
+              isError: true,
+            };
+          }
+        }
+      );
+    }
+
+    const pingPeerInputSchema: z.ZodTypeAny = z.object({
+      sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
+      message: z.string().min(1).describe('Message text to deliver to the target session'),
+    });
+
+    if (toolNames.has('ping_peer')) {
+      server.registerTool<any, any>(
+        'ping_peer',
+        {
+          description: PING_PEER_TOOL_DESCRIPTION,
+          title: 'Ping Peer Session',
+          inputSchema: pingPeerInputSchema,
+        },
+        async (args: Record<string, unknown>) => {
+          try {
+            const client = await ensureHttpClient();
+            const response = await client.callTool({ name: 'ping_peer', arguments: args });
+            return response as any;
+          } catch (error) {
+            return {
+              content: [
+                { type: 'text' as const, text: `Failed to ping peer: ${error instanceof Error ? error.message : String(error)}` },
+              ],
+              isError: true,
+            };
+          }
+        }
+      );
+    }
+
+    const inspectPeerInputSchema: z.ZodTypeAny = z.object({
+      sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
+      messageLimit: z.number().int().min(1).max(100).optional().describe(
+        'Recent message page size (default 30, max 100). Text snippets only.'
+      ),
+    });
+
+    if (toolNames.has('inspect_peer')) {
+      server.registerTool<any, any>(
+        'inspect_peer',
+        {
+          description: INSPECT_PEER_TOOL_DESCRIPTION,
+          title: 'Inspect Peer Session',
+          inputSchema: inspectPeerInputSchema,
+        },
+        async (args: Record<string, unknown>) => {
+          try {
+            const client = await ensureHttpClient();
+            const response = await client.callTool({ name: 'inspect_peer', arguments: args });
+            return response as any;
+          } catch (error) {
+            return {
+              content: [
+                { type: 'text' as const, text: `Failed to inspect peer: ${error instanceof Error ? error.message : String(error)}` },
+              ],
+              isError: true,
+            };
+          }
+        }
+      );
+    }
+
+    const listPeersInputSchema: z.ZodTypeAny = z.object({
+      limit: z.number().int().min(1).max(100).optional().describe(
+        'Max sessions to return (default 30, max 100). Newest updatedAt first.'
+      ),
+    });
+
+    if (toolNames.has('list_peers')) {
+      server.registerTool<any, any>(
+        'list_peers',
+        {
+          description: 'List peer HAPI sessions on the same hub/namespace (id prefix, active, flavor, name). Uses this session\'s hub credentials - works from runner-spawned agents without being on the hub host. Prefer this over shelling `hapi ping-peer --list`. Then call inspect_peer / ping_peer with a listed id.',
+          title: 'List Peer Sessions',
+          inputSchema: listPeersInputSchema,
+        },
+        async (args: Record<string, unknown>) => {
+          try {
+            const client = await ensureHttpClient();
+            const response = await client.callTool({ name: 'list_peers', arguments: args });
+            return response as any;
+          } catch (error) {
+            return {
+              content: [
+                { type: 'text' as const, text: `Failed to list peers: ${error instanceof Error ? error.message : String(error)}` },
               ],
               isError: true,
             };

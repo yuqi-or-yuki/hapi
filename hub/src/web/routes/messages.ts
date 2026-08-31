@@ -28,7 +28,19 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
         const before = parsed.data.beforeAt !== undefined && parsed.data.beforeSeq !== undefined
             ? { at: parsed.data.beforeAt, seq: parsed.data.beforeSeq }
             : null
-        return c.json(engine.getMessagesPage(sessionId, { limit, before }))
+        const after = parsed.data.afterAt !== undefined && parsed.data.afterSeq !== undefined
+            ? { at: parsed.data.afterAt, seq: parsed.data.afterSeq }
+            : null
+        const until = parsed.data.untilAt !== undefined && parsed.data.untilSeq !== undefined
+            ? { at: parsed.data.untilAt, seq: parsed.data.untilSeq }
+            : null
+        return c.json(engine.getMessagesPage(sessionId, {
+            limit,
+            before,
+            after,
+            until,
+            epoch: parsed.data.epoch ?? null
+        }))
     })
 
     app.delete('/sessions/:id/messages/:messageId', async (c) => {
@@ -46,6 +58,39 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         const result = await engine.cancelQueuedMessage(sessionId, messageId)
         return c.json(result)
+    })
+
+    app.post('/sessions/:id/messages/:messageId/steer', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine, { requireActive: true })
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        const sessionId = sessionResult.sessionId
+        const messageId = c.req.param('messageId')
+
+        const result = await engine.steerQueuedMessage(sessionId, messageId)
+        return c.json(result)
+    })
+
+    app.post('/sessions/:id/messages/:messageId/retry', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) {
+            return engine
+        }
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) {
+            return sessionResult
+        }
+        return c.json(await engine.retryIndeterminateMessage(
+            sessionResult.sessionId,
+            c.req.param('messageId')
+        ))
     })
 
     app.post('/sessions/:id/messages/queued-state', async (c) => {
@@ -68,7 +113,7 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
 
         const localIds = [...new Set(parsed.data.localIds)]
         if (localIds.length === 0) {
-            return c.json({ queuedLocalIds: [], invokedLocalMessages: [] })
+            return c.json({ queuedLocalIds: [], indeterminateLocalIds: [], invokedLocalMessages: [] })
         }
         return c.json(engine.getQueuedState(sessionId, localIds))
     })
@@ -101,7 +146,8 @@ export function createMessagesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             localId: parsed.data.localId,
             attachments: parsed.data.attachments,
             sentFrom: 'webapp',
-            scheduledAt: parsed.data.scheduledAt
+            scheduledAt: parsed.data.scheduledAt,
+            deliveryMode: parsed.data.deliveryMode
         })
 
         // If the session was marked ready for review, clear it when a new message is sent

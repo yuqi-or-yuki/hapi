@@ -9,10 +9,14 @@ import { apiValidationError } from '@/utils/errorUtils'
 import { AsyncLock } from '@/utils/lock'
 import type { RawJSONLines } from '@/claude/types'
 import { configuration } from '@/configuration'
+import { extractUserRequest } from '@/agy/utils/agyMessageText'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from "@hapi/protocol"
 import type { SessionEndReason } from '@hapi/protocol'
-import type { ClientToServerEvents, ServerToClientEvents, Update } from '@hapi/protocol'
+import type { ClientToServerEvents, ServerToClientEvents, TerminalOutputPayload, Update } from '@hapi/protocol'
 import {
+    AgentTerminalInputPayloadSchema,
+    AgentTerminalRefreshPayloadSchema,
+    AgentTerminalResizePayloadSchema,
     TerminalClosePayloadSchema,
     TerminalOpenPayloadSchema,
     TerminalResizePayloadSchema,
@@ -48,6 +52,10 @@ const SYSTEM_INJECTION_PREFIXES = [
     '<system-reminder>',
 ]
 
+// Cap for the runner-side in-memory agent-terminal screen buffer (matches the
+// hub's scrollback ring). The tail always holds the latest full-screen redraw.
+const AGENT_TERMINAL_LOCAL_BUFFER_BYTES = 256 * 1024
+
 function extractRawUserTextContent(content: unknown): string | null {
     if (typeof content === 'string') {
         return content
@@ -82,7 +90,11 @@ function extractRawUserTextContent(content: unknown): string | null {
  */
 export function isExternalUserMessage(body: RawJSONLines): body is Extract<RawJSONLines, { type: 'user' }> {
     if (body.type !== 'user') return false
-    const text = extractRawUserTextContent(body.message.content)
+    // Defensive: a malformed/minimal user line may lack `.message`. Treat it as
+    // a non-external (forwardable) message rather than throwing.
+    const message = (body as { message?: { content?: unknown } }).message
+    if (!message || typeof message !== 'object') return false
+    const text = extractRawUserTextContent(message.content)
     if (text === null) return false
     if (body.isSidechain === true) return false
     if (body.isMeta === true) return false
@@ -227,14 +239,31 @@ export class ApiSessionClient extends EventEmitter {
     private agentStateVersion: number
     private readonly socket: Socket<ServerToClientEvents, ClientToServerEvents>
     private pendingMessages: { message: UserMessage; localId?: string }[] = []
+    private pendingHubPromptEchoes: { text: string; localIds: string[] }[] = []
     private pendingMessageCallback: ((message: UserMessage, localId?: string) => void) | null = null
-    private cancelQueuedMessageCallback: ((localId: string) => boolean) | null = null
+    private cancelQueuedMessageCallback: ((localId: string) => boolean | 'in-flight' | 'indeterminate' | 'consumed') | null = null
+    private retryQueuedMessageCallback: ((localId: string) => boolean) | null = null
     private readonly incomingFilter = new IncomingMessageFilter()
     private backfillInFlight: Promise<void> | null = null
     private needsBackfill = false
     private hasConnectedOnce = false
     readonly rpcHandlerManager: RpcHandlerManager
     private readonly terminalManager: TerminalManager
+    private agentTerminalResize: ((cols: number, rows: number) => void) | null = null
+    // Writes raw keystroke(s) from a web viewer into the agent PTY (interactive
+    // TUI navigation). Null until the agent is spawned and after it exits.
+    private agentTerminalSendKeys: ((data: string) => void) | null = null
+    private lastAgentTerminalSize: { cols: number; rows: number } | null = null
+    // The agent PTY emits a high-frequency byte stream (spinners ~10Hz, full
+    // redraws). Only forward it to the hub while a viewer is actually subscribed
+    // to the agent terminal — otherwise the hub relays it to an empty room and
+    // buffers it for no one. Enabled on (re)subscribe, disabled when the last
+    // viewer leaves. Default false: chat-only users never open the raw terminal,
+    // so nothing is streamed for them.
+    private agentTerminalActive = false
+    // In-memory copy of the recent agent-PTY screen, captured regardless of the
+    // network gate so a subscribing viewer can be replayed the current screen.
+    private agentTerminalLocalBuffer = ''
     private agentStateLock = new AsyncLock()
     private metadataLock = new AsyncLock()
     private state: ApiSessionClientState
@@ -364,7 +393,36 @@ export class ApiSessionClient extends EventEmitter {
             this.terminalManager.close(payload.terminalId)
         }))
 
-        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean }) => void) => {
+        // Agent-terminal viewer: resize the agent PTY to the viewer's size, and
+        // force a repaint when a viewer (re)subscribes so it sees the live screen
+        // instead of a stale/black buffer replay.
+        this.socket.on('agent-terminal:resize', handleTerminalEvent(AgentTerminalResizePayloadSchema, (payload) => {
+            this.lastAgentTerminalSize = { cols: payload.cols, rows: payload.rows }
+            this.agentTerminalResize?.(payload.cols, payload.rows)
+        }))
+
+        // Raw keystroke(s) typed by a viewer → write into the agent PTY. No-op
+        // (controls null) before the agent is spawned or after it exits.
+        this.socket.on('agent-terminal:input', handleTerminalEvent(AgentTerminalInputPayloadSchema, (payload) => {
+            this.agentTerminalSendKeys?.(payload.data)
+        }))
+
+        this.socket.on('agent-terminal:refresh', handleTerminalEvent(AgentTerminalRefreshPayloadSchema, () => {
+            // A viewer is subscribed → start streaming (enable BEFORE replay so
+            // the bytes flow), replay the locally-captured current screen (works
+            // even for resumed sessions that don't repaint), then nudge a repaint
+            // as a belt-and-suspenders for any truncated head sequence.
+            this.agentTerminalActive = true
+            this.emitAgentTerminalLocalReplay()
+            this.forceAgentTerminalRepaint()
+        }))
+
+        this.socket.on('agent-terminal:idle', handleTerminalEvent(AgentTerminalRefreshPayloadSchema, () => {
+            // Last viewer left — stop streaming the PTY to the hub.
+            this.agentTerminalActive = false
+        }))
+
+        this.socket.on('update', (data: Update, ack?: (response: { removed: boolean; inFlight?: boolean; indeterminate?: boolean; accepted?: boolean; consumed?: boolean }) => void) => {
             try {
                 if (!data.body) return
 
@@ -373,11 +431,41 @@ export class ApiSessionClient extends EventEmitter {
                     return
                 }
 
+                if (data.body.t === 'retry-queued-message') {
+                    // Explicit user retry: release any held in-memory
+                    // reservation and bypass the normal message-id dedup.
+                    let accepted = true
+                    if (data.body.localId && this.cancelQueuedMessageCallback) {
+                        const cancelled = this.cancelQueuedMessageCallback(data.body.localId)
+                        accepted = cancelled !== 'in-flight' && cancelled !== 'consumed'
+                        if (cancelled === 'indeterminate') {
+                            accepted = this.retryQueuedMessageCallback?.(data.body.localId) === true
+                        }
+                        if (cancelled === 'consumed') {
+                            ack?.({ removed: false, accepted: false, consumed: true })
+                            return
+                        }
+                    }
+                    if (accepted) {
+                        this.handleIncomingMessage(data.body.message, true)
+                    }
+                    ack?.({ removed: false, accepted })
+                    return
+                }
+
                 if (data.body.t === 'cancel-queued-message') {
-                    const removed = (data.body.localId && this.cancelQueuedMessageCallback)
+                    const result = (data.body.localId && this.cancelQueuedMessageCallback)
                         ? this.cancelQueuedMessageCallback(data.body.localId)
                         : false
-                    ack?.({ removed })
+                    // 'in-flight' = the row is inside an async steer: not
+                    // removed, but also NOT consumed — the hub must neither
+                    // delete it nor stamp invoked_at.
+                    ack?.({
+                        removed: result === true,
+                        inFlight: result === 'in-flight',
+                        indeterminate: result === 'indeterminate',
+                        consumed: result === 'consumed'
+                    })
                     return
                 }
 
@@ -421,6 +509,10 @@ export class ApiSessionClient extends EventEmitter {
 
     getState(): ApiSessionClientState {
         return this.state
+    }
+
+    getMetadata(): Readonly<Metadata> | null {
+        return this.metadata
     }
 
     isPending(): boolean {
@@ -604,8 +696,12 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    onCancelQueuedMessage(callback: (localId: string) => boolean): void {
+    onCancelQueuedMessage(callback: (localId: string) => boolean | 'in-flight' | 'indeterminate' | 'consumed'): void {
         this.cancelQueuedMessageCallback = callback
+    }
+
+    onRetryQueuedMessage(callback: (localId: string) => boolean): void {
+        this.retryQueuedMessageCallback = callback
     }
 
     private enqueueUserMessage(message: UserMessage, localId?: string): void {
@@ -616,13 +712,79 @@ export class ApiSessionClient extends EventEmitter {
         }
     }
 
-    private handleIncomingMessage(message: { id?: string; seq?: number; localId?: string | null; content: unknown }): void {
-        if (!this.incomingFilter.accept({ id: message.id, seq: message.seq })) {
+    /**
+     * Record the text Claude will actually see (after attachment/skill//plan
+     * formatting). Matching transcript rows then stamp isTranscriptEcho.
+     * Call this at the queue boundary, not on raw hub delivery.
+     */
+    notePendingHubPromptEcho(text: string, localId?: string | readonly string[]): void {
+        const normalized = text.trim()
+        if (!normalized) return
+        const localIds = (Array.isArray(localId) ? localId : localId ? [localId] : [])
+            .filter((id) => id.length > 0)
+        // Recoverable launch failure restores the original items; a later
+        // same-mode prompt can rebatch them under new delivered text. Drop
+        // the stale marker that still names those localIds so a later
+        // identical local prompt is not stamped isTranscriptEcho.
+        if (localIds.length > 0) {
+            const replacementIds = new Set(localIds)
+            this.pendingHubPromptEchoes = this.pendingHubPromptEchoes.filter(
+                (entry) => !entry.localIds.some((id) => replacementIds.has(id))
+            )
+        } else {
+            // SendMessageRequest allows omitting localId. One id-less delivery
+            // is in flight at a time; replace the previous nameless marker.
+            this.pendingHubPromptEchoes = this.pendingHubPromptEchoes.filter(
+                (entry) => entry.localIds.length > 0
+            )
+        }
+        if (this.pendingHubPromptEchoes.some((entry) => entry.text === normalized)) return
+        this.pendingHubPromptEchoes.push({ text: normalized, localIds })
+        if (this.pendingHubPromptEchoes.length > 32) {
+            this.pendingHubPromptEchoes.shift()
+        }
+    }
+
+    discardPendingHubPromptEcho(localId: string): void {
+        const index = this.pendingHubPromptEchoes.findIndex((entry) => entry.localIds.includes(localId))
+        if (index < 0) return
+        this.pendingHubPromptEchoes.splice(index, 1)
+    }
+
+    discardPendingHubPromptEchoText(text: string): void {
+        const normalized = text.trim()
+        if (!normalized) return
+        const index = this.pendingHubPromptEchoes.findIndex((entry) => entry.text === normalized)
+        if (index < 0) return
+        this.pendingHubPromptEchoes.splice(index, 1)
+    }
+
+    private consumePendingHubPromptEcho(text: string): boolean {
+        const normalized = text.trim()
+        if (!normalized) return false
+        const index = this.pendingHubPromptEchoes.findIndex((entry) => entry.text === normalized)
+        if (index < 0) return false
+        this.pendingHubPromptEchoes.splice(index, 1)
+        return true
+    }
+
+    private handleIncomingMessage(
+        message: { id?: string; seq?: number; localId?: string | null; content: unknown },
+        force = false
+    ): void {
+        const accepted = this.incomingFilter.accept({ id: message.id, seq: message.seq })
+        if (!force && !accepted) {
             return
         }
 
         const userResult = UserMessageSchema.safeParse(message.content)
         if (userResult.success) {
+            // User messages mirrored from a local agent transcript are history,
+            // not new remote input. Keep them in the incoming filter above so
+            // reconnect backfill still advances and deduplicates correctly.
+            if (userResult.data.meta?.sentFrom === 'cli') {
+                return
+            }
             this.enqueueUserMessage(userResult.data, message.localId ?? undefined)
             return
         }
@@ -718,16 +880,27 @@ export class ApiSessionClient extends EventEmitter {
 
     sendClaudeSessionMessage(body: RawJSONLines): void {
         let content: MessageContent
+        // Origin timestamp (epoch ms) from the transcript entry's own `timestamp`,
+        // forwarded only for agent messages so the hub can stamp created_at/invoked_at
+        // with the jsonl entry's own time instead of hub-receive time (fixes chat
+        // order drifting from the PTY transcript during bursts/resume — see
+        // transcript ordering contract). The external-user-echo path is left
+        // unchanged: it has no localId either, but its existing arrival-time
+        // stamping already reflects when it was actually forwarded/consumed.
+        let createdAt: number | undefined
 
         if (isExternalUserMessage(body)) {
+            const text = extractRawUserTextContent(body.message.content) ?? ''
+            const isTranscriptEcho = this.consumePendingHubPromptEcho(text)
             content = {
                 role: 'user',
                 content: {
                     type: 'text',
-                    text: extractRawUserTextContent(body.message.content) ?? ''
+                    text
                 },
                 meta: {
-                    sentFrom: 'cli'
+                    sentFrom: 'cli',
+                    ...(isTranscriptEcho ? { isTranscriptEcho: true } : {})
                 }
             }
         } else {
@@ -741,12 +914,19 @@ export class ApiSessionClient extends EventEmitter {
                     sentFrom: 'cli'
                 }
             }
+            if (body.timestamp) {
+                const parsed = Date.parse(body.timestamp)
+                if (!Number.isNaN(parsed)) {
+                    createdAt = parsed
+                }
+            }
         }
 
         this.emitOrQueue(() => {
             this.socket.emit('message', {
                 sid: this.sessionId,
-                message: content
+                message: content,
+                ...(createdAt !== undefined ? { createdAt } : {})
             })
         })
 
@@ -776,6 +956,78 @@ export class ApiSessionClient extends EventEmitter {
                     }
                 }
             )
+        })
+    }
+
+    sendAgySessionMessage(
+        entry: { type: string; content?: string; tool_calls?: { name: string; args: Record<string, unknown> }[]; step_index?: number; model?: string },
+        conversationId?: string,
+        // The tool CALL (name + args) that produced this action entry, paired by
+        // the launcher from the preceding PLANNER_RESPONSE. agy splits the
+        // invocation (name/args live on the planner step) from its result (the
+        // action entry's `content`), so without this the tool card has no input
+        // to show — just the raw result. Carrying it here lets the web render a
+        // command/path/args like the other flavors.
+        toolCall?: { name: string; args: Record<string, unknown> }
+    ): void {
+        const isUser = entry.type === 'USER_INPUT'
+        // agy appends its own sections (<ADDITIONAL_METADATA>, <USER_SETTINGS_CHANGE>)
+        // after the request block, so only the extracted request may be rendered.
+        const text = isUser ? (extractUserRequest(entry.content ?? '') ?? entry.content ?? '').trim() : undefined
+
+        if (isUser && text) {
+            this.socket.emit('message', {
+                sid: this.sessionId,
+                message: {
+                    role: 'user',
+                    content: { type: 'text', text },
+                    meta: { sentFrom: 'cli' }
+                }
+            })
+            return
+        }
+
+        // agy's structured entry types map to distinct chat renderings:
+        //  - PLANNER_RESPONSE → the agent's prose (agy_message). Its `tool_calls`
+        //    are only the model's INTENT and are immediately followed by the real
+        //    action entry below, so we intentionally don't render them separately
+        //    (that produced a duplicate "view_file" + "View file" card).
+        //  - every other type (VIEW_FILE, RUN_COMMAND, LIST_DIRECTORY, CODE_ACTION,
+        //    …) is a tool ACTION whose `content` is its result. Render it as a
+        //    collapsible tool card (agy_tool_action) instead of dumping the raw
+        //    (often huge) result text as a chat bubble.
+        let data: Record<string, unknown>
+        if (entry.type !== 'PLANNER_RESPONSE') {
+            // Key the tool card by conversationId:stepIdx — the SAME id the
+            // PreToolUse permission request uses — so a gated tool's approval card
+            // and its result merge into one card (no stuck "running" duplicate)
+            // while still showing the pending approval in real time.
+            const toolUseId = conversationId != null && entry.step_index != null
+                ? `${conversationId}:${entry.step_index}`
+                : undefined
+            data = {
+                type: 'agy_tool_action',
+                name: entry.type,
+                content: entry.content ?? '',
+                toolUseId,
+                // The invocation the web renders as the tool INPUT. `toolName` is
+                // agy's own tool id (run_command, view_file, …) which the web maps
+                // to a canonical presentation; `input` is the raw args.
+                toolName: toolCall?.name,
+                input: toolCall?.args
+            }
+        } else {
+            // Tag the agent response with the model that produced it (per-turn),
+            // enriched by the scanner from the conversation DB.
+            data = { type: 'agy_message', content: entry.content ?? '', model: entry.model }
+        }
+        this.socket.emit('message', {
+            sid: this.sessionId,
+            message: {
+                role: 'agent',
+                content: { type: 'output', data },
+                meta: { sentFrom: 'cli' }
+            }
         })
     }
 
@@ -835,10 +1087,25 @@ export class ApiSessionClient extends EventEmitter {
         type: 'message'
         message: string
     } | {
+        type: 'error'
+        message: string
+    } | {
         type: 'permission-mode-changed'
         mode: SessionPermissionMode
     } | {
         type: 'ready'
+    } | {
+        // Emitted on abort so the web composer can restore the aborted prompt.
+        // Carries the exact in-flight prompt text the web should restore.
+        type: 'abort-restore'
+        text: string
+    } | {
+        // Structured result of Pi's compact RPC: the web chat renders the
+        // summary as a dedicated block instead of a small status line.
+        type: 'compact-summary'
+        summary: string
+        tokensBefore?: number
+        estimatedTokensAfter?: number
     }, id?: string): void {
         const content = {
             role: 'agent',
@@ -854,7 +1121,79 @@ export class ApiSessionClient extends EventEmitter {
                 sid: this.sessionId,
                 message: content
             })
-        }, event.type === 'message' ? 'lossless' : 'droppable')
+        }, event.type === 'message' || event.type === 'error' || event.type === 'compact-summary' ? 'lossless' : 'droppable')
+    }
+
+    emitAgentTerminalOutput(data: string): void {
+        // Always capture the screen locally (in-memory, no network) so a late
+        // subscriber can be replayed the CURRENT screen without depending on a
+        // TUI repaint — resumed (`--resume`) sessions don't reliably redraw on
+        // SIGWINCH, which is what caused the reopen black screen.
+        this.agentTerminalLocalBuffer =
+            (this.agentTerminalLocalBuffer + data).slice(-AGENT_TERMINAL_LOCAL_BUFFER_BYTES)
+        // Gate only the NETWORK forward: with no viewer the hub would relay this
+        // high-frequency byte stream (spinners ~10Hz) to an empty room. On
+        // subscribe, 'agent-terminal:refresh' flips this on and replays the local
+        // buffer (see the handler), so nothing is lost.
+        if (!this.agentTerminalActive) return
+        const payload: TerminalOutputPayload = {
+            sessionId: this.sessionId,
+            terminalId: 'agent',
+            data
+        }
+        this.socket.emit('agent-terminal:output', payload)
+    }
+
+    private emitAgentTerminalLocalReplay(): void {
+        if (!this.agentTerminalLocalBuffer) return
+        this.socket.emit('agent-terminal:output', {
+            sessionId: this.sessionId,
+            terminalId: 'agent',
+            data: this.agentTerminalLocalBuffer
+        })
+    }
+
+    /**
+     * Tell the hub to drop its scrollback buffer for this session. Called when a
+     * fresh agent PTY spawns (e.g. after archive→restart) so a re-subscribing
+     * viewer replays only the NEW session's screen, not a stale mix of the old
+     * one's output and its alt-screen-exit.
+     */
+    resetAgentTerminal(): void {
+        // New PTY → drop the previous screen from both the hub buffer and our
+        // local copy so neither replays stale output.
+        this.agentTerminalLocalBuffer = ''
+        this.socket.emit('agent-terminal:reset', { sessionId: this.sessionId })
+    }
+
+    /**
+     * Register (or clear) the live agent-PTY controls. The PTY launcher calls
+     * this once the agent is spawned so the agent-terminal viewer can resize /
+     * repaint it. Passing null (on exit) makes the controls no-ops.
+     */
+    setAgentTerminalControls(controls: { resize: (cols: number, rows: number) => void; sendKeys: (data: string) => void } | null): void {
+        this.agentTerminalResize = controls?.resize ?? null
+        this.agentTerminalSendKeys = controls?.sendKeys ?? null
+    }
+
+    // Force the agent TUI to repaint its current screen. A plain same-size resize
+    // is a no-op (the kernel only sends SIGWINCH on an actual size change), so we
+    // nudge one row smaller then back — a single transient frame, imperceptible —
+    // which guarantees the TUI redraws the full current screen for a freshly
+    // (re)subscribed viewer.
+    private forceAgentTerminalRepaint(): void {
+        const resize = this.agentTerminalResize
+        if (!resize) return
+        const initial = this.lastAgentTerminalSize ?? { cols: 80, rows: 24 }
+        resize(initial.cols, Math.max(1, initial.rows - 1))
+        // Restore to the LATEST known size (a concurrent viewer resize may have
+        // updated it in the meantime) so the nudge never shrinks the final view.
+        setTimeout(() => {
+            const r = this.agentTerminalResize
+            if (!r) return
+            const cur = this.lastAgentTerminalSize ?? initial
+            r(cur.cols, cur.rows)
+        }, 30)
     }
 
     keepAlive(
@@ -867,6 +1206,7 @@ export class ApiSessionClient extends EventEmitter {
             effort?: string | null
             serviceTier?: string | null
             collaborationMode?: SessionCollaborationMode
+            copilotAgentMode?: import('@hapi/protocol').CopilotAgentMode
         }
     ): void {
         if (this.state !== 'active') {
@@ -891,7 +1231,7 @@ export class ApiSessionClient extends EventEmitter {
         }, 'droppable')
     }
 
-    emitMessagesConsumed(localIds: string[], options?: { clearQueuedThinkingGrace?: boolean }): void {
+    emitMessagesConsumed(localIds: string[], options?: { clearQueuedThinkingGrace?: boolean; steered?: boolean }): void {
         if (localIds.length === 0) return
         // `clearQueuedThinkingGrace` is an opt-in signal for the hub to drop
         // the 15s queued-thinking grace immediately. Only synchronous handlers
@@ -899,14 +1239,47 @@ export class ApiSessionClient extends EventEmitter {
         // inside `onUserMessage`) should set it — normal queue drains still
         // need the grace so the spinner doesn't flicker between drain and
         // backend.prompt start.
-        const payload: { sid: string; localIds: string[]; clearQueuedThinkingGrace?: boolean } = {
+        const payload: {
+            sid: string
+            localIds: string[]
+            clearQueuedThinkingGrace?: boolean
+            steered?: boolean
+        } = {
             sid: this.sessionId,
             localIds
         }
         if (options?.clearQueuedThinkingGrace) {
             payload.clearQueuedThinkingGrace = true
         }
+        if (options?.steered) {
+            payload.steered = true
+        }
         this.emitOrQueue(() => this.socket.emit('messages-consumed', payload))
+    }
+
+    /** Persist the durable pre-dispatch/restore state with a hub ACK. */
+    async setSteerDeliveryState(localIds: string[], state: 'queued' | 'dispatching'): Promise<boolean> {
+        if (localIds.length === 0 || this.state !== 'active') return false
+        try {
+            const response = await this.socket.timeout(5_000).emitWithAck('messages-steer-state', {
+                sid: this.sessionId,
+                localIds,
+                state
+            })
+            return response?.ok === true
+        } catch (error) {
+            logger.debug('[API] Failed to persist steer delivery state', error)
+            return false
+        }
+    }
+
+    /** Persist a steer whose transport completed ambiguously; no consumed ACK. */
+    emitSteerIndeterminate(localIds: string[]): void {
+        if (localIds.length === 0) return
+        this.emitOrQueue(() => this.socket.emit('messages-indeterminate', {
+            sid: this.sessionId,
+            localIds
+        }))
     }
 
     sendSessionDeath(reason?: SessionEndReason): void {
@@ -1106,7 +1479,7 @@ export class ApiSessionClient extends EventEmitter {
         return await this.drainLock(this.metadataLock, timeoutMs)
     }
 
-    async flush(options?: { timeoutMs?: number }): Promise<void> {
+    async flush(options?: { timeoutMs?: number }): Promise<boolean> {
         const deadlineMs = Date.now() + (options?.timeoutMs ?? 5_000)
         const remainingMs = () => Math.max(0, deadlineMs - Date.now())
 
@@ -1114,37 +1487,44 @@ export class ApiSessionClient extends EventEmitter {
         if (materializationTask) {
             this.materializationDrainRequested = true
             this.materializationRetryAbortController?.abort()
-            await this.waitForPromise(materializationTask, remainingMs())
+            if (!await this.waitForPromise(materializationTask, remainingMs())) {
+                return false
+            }
         }
 
         if (this.state !== 'active') {
-            return
+            return false
         }
 
         if (!this.socket.connected) {
             const connected = await this.waitForConnected(remainingMs())
             if (!connected) {
-                return
+                return false
             }
         }
 
-        await this.drainLock(this.metadataLock, remainingMs())
-        await this.drainLock(this.agentStateLock, remainingMs())
+        if (!await this.drainLock(this.metadataLock, remainingMs())) {
+            return false
+        }
+        if (!await this.drainLock(this.agentStateLock, remainingMs())) {
+            return false
+        }
 
         if (remainingMs() === 0) {
-            return
+            return false
         }
 
         const pingTimeoutMs = remainingMs()
         if (pingTimeoutMs === 0) {
-            return
+            return false
         }
 
         try {
             await this.socket.timeout(pingTimeoutMs).emitWithAck('ping')
             this.awaitingMaterializedConnection = false
+            return true
         } catch {
-            // best effort
+            return false
         }
     }
 

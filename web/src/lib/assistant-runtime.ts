@@ -4,12 +4,18 @@ import type { AppendMessage, AttachmentAdapter, ThreadMessageLike } from '@assis
 import { useExternalMessageConverter, useExternalStoreRuntime } from '@assistant-ui/react'
 import type { PendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
 import { resolvePendingSchedule } from '@/components/AssistantChat/ScheduleTimePicker'
+import {
+    consumeComposerSendIntent,
+    type ComposerSendIntent,
+} from '@/lib/messageDelivery'
 import { safeStringify } from '@hapi/protocol'
 import { renderEventLabel } from '@/chat/presentation'
-import type { ChatBlock, CliOutputBlock, CodexReview, UsageData } from '@/chat/types'
+import type { ChatBlock, CliOutputBlock, CodexReview, RoundSummary, UsageData } from '@/chat/types'
 import type { AgentEvent, ToolCallBlock } from '@/chat/types'
 import type { ToolGroupBlock, VisibleChatBlock } from '@/chat/toolGroups'
+import { visibleBlockRole } from '@/chat/toolGroups'
 import type { AttachmentMetadata, MessageStatus as HappyMessageStatus, Session } from '@/types/api'
+import { orderItemsById } from '@/lib/attachmentOrder'
 
 /**
  * Aggregated metadata for a multi-turn response group, surfaced on the
@@ -22,10 +28,11 @@ export type AggregatedAssistantMeta = {
     invokedAt: number | null
     durationMs: undefined
     turnCount: number
+    roundSummary?: RoundSummary
 }
 
 export type HappyChatMessageMetadata = {
-    kind: 'user' | 'assistant' | 'tool' | 'event' | 'cli-output' | 'codex-review'
+    kind: 'user' | 'assistant' | 'tool' | 'event' | 'cli-output' | 'codex-review' | 'compact-summary'
     status?: HappyMessageStatus
     localId?: string | null
     originalText?: string
@@ -34,9 +41,11 @@ export type HappyChatMessageMetadata = {
     source?: CliOutputBlock['source']
     attachments?: AttachmentMetadata[]
     invokedAt?: number | null
+    steered?: boolean
     durationMs?: number
     usage?: UsageData
     model?: string | null
+    roundSummary?: RoundSummary
     review?: CodexReview
     /**
      * Distinct turn count when this block carries an aggregated response
@@ -45,6 +54,11 @@ export type HappyChatMessageMetadata = {
      */
     turnCount?: number
 }
+
+export type HappyRuntimeExtras = Readonly<{
+    messagesVersion: number
+    historyVersion: number
+}>
 
 function formatCodexReviewText(review: CodexReview): string {
     const lines = ['Codex review']
@@ -68,19 +82,55 @@ function formatCodexReviewText(review: CodexReview): string {
     return lines.join('\n')
 }
 
-type VisibleChatBlockRole = 'user' | 'assistant' | 'system'
+
+export function getBlockPresentationTimestamp(block: VisibleChatBlock): number {
+    if (visibleBlockRole(block) === 'user') {
+        return block.invokedAt ?? block.createdAt
+    }
+    if (block.kind === 'tool-group') {
+        return block.tools.reduce(
+            (latest, tool) => Math.max(latest, tool.tool.completedAt ?? tool.createdAt),
+            block.createdAt
+        )
+    }
+    if (block.kind === 'tool-call') {
+        return Math.max(block.createdAt, block.tool.completedAt ?? block.createdAt)
+    }
+    return block.createdAt
+}
 
 /**
- * Mirror the role assignment used by `toThreadMessageLike` so response
- * group boundaries (the `@assistant-ui/react` converter joins adjacent
- * assistant-role messages only) stay consistent with what the library
- * actually flushes as one card.
+ * `@assistant-ui/react` joins adjacent assistant-role blocks into one card and
+ * takes its timestamp from the first block. Use the response's final activity
+ * time so prepending an older page cannot change an existing card's timestamp.
  */
-function visibleBlockRole(block: VisibleChatBlock): VisibleChatBlockRole {
-    if (block.kind === 'user-text') return 'user'
-    if (block.kind === 'agent-event') return 'system'
-    if (block.kind === 'cli-output') return block.source === 'user' ? 'user' : 'assistant'
-    return 'assistant'
+export function getResponseGroupTimestamps(
+    blocks: readonly VisibleChatBlock[]
+): Map<VisibleChatBlock, number> {
+    const timestamps = new Map<VisibleChatBlock, number>()
+    let first: VisibleChatBlock | null = null
+    let latestTimestamp = 0
+
+    const flush = () => {
+        if (first) timestamps.set(first, latestTimestamp)
+        first = null
+    }
+
+    for (const block of blocks) {
+        if (visibleBlockRole(block) !== 'assistant') {
+            flush()
+            continue
+        }
+        const timestamp = getBlockPresentationTimestamp(block)
+        if (!first) {
+            first = block
+            latestTimestamp = timestamp
+        } else {
+            latestTimestamp = Math.max(latestTimestamp, timestamp)
+        }
+    }
+    flush()
+    return timestamps
 }
 
 type TurnSource = {
@@ -209,16 +259,18 @@ export function aggregateResponseGroups(
     let groupInvokedAt: number | null = null
     let groupUsage: UsageData | undefined
     let groupTurnCount = 0
+    let groupRoundSummary: RoundSummary | undefined
 
     const flush = () => {
-        if (groupFirstBlockId !== null && groupTurnCount >= 2) {
+        if (groupFirstBlockId !== null && (groupTurnCount >= 2 || groupRoundSummary)) {
             const joinedModel = seenModels.length > 0 ? seenModels.join(', ') : null
             aggregates.set(groupFirstBlockId, {
                 usage: groupUsage,
                 model: joinedModel,
                 invokedAt: groupInvokedAt,
                 durationMs: undefined,
-                turnCount: groupTurnCount
+                turnCount: groupTurnCount,
+                roundSummary: groupRoundSummary
             })
         }
         groupFirstBlockId = null
@@ -227,6 +279,7 @@ export function aggregateResponseGroups(
         groupInvokedAt = null
         groupUsage = undefined
         groupTurnCount = 0
+        groupRoundSummary = undefined
     }
 
     for (const block of blocks) {
@@ -240,6 +293,13 @@ export function aggregateResponseGroups(
         if (groupFirstBlockId === null) {
             groupFirstBlockId = block.id
         }
+
+        const roundSummary = block.kind === 'tool-group'
+            ? block.roundSummary
+            : block.kind === 'user-text' || block.kind === 'agent-event'
+                ? undefined
+                : block.roundSummary
+        groupRoundSummary ??= roundSummary
 
         for (const turn of turnSourcesFromBlock(block)) {
             // Prefer the CLI-stamped `localId` when present. When it is null
@@ -318,12 +378,108 @@ export function assignThreadMessageIds(
     return assignThreadMessageIdsWithStableWrappers(blocks, new WeakMap())
 }
 
-function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): ThreadMessageLike {
+/**
+ * Finds the latest conversation-history boundary that is safe to fork.
+ * While the main agent is running, every block from the latest invoked user
+ * message onward belongs to the active turn and must not become a transient
+ * "completed" boundary as streaming events reshape the visible block list.
+ */
+export function findLatestCompletedBoundaryId(
+    blocks: readonly VisibleChatBlock[],
+    isRunning: boolean,
+    activeTurnStartedAt: number | null
+): string | null {
+    const assigned = assignThreadMessageIds(blocks)
+    let limit = assigned.length
+
+    if (isRunning) {
+        const activeTurnStart = activeTurnStartedAt === null
+            ? assigned.findLastIndex(({ block }) => (
+                visibleBlockRole(block) === 'user' && block.invokedAt != null
+            ))
+            : assigned.findIndex(({ block }) => (
+                visibleBlockRole(block) === 'user'
+                && (block.invokedAt ?? block.createdAt) >= activeTurnStartedAt
+            ))
+        if (activeTurnStart >= 0) {
+            limit = activeTurnStart
+        } else if (activeTurnStartedAt === null) {
+            return null
+        } else {
+            const firstActiveBlock = assigned.findIndex(({ block }) => (
+                (block.invokedAt ?? block.createdAt) >= activeTurnStartedAt
+            ))
+            if (firstActiveBlock >= 0) {
+                limit = firstActiveBlock
+            }
+        }
+    }
+
+    let candidate: string | null = null
+    let previousRole: ReturnType<typeof visibleBlockRole> | null = null
+    for (let index = 0; index < limit; index += 1) {
+        const { block, threadMessageId } = assigned[index]
+        const role = visibleBlockRole(block)
+        if (
+            (role === 'user' && block.invokedAt != null)
+            || (role === 'assistant' && previousRole !== 'assistant')
+        ) {
+            candidate = threadMessageId
+        }
+        previousRole = role
+    }
+    return candidate
+}
+
+function getAssistantBlockSignatures(blocks: readonly VisibleChatBlock[]): string[] {
+    return blocks
+        .filter((block) => visibleBlockRole(block) === 'assistant')
+        .map((block) => {
+            const text = 'text' in block ? block.text : ''
+            const toolCount = block.kind === 'tool-group' ? block.tools.length : 0
+            const textMarker = text.length <= 64 ? text : `${text.length}:${text.slice(-32)}`
+            return `${block.id}:${getBlockPresentationTimestamp(block)}:${textMarker}:${toolCount}`
+        })
+}
+
+function haveSameAssistantBlockSignatures(
+    first: readonly string[],
+    second: readonly string[]
+): boolean {
+    return first.length === second.length
+        && first.every((value, index) => value === second[index])
+}
+
+function isOlderAssistantHistoryPrepended(
+    current: readonly string[],
+    baseline: readonly string[]
+): boolean {
+    if (baseline.length === 0 || current.length <= baseline.length) return false
+    const suffixStart = current.length - baseline.length
+    return baseline.every((value, index) => current[suffixStart + index] === value)
+}
+
+function containsActiveAssistantOutput(
+    blocks: readonly VisibleChatBlock[],
+    activeTurnStartedAt: number | null
+): boolean {
+    return activeTurnStartedAt !== null
+        && blocks.some((block) => (
+            visibleBlockRole(block) === 'assistant'
+            && getBlockPresentationTimestamp(block) >= activeTurnStartedAt
+        ))
+}
+
+function toThreadMessageLike(
+    block: VisibleChatBlock,
+    threadMessageId: string,
+    timestamp: number
+): ThreadMessageLike {
     if (block.kind === 'user-text') {
         return {
             role: 'user',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: block.text }],
             metadata: {
                 custom: {
@@ -332,7 +488,8 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
                     localId: block.localId,
                     originalText: block.originalText,
                     attachments: block.attachments,
-                    invokedAt: block.invokedAt
+                    invokedAt: block.invokedAt,
+                    steered: block.steered
                 } satisfies HappyChatMessageMetadata
             }
         }
@@ -342,7 +499,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: block.text }],
             metadata: {
                 custom: {
@@ -360,7 +517,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{
                 type: 'tool-call',
                 toolCallId: block.id,
@@ -382,7 +539,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'reasoning', text: block.text }],
             metadata: {
                 custom: {
@@ -400,7 +557,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: formatCodexReviewText(block.review) }],
             metadata: {
                 custom: {
@@ -416,10 +573,29 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
     }
 
     if (block.kind === 'agent-event') {
+        // Pi compaction summaries carry a real payload; surface them as a
+        // dedicated system message so the chat can render an independent
+        // block instead of a small status line.
+        if (block.event.type === 'compact-summary' && typeof block.event.summary === 'string') {
+            return {
+                role: 'system',
+                id: threadMessageId,
+                createdAt: new Date(timestamp),
+                content: [{ type: 'text', text: block.event.summary }],
+                metadata: {
+                    custom: {
+                        kind: 'compact-summary',
+                        event: block.event,
+                        invokedAt: block.invokedAt,
+                        model: block.model
+                    } satisfies HappyChatMessageMetadata
+                }
+            }
+        }
         return {
             role: 'system',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: renderEventLabel(block.event) }],
             metadata: {
                 custom: {
@@ -436,7 +612,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: block.source === 'user' ? 'user' : 'assistant',
             id: threadMessageId,
-            createdAt: new Date(block.createdAt),
+            createdAt: new Date(timestamp),
             content: [{ type: 'text', text: block.text }],
             metadata: {
                 custom: {
@@ -456,7 +632,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
         return {
             role: 'assistant',
             id: threadMessageId,
-            createdAt: new Date(groupBlock.createdAt),
+            createdAt: new Date(timestamp),
             content: [{
                 type: 'tool-call',
                 toolCallId: groupBlock.id,
@@ -480,7 +656,7 @@ function toThreadMessageLike(block: VisibleChatBlock, threadMessageId: string): 
     return {
         role: 'assistant',
         id: threadMessageId,
-        createdAt: new Date(toolBlock.createdAt),
+        createdAt: new Date(timestamp),
         content: [{
             type: 'tool-call',
             toolCallId: toolBlock.id,
@@ -561,15 +737,127 @@ function extractMessageContent(message: AppendMessage): { text: string; attachme
 export function useHappyRuntime(props: {
     session: Session
     blocks: readonly VisibleChatBlock[]
+    messagesVersion: number
+    historyVersion: number
+    viewMode?: 'tail' | 'history'
+    isSyncingTail?: boolean
+    isLoadingMore?: boolean
     isSending: boolean
     isRunning?: boolean
-    onSendMessage: (text: string, attachments?: AttachmentMetadata[], scheduledAt?: number | null) => void
+    onSendMessage: (
+        text: string,
+        attachments?: AttachmentMetadata[],
+        scheduledAt?: number | null,
+        intent?: ComposerSendIntent,
+    ) => void
+    attachmentOrderRef?: React.MutableRefObject<string[]>
     onAbort: () => Promise<void>
     attachmentAdapter?: AttachmentAdapter
     allowSendWhenInactive?: boolean
     pendingScheduleRef?: React.RefObject<PendingSchedule | null>
+    /**
+     * Shared one-shot ref with HappyComposer. The composer marks the next
+     * `api.composer().send()`; this adapter consumes and resets the mark as
+     * soon as assistant-ui emits the corresponding AppendMessage.
+     */
+    pendingSendIntentRef?: React.MutableRefObject<ComposerSendIntent>
 }) {
     const isRunning = props.isRunning ?? props.session.thinking
+    const activeTurnStartedAt = props.session.activeTurnStartedAt ?? null
+    const hydratingWindow = props.viewMode === 'history'
+        || props.isSyncingTail === true
+        || props.isLoadingMore === true
+    const assistantBlockSignatures = useMemo(
+        () => getAssistantBlockSignatures(props.blocks),
+        [props.blocks]
+    )
+    const hasActiveAssistantOutput = containsActiveAssistantOutput(props.blocks, activeTurnStartedAt)
+    const awaitingInitialSnapshot = isRunning && props.blocks.length === 0
+    const runningHandoffRef = useRef({
+        sessionId: props.session.id,
+        wasRunning: isRunning,
+        historyVersion: props.historyVersion,
+        assistantBlockSignatures: isRunning ? assistantBlockSignatures : null,
+        awaitingExistingRunHydration: awaitingInitialSnapshot,
+        wasHydratingWindow: hydratingWindow,
+        // A running session can mount before its first message page arrives.
+        // Treat that first non-empty snapshot as hydration, not as new stream
+        // output, so a resumed reasoning part cannot start from an empty view.
+        hasObservedAssistantBlocks: !isRunning || !awaitingInitialSnapshot
+    })
+    // assistant-ui derives the last message's status from the thread-level
+    // isRunning flag. On a send, that flag can become true before the new
+    // assistant block is visible, so keep the previous materialized response
+    // complete until the block list proves that the new turn has produced
+    // output. Reset the baseline when the viewed session changes so switching
+    // from one running session to another gets the same protection.
+    const runningHandoff = runningHandoffRef.current
+    if (runningHandoff.sessionId !== props.session.id) {
+        runningHandoff.sessionId = props.session.id
+        runningHandoff.wasRunning = isRunning
+        runningHandoff.historyVersion = props.historyVersion
+        runningHandoff.assistantBlockSignatures = isRunning ? assistantBlockSignatures : null
+        runningHandoff.awaitingExistingRunHydration = awaitingInitialSnapshot
+        runningHandoff.wasHydratingWindow = hydratingWindow
+        runningHandoff.hasObservedAssistantBlocks = !isRunning || !awaitingInitialSnapshot
+    } else if (!isRunning) {
+        runningHandoff.historyVersion = props.historyVersion
+        runningHandoff.assistantBlockSignatures = null
+        runningHandoff.awaitingExistingRunHydration = false
+    } else if (!runningHandoff.wasRunning) {
+        runningHandoff.historyVersion = props.historyVersion
+        runningHandoff.assistantBlockSignatures = hasActiveAssistantOutput
+            ? null
+            : assistantBlockSignatures
+        runningHandoff.awaitingExistingRunHydration = false
+        runningHandoff.hasObservedAssistantBlocks = props.blocks.length > 0
+    } else if (runningHandoff.historyVersion !== props.historyVersion) {
+        // A bounded older-history prepend can drop the previous tail, so the
+        // new signature list is not necessarily a suffix of the old one.
+        runningHandoff.historyVersion = props.historyVersion
+        if (runningHandoff.assistantBlockSignatures !== null) {
+            runningHandoff.assistantBlockSignatures = assistantBlockSignatures
+            runningHandoff.hasObservedAssistantBlocks = props.blocks.length > 0
+        }
+    } else if (hydratingWindow || runningHandoff.wasHydratingWindow) {
+        if (runningHandoff.assistantBlockSignatures !== null) {
+            runningHandoff.assistantBlockSignatures = assistantBlockSignatures
+            runningHandoff.hasObservedAssistantBlocks = props.blocks.length > 0
+        }
+    } else if (!runningHandoff.hasObservedAssistantBlocks && props.blocks.length > 0) {
+        runningHandoff.assistantBlockSignatures = (
+            runningHandoff.awaitingExistingRunHydration || !hasActiveAssistantOutput
+        )
+            ? assistantBlockSignatures
+            : null
+        runningHandoff.awaitingExistingRunHydration = false
+        runningHandoff.hasObservedAssistantBlocks = true
+    } else if (
+        runningHandoff.assistantBlockSignatures !== null
+        && !haveSameAssistantBlockSignatures(
+            runningHandoff.assistantBlockSignatures,
+            assistantBlockSignatures
+        )
+    ) {
+        if (isOlderAssistantHistoryPrepended(
+            assistantBlockSignatures,
+            runningHandoff.assistantBlockSignatures
+        )) {
+            runningHandoff.assistantBlockSignatures = assistantBlockSignatures
+        } else {
+            runningHandoff.assistantBlockSignatures = null
+        }
+    }
+    runningHandoff.wasRunning = isRunning
+    runningHandoff.wasHydratingWindow = hydratingWindow
+
+    const waitingForAssistantOutput = isRunning
+        && runningHandoff.assistantBlockSignatures !== null
+        && haveSameAssistantBlockSignatures(
+            runningHandoff.assistantBlockSignatures,
+            assistantBlockSignatures
+        )
+    const isRunningForMessages = isRunning && !waitingForAssistantOutput
 
     // Compute response-group aggregates once per block list so we can
     // inject the summed metadata onto each group's first visible block.
@@ -591,10 +879,18 @@ export function useHappyRuntime(props: {
         () => aggregateResponseGroups(props.blocks),
         [props.blocks]
     )
+    const responseGroupTimestamps = useMemo(
+        () => getResponseGroupTimestamps(props.blocks),
+        [props.blocks]
+    )
 
     const convertBlock = useCallback(
         ({ block, threadMessageId }: BlockWithThreadMessageId): ThreadMessageLike => {
-            const message = toThreadMessageLike(block, threadMessageId)
+            const message = toThreadMessageLike(
+                block,
+                threadMessageId,
+                responseGroupTimestamps.get(block) ?? getBlockPresentationTimestamp(block)
+            )
             const aggregate = aggregates.get(block.id)
             if (!aggregate) return message
             const existing = message.metadata?.custom as HappyChatMessageMetadata | undefined
@@ -608,12 +904,13 @@ export function useHappyRuntime(props: {
                         model: aggregate.model,
                         invokedAt: aggregate.invokedAt,
                         durationMs: aggregate.durationMs,
-                        turnCount: aggregate.turnCount
+                        turnCount: aggregate.turnCount,
+                        roundSummary: aggregate.roundSummary
                     } satisfies HappyChatMessageMetadata
                 }
             }
         },
-        [aggregates]
+        [aggregates, responseGroupTimestamps]
     )
 
     // Use cached message converter for performance optimization
@@ -621,23 +918,41 @@ export function useHappyRuntime(props: {
     const convertedMessages = useExternalMessageConverter<BlockWithThreadMessageId>({
         callback: convertBlock,
         messages: blocksWithThreadIds,
-        isRunning,
+        isRunning: isRunningForMessages,
     })
 
     const onNew = useCallback(async (message: AppendMessage) => {
+        const intent = consumeComposerSendIntent(props.pendingSendIntentRef)
+        // Reset before any early return so an empty submission, extraction
+        // failure, or downstream exception cannot leak an explicit queue
+        // gesture into the next ordinary send.
         const { text, attachments } = extractMessageContent(message)
-        if (!text && attachments.length === 0) return
+        const orderedAttachments = orderItemsById(
+            attachments,
+            props.attachmentOrderRef?.current ?? [],
+        )
+        if (!text && orderedAttachments.length === 0) return
         // Resolve pendingSchedule at send time (Date.now()) so preset-type schedules
         // ("5 minutes from now") are relative to the actual send action, not the
         // moment the user clicked the preset button.
         const sendNow = Date.now()
         const scheduledAt = resolvePendingSchedule(props.pendingScheduleRef?.current ?? null, sendNow)
-        props.onSendMessage(text, attachments.length > 0 ? attachments : undefined, scheduledAt)
-    }, [props.onSendMessage, props.pendingScheduleRef])
+        props.onSendMessage(
+            text,
+            orderedAttachments.length > 0 ? orderedAttachments : undefined,
+            scheduledAt,
+            intent,
+        )
+    }, [props.attachmentOrderRef, props.onSendMessage, props.pendingScheduleRef, props.pendingSendIntentRef])
 
     const onCancel = useCallback(async () => {
         await props.onAbort()
     }, [props.onAbort])
+
+    const extras = useMemo<HappyRuntimeExtras>(() => ({
+        messagesVersion: props.messagesVersion,
+        historyVersion: props.historyVersion
+    }), [props.messagesVersion, props.historyVersion])
 
     // Memoize the adapter to avoid recreating on every render
     // useExternalStoreRuntime may use adapter identity for subscriptions
@@ -645,6 +960,7 @@ export function useHappyRuntime(props: {
         isDisabled: props.isSending || (!props.session.active && !props.allowSendWhenInactive),
         isRunning,
         messages: convertedMessages,
+        extras,
         onNew,
         onCancel,
         adapters: props.attachmentAdapter ? { attachments: props.attachmentAdapter } : undefined,
@@ -655,6 +971,7 @@ export function useHappyRuntime(props: {
         props.allowSendWhenInactive,
         isRunning,
         convertedMessages,
+        extras,
         onNew,
         onCancel,
         props.attachmentAdapter

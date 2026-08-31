@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { SelectControl } from '@/components/ui/select-control'
 import {
     DEFAULT_VOICE_CHARACTER,
     DEFAULT_VOICE_IDENTITY,
@@ -69,7 +70,7 @@ export function VoiceRespondsControls(props: {
 
     return (
         <div className="border-t border-[var(--app-divider)] px-3 py-3">
-            <p className="mb-2 text-[var(--app-fg)]">{props.t('settings.voice.responseLength.label')}</p>
+            <p className="mb-2 text-sm font-medium text-[var(--app-fg)]">{props.t('settings.voice.responseLength.label')}</p>
             <div className="flex gap-2">
                 {RESPONSE_LENGTH_OPTIONS.map((opt) => (
                     <button key={opt} type="button" onClick={() => setResponseLength(opt)}
@@ -119,7 +120,7 @@ export function VoicePersonaControls(props: {
             <button type="button" onClick={() => setIdentityOpen((v) => !v)}
                 className="flex w-full items-center justify-between border-t border-[var(--app-divider)] px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
                 aria-expanded={identityOpen}>
-                <span className="text-[var(--app-fg)]">{props.t('settings.voice.identity.title')}</span>
+                <span className="text-sm font-medium text-[var(--app-fg)]">{props.t('settings.voice.identity.title')}</span>
                 <ChevronDownIcon className={`shrink-0 transition-transform ${identityOpen ? 'rotate-180' : ''}`} />
             </button>
             {identityOpen && (
@@ -129,14 +130,14 @@ export function VoicePersonaControls(props: {
                         onChange={(e) => setIdentity(e.target.value === DEFAULT_VOICE_IDENTITY ? '' : e.target.value)}
                         rows={6} maxLength={VOICE_IDENTITY_MAX_LENGTH} spellCheck={false}
                         className="w-full resize-y rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-2 font-mono text-xs leading-relaxed text-[var(--app-fg)]" />
-                    <div className="flex flex-wrap gap-2">
+                    <div className="flex flex-wrap items-center justify-end gap-2">
+                        <span className="text-xs text-[var(--app-hint)]">
+                            {prefs.identity.trim() ? props.t('settings.voice.identity.customized') : props.t('settings.voice.identity.default')}
+                        </span>
                         <button type="button" onClick={resetIdentity}
                             className="rounded-md border border-[var(--app-border)] px-2 py-1 text-xs text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)]">
                             {props.t('settings.voice.identity.reset')}
                         </button>
-                        <span className="text-xs text-[var(--app-hint)]">
-                            {prefs.identity.trim() ? props.t('settings.voice.identity.customized') : props.t('settings.voice.identity.default')}
-                        </span>
                     </div>
                 </div>
             )}
@@ -145,7 +146,7 @@ export function VoicePersonaControls(props: {
             <button type="button" onClick={() => setCharacterOpen((v) => !v)}
                 className="flex w-full items-center justify-between border-t border-[var(--app-divider)] px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
                 aria-expanded={characterOpen}>
-                <span className="text-[var(--app-fg)]">{props.t('settings.voice.character.promptTitle')}</span>
+                <span className="text-sm font-medium text-[var(--app-fg)]">{props.t('settings.voice.character.promptTitle')}</span>
                 <ChevronDownIcon className={`shrink-0 transition-transform ${characterOpen ? 'rotate-180' : ''}`} />
             </button>
             {characterOpen && (
@@ -155,7 +156,7 @@ export function VoicePersonaControls(props: {
                         onChange={(e) => setCharacter(e.target.value === DEFAULT_VOICE_CHARACTER ? '' : e.target.value)}
                         rows={8} maxLength={VOICE_CHARACTER_MAX_LENGTH} spellCheck={false}
                         className="w-full resize-y rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-2 font-mono text-xs leading-relaxed text-[var(--app-fg)]" />
-                    <div className="flex flex-wrap items-center gap-2">
+                    <div className="flex flex-wrap items-center justify-end gap-2">
                         <button type="button" onClick={resetCharacter}
                             className="rounded-md border border-[var(--app-border)] px-2 py-1 text-xs text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)]">
                             {props.t('settings.voice.character.reset')}
@@ -178,7 +179,7 @@ export function VoicePersonaControls(props: {
             <button type="button" onClick={() => setDeliveryOpen((v) => !v)}
                 className="flex w-full items-center justify-between border-t border-[var(--app-divider)] px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
                 aria-expanded={deliveryOpen}>
-                <span className="flex items-center gap-2 text-[var(--app-fg)]">
+                <span className="flex items-center gap-2 text-sm font-medium text-[var(--app-fg)]">
                     {props.t('settings.voice.character.title')}
                     {!usingDefaults && (
                         <span className="rounded-full bg-[var(--app-link)]/15 px-2 py-0.5 text-[10px] text-[var(--app-link)]">
@@ -189,21 +190,21 @@ export function VoicePersonaControls(props: {
                 <ChevronDownIcon className={`shrink-0 transition-transform ${deliveryOpen ? 'rotate-180' : ''}`} />
             </button>
             {deliveryOpen && (
-                <div className="space-y-1 border-t border-[var(--app-divider)] bg-[var(--app-subtle-bg)]/40 pb-2">
-                    <p className="px-3 pt-2 text-xs text-[var(--app-hint)]">
+                <div className="space-y-2 border-t border-[var(--app-divider)] bg-[var(--app-subtle-bg)]/40 px-3 py-3">
+                    <p className="text-xs text-[var(--app-hint)]">
                         {props.t('settings.voice.character.presetSlidersHint')}
                     </p>
-                    <label className="block px-3 pt-1">
+                    <label className="block">
                         <span className="mb-1 block text-sm text-[var(--app-fg)]">
                             {props.t('settings.voice.character.preset.label')}
                         </span>
-                        <select value={prefs.preset}
+                        <SelectControl value={prefs.preset}
                             onChange={(e) => setPreset(e.target.value as VoicePersonalityPresetId)}
-                            className="w-full rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-2 text-sm text-[var(--app-fg)]">
+                            className="rounded-md border border-[var(--app-border)] bg-[var(--app-bg)] py-2 pl-2 text-sm text-[var(--app-fg)]">
                             {VOICE_PERSONALITY_PRESETS.map((preset) => (
                                 <option key={preset.id} value={preset.id}>{props.t(preset.labelKey)}</option>
                             ))}
-                        </select>
+                        </SelectControl>
                         <p className="mt-1 text-xs text-[var(--app-hint)]">
                             {props.t(getVoicePersonalityPreset(prefs.preset).descriptionKey)}
                         </p>
@@ -239,7 +240,7 @@ export function VoiceSoundsControls(props: {
             <button type="button" onClick={() => setTuningOpen((v) => !v)}
                 className="flex w-full items-center justify-between border-t border-[var(--app-divider)] px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
                 aria-expanded={tuningOpen}>
-                <span className="text-[var(--app-fg)]">{props.t('settings.voice.tuning.title')}</span>
+                <span className="text-sm font-medium text-[var(--app-fg)]">{props.t('settings.voice.tuning.title')}</span>
                 <ChevronDownIcon className={`shrink-0 transition-transform ${tuningOpen ? 'rotate-180' : ''}`} />
             </button>
             {tuningOpen && (
@@ -306,7 +307,7 @@ export function VoiceDiagnosticsControls(props: {
 
     const backend = props.voiceBackend ?? 'elevenlabs'
     const wireHint = getVoiceWireBudgetHint(backend)
-    const fixturesPreview = useMemo(() => getVoicePlatformFixturesPreview(800), [])
+    const fixturesPreview = useMemo(() => getVoicePlatformFixturesPreview(), [])
     const composed = useMemo(
         () => resolveComposedVoiceSystemPrompt(prefs, { backend }),
         [prefs, backend]
@@ -341,7 +342,7 @@ export function VoiceDiagnosticsControls(props: {
             <button type="button" onClick={() => setFixturesOpen((v) => !v)}
                 className="flex w-full items-center justify-between border-t border-[var(--app-divider)] px-3 py-3 text-left transition-colors hover:bg-[var(--app-subtle-bg)]"
                 aria-expanded={fixturesOpen}>
-                <span className="text-[var(--app-fg)]">{props.t('settings.voice.fixtures.title')}</span>
+                <span className="text-sm font-medium text-[var(--app-fg)]">{props.t('settings.voice.fixtures.title')}</span>
                 <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24"
                     fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
                     className={`shrink-0 transition-transform ${fixturesOpen ? 'rotate-180' : ''}`}>

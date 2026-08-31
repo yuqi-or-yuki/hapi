@@ -1,10 +1,14 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+    applyGlobalSelectAll,
     applyModelChangeWithReasoningRollback,
     buildGoalStateMessages,
     isScratchlistHotkeyBlockedTarget,
     isScratchlistToggleHotkey,
+    isSelectAllTargetBlocked,
+    mergeStagedAttachmentsInOrder,
     resolvePiContextWindow,
+    resolveLatestCompletedBoundaryIdForView,
     shouldAutoClearPendingSchedule,
     shouldRouteToScratchlist,
 } from './SessionChat'
@@ -63,6 +67,35 @@ describe('resolvePiContextWindow', () => {
 
     it('falls back to the legacy model id when selected-model metadata is absent', () => {
         expect(resolvePiContextWindow(models, undefined, 'shared-model')).toBe(100_000)
+    })
+})
+
+describe('resolveLatestCompletedBoundaryIdForView', () => {
+    it('uses the live tail boundary when following the latest messages', () => {
+        expect(resolveLatestCompletedBoundaryIdForView('tail', 'agent-text:latest', {
+            id: 'agent-text:old',
+            tailRevision: 1
+        }, 2))
+            .toBe('agent-text:latest')
+    })
+
+    it('keeps the live tail boundary while reading older messages', () => {
+        expect(resolveLatestCompletedBoundaryIdForView('history', null, {
+            id: 'agent-text:latest',
+            tailRevision: 2
+        }, 2))
+            .toBe('agent-text:latest')
+    })
+
+    it('invalidates the remembered boundary after a live tail revision', () => {
+        expect(resolveLatestCompletedBoundaryIdForView('history', null, {
+            id: 'agent-text:old',
+            tailRevision: 2
+        }, 3)).toBeNull()
+    })
+
+    it('does not invent a boundary before the tail has been observed', () => {
+        expect(resolveLatestCompletedBoundaryIdForView('history', null, null, 0)).toBeNull()
     })
 })
 
@@ -133,22 +166,23 @@ describe('shouldAutoClearPendingSchedule', () => {
 /**
  * Unit tests for shouldRouteToScratchlist.
  *
- * Regression cover for upstream review on PR #798 (github-actions[bot]
- * [Major]): scratchlist-mode submissions used to silently drop
- * attachments and scheduledAt because the wrapper short-circuited to
- * scratchlist.add(text) regardless of payload. The fix is to fall
- * through to the regular chat send whenever the submission can't be
- * represented as a pure-text scratchlist entry.
+ * Regression cover for upstream review on PR #798 / #1205: scratchlist-mode
+ * submissions must fall through to chat when the payload cannot be parked
+ * (schedule set, or any attachment still on a normal CLI upload path).
  */
 describe('shouldRouteToScratchlist', () => {
-    function attachment(): AttachmentMetadata {
+    function attachment(path = '/tmp/attach-1.png'): AttachmentMetadata {
         return {
             id: 'attach-1',
             filename: 'attach-1.png',
             mimeType: 'image/png',
             size: 1024,
-            path: '/tmp/attach-1.png',
+            path,
         }
+    }
+
+    function hubAttachment(): AttachmentMetadata {
+        return attachment('hapi-hub:scratchlist/default/session-1/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee-a.png')
     }
 
     it('returns false when scratchlist mode is off, regardless of payload', () => {
@@ -163,9 +197,14 @@ describe('shouldRouteToScratchlist', () => {
         expect(shouldRouteToScratchlist(true, [], null)).toBe(true)
     })
 
-    it('returns false when scratchlist mode is on but attachments are present', () => {
+    it('returns true when every attachment is already hub-resident', () => {
+        expect(shouldRouteToScratchlist(true, [hubAttachment()], null)).toBe(true)
+        expect(shouldRouteToScratchlist(true, [hubAttachment(), hubAttachment()], null)).toBe(true)
+    })
+
+    it('returns false when any attachment still has a normal CLI path', () => {
         expect(shouldRouteToScratchlist(true, [attachment()], null)).toBe(false)
-        expect(shouldRouteToScratchlist(true, [attachment(), attachment()], null)).toBe(false)
+        expect(shouldRouteToScratchlist(true, [hubAttachment(), attachment()], null)).toBe(false)
     })
 
     it('returns false when scratchlist mode is on but a scheduled-send is set', () => {
@@ -174,7 +213,7 @@ describe('shouldRouteToScratchlist', () => {
     })
 
     it('returns false when both attachments and scheduledAt are set', () => {
-        expect(shouldRouteToScratchlist(true, [attachment()], Date.now() + 60_000)).toBe(false)
+        expect(shouldRouteToScratchlist(true, [hubAttachment()], Date.now() + 60_000)).toBe(false)
     })
 
     /**
@@ -200,6 +239,29 @@ describe('shouldRouteToScratchlist', () => {
         expect(routed).toBe(true)
         const shouldClearAfterAccepted = !routed
         expect(shouldClearAfterAccepted).toBe(false)
+    })
+})
+
+describe('mergeStagedAttachmentsInOrder', () => {
+    function attachment(id: string, path: string): AttachmentMetadata {
+        return {
+            id,
+            filename: `${id}.png`,
+            mimeType: 'image/png',
+            size: 1024,
+            path,
+        }
+    }
+
+    it('replaces staged hub attachments without changing mixed attachment order', () => {
+        const hubAttachment = attachment('hub-a', 'hapi-hub:scratchlist/default/session/hub-a.png')
+        const normalAttachment = attachment('normal-b', '/tmp/normal-b.png')
+        const stagedAttachment = attachment('hub-a', '/tmp/staged-hub-a.png')
+
+        expect(mergeStagedAttachmentsInOrder(
+            [hubAttachment, normalAttachment],
+            [stagedAttachment],
+        )).toEqual([stagedAttachment, normalAttachment])
     })
 })
 
@@ -297,6 +359,101 @@ describe('isScratchlistHotkeyBlockedTarget', () => {
     })
 })
 
+describe('isSelectAllTargetBlocked', () => {
+    it('blocks select-all takeover when focus is in the rich composer (contentEditable)', () => {
+        const composer = document.createElement('div')
+        composer.setAttribute('contenteditable', 'plaintext-only')
+        expect(isSelectAllTargetBlocked(composer)).toBe(true)
+    })
+
+    it('blocks select-all takeover when focus is in a textarea (fallback composer)', () => {
+        const textarea = document.createElement('textarea')
+        expect(isSelectAllTargetBlocked(textarea)).toBe(true)
+    })
+
+    it('blocks select-all takeover when focus is in a single-line input', () => {
+        const input = document.createElement('input')
+        expect(isSelectAllTargetBlocked(input)).toBe(true)
+    })
+
+    it('blocks select-all takeover when focus is anywhere inside a [role=dialog]', () => {
+        const dialog = document.createElement('div')
+        dialog.setAttribute('role', 'dialog')
+        const inner = document.createElement('button')
+        dialog.appendChild(inner)
+        document.body.appendChild(dialog)
+        expect(isSelectAllTargetBlocked(inner)).toBe(true)
+        document.body.removeChild(dialog)
+    })
+
+    it('does NOT block select-all takeover when focus is on the message thread / body', () => {
+        const message = document.createElement('div')
+        expect(isSelectAllTargetBlocked(message)).toBe(false)
+        expect(isSelectAllTargetBlocked(document.body)).toBe(false)
+    })
+
+    it('does NOT block select-all takeover when target is null or non-Element', () => {
+        expect(isSelectAllTargetBlocked(null)).toBe(false)
+        expect(isSelectAllTargetBlocked(window as unknown as EventTarget)).toBe(false)
+    })
+})
+
+describe('applyGlobalSelectAll', () => {
+    function setupThread(): HTMLElement {
+        const thread = document.createElement('div')
+        thread.className = 'happy-thread-messages'
+        const message = document.createElement('div')
+        message.textContent = 'assistant reply text'
+        thread.appendChild(message)
+        document.body.appendChild(thread)
+        return thread
+    }
+
+    afterEach(() => {
+        window.getSelection()?.removeAllRanges()
+        document.body.innerHTML = ''
+    })
+
+    it('selects the message thread for Ctrl+A when focus is on the page body', () => {
+        setupThread()
+        const event = new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, cancelable: true })
+        expect(applyGlobalSelectAll(event)).toBe(true)
+        expect(event.defaultPrevented).toBe(true)
+        const selection = window.getSelection()
+        expect(selection?.toString()).toBe('assistant reply text')
+    })
+
+    it('ignores non-Ctrl/Cmd+A shortcuts', () => {
+        setupThread()
+        for (const event of [
+            new KeyboardEvent('keydown', { key: 'a' }),
+            new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, altKey: true }),
+            new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, shiftKey: true }),
+            new KeyboardEvent('keydown', { key: 'c', ctrlKey: true }),
+        ]) {
+            expect(applyGlobalSelectAll(event)).toBe(false)
+            expect(event.defaultPrevented).toBe(false)
+        }
+    })
+
+    it('leaves select-all to the browser when focus is in the composer', () => {
+        setupThread()
+        const composer = document.createElement('div')
+        composer.setAttribute('contenteditable', 'plaintext-only')
+        const event = new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, cancelable: true })
+        Object.defineProperty(event, 'target', { value: composer })
+        expect(applyGlobalSelectAll(event)).toBe(false)
+        expect(event.defaultPrevented).toBe(false)
+        expect(window.getSelection()?.toString()).toBe('')
+    })
+
+    it('does nothing when the thread is absent', () => {
+        const event = new KeyboardEvent('keydown', { key: 'a', ctrlKey: true, cancelable: true })
+        expect(applyGlobalSelectAll(event)).toBe(false)
+        expect(event.defaultPrevented).toBe(false)
+    })
+})
+
 describe('buildGoalStateMessages', () => {
     it('keeps immediate queued user messages so completed goal status can clear before timeline render', () => {
         const now = 1_700_000_000_000
@@ -313,16 +470,14 @@ describe('buildGoalStateMessages', () => {
             .toEqual(['local-immediate'])
     })
 
-    it('includes pending messages that are outside the visible timeline window', () => {
+    it('uses every canonical message even when the thread hides queued rows', () => {
         const now = 1_700_000_000_000
-        const visible = [
-            userMessage({ id: 'visible', createdAt: now - 10 })
-        ]
-        const pending = [
+        const messages = [
+            userMessage({ id: 'visible', createdAt: now - 10 }),
             userMessage({ id: 'pending', createdAt: now })
         ]
 
-        expect(buildGoalStateMessages(visible, pending).map((message) => message.id))
+        expect(buildGoalStateMessages(messages).map((message) => message.id))
             .toEqual(['visible', 'pending'])
     })
 

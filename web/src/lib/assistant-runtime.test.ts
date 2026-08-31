@@ -3,10 +3,13 @@ import {
     type BlockWithThreadMessageId,
     aggregateResponseGroups,
     assignThreadMessageIds,
-    assignThreadMessageIdsWithStableWrappers
+    assignThreadMessageIdsWithStableWrappers,
+    findLatestCompletedBoundaryId,
+    getBlockPresentationTimestamp,
+    getResponseGroupTimestamps
 } from './assistant-runtime'
 import type { AgentEventBlock, AgentTextBlock, CliOutputBlock, ToolCallBlock, UserTextBlock } from '@/chat/types'
-import type { ToolGroupBlock, VisibleChatBlock } from '@/chat/toolGroups'
+import { buildVisibleChatBlocks, type ToolGroupBlock, type VisibleChatBlock } from '@/chat/toolGroups'
 
 // Minimal builders for VisibleChatBlock fixtures. Tests focus on metadata
 // aggregation behavior across response groups; non-metadata fields default to
@@ -130,6 +133,158 @@ describe('assignThreadMessageIds', () => {
         expect(second[0]).toBe(first[0])
         expect(second[0].threadMessageId).toBe('agent-text:a')
         expect(second[1].threadMessageId).toBe('user-text:u')
+    })
+})
+
+describe('findLatestCompletedBoundaryId', () => {
+    it('keeps the fork boundary before the active turn while streaming blocks change', () => {
+        const completedUser = userText('u1', { invokedAt: 10 })
+        const completedAssistant = agentText('a1')
+        const activeUser = userText('u2', { invokedAt: 20 })
+
+        const firstStreamingShape: VisibleChatBlock[] = [
+            completedUser,
+            completedAssistant,
+            activeUser,
+            agentText('thinking')
+        ]
+        const laterStreamingShape: VisibleChatBlock[] = [
+            completedUser,
+            completedAssistant,
+            activeUser,
+            agentText('thinking'),
+            agentEvent('progress', { type: 'message', message: 'Working' }),
+            agentText('answer')
+        ]
+
+        expect(findLatestCompletedBoundaryId(firstStreamingShape, true, 20)).toBe('agent-text:a1')
+        expect(findLatestCompletedBoundaryId(laterStreamingShape, true, 20)).toBe('agent-text:a1')
+    })
+
+    it('keeps the completed boundary while the active prompt is still queued', () => {
+        const blocks: VisibleChatBlock[] = [
+            userText('u1', { createdAt: 10, invokedAt: 10 }),
+            agentText('a1', { createdAt: 11 })
+        ]
+
+        expect(findLatestCompletedBoundaryId(blocks, true, 20)).toBe('agent-text:a1')
+    })
+
+    it('keeps the boundary before the first user message when a running Pi turn is steered', () => {
+        const blocks: VisibleChatBlock[] = [
+            userText('u1', { invokedAt: 10 }),
+            agentText('a1'),
+            userText('u2', { invokedAt: 20 }),
+            agentText('streaming'),
+            userText('steer', { invokedAt: 30 }),
+            agentText('after-steer')
+        ]
+
+        expect(findLatestCompletedBoundaryId(blocks, true, 20)).toBe('agent-text:a1')
+    })
+
+    it('cuts off active output when the active user row is outside the tail window', () => {
+        const withCompletedHistory: VisibleChatBlock[] = [
+            userText('u1', { invokedAt: 10 }),
+            agentText('a1', { createdAt: 11 }),
+            agentText('streaming', { createdAt: 30 })
+        ]
+        const activeOnly: VisibleChatBlock[] = [
+            agentText('streaming', { createdAt: 30 })
+        ]
+
+        expect(findLatestCompletedBoundaryId(withCompletedHistory, true, 20)).toBe('agent-text:a1')
+        expect(findLatestCompletedBoundaryId(activeOnly, true, 20)).toBeNull()
+    })
+
+    it('promotes the final assistant boundary after the active turn completes', () => {
+        const blocks: VisibleChatBlock[] = [
+            userText('u1', { invokedAt: 10 }),
+            agentText('a1'),
+            userText('u2', { invokedAt: 20 }),
+            agentText('thinking'),
+            agentEvent('progress', { type: 'message', message: 'Working' }),
+            agentText('answer')
+        ]
+
+        expect(findLatestCompletedBoundaryId(blocks, false, null)).toBe('agent-text:answer')
+    })
+
+    it('does not expose a transient boundary when a running tail has no invoked user marker', () => {
+        expect(findLatestCompletedBoundaryId([agentText('streaming')], true, null)).toBeNull()
+    })
+})
+
+describe('message presentation timestamps', () => {
+    it('uses invocation time for user-role messages and falls back to creation time', () => {
+        expect(getBlockPresentationTimestamp(userText('queued', {
+            createdAt: 100,
+            invokedAt: 200
+        }))).toBe(200)
+        expect(getBlockPresentationTimestamp(userText('immediate', {
+            createdAt: 300
+        }))).toBe(300)
+        expect(getBlockPresentationTimestamp(cliOutput('terminal', 'user', {
+            createdAt: 400,
+            invokedAt: 500
+        }))).toBe(500)
+    })
+
+    it('keeps a joined response timestamp stable when older assistant blocks are prepended', () => {
+        const middle = agentText('middle', { createdAt: 200 })
+        const tail = agentText('tail', { createdAt: 300 })
+
+        const initial = getResponseGroupTimestamps([middle, tail])
+        expect(initial.get(middle)).toBe(300)
+
+        const older = agentText('older', { createdAt: 100 })
+        const prepended = getResponseGroupTimestamps([older, middle, tail])
+        expect(prepended.get(older)).toBe(300)
+    })
+
+    it('splits response timestamps at user and system boundaries', () => {
+        const first = agentText('a1', { createdAt: 100 })
+        const second = agentText('a2', { createdAt: 200 })
+        const third = agentText('a3', { createdAt: 400 })
+        const fourth = agentText('a4', { createdAt: 600 })
+        const timestamps = getResponseGroupTimestamps([
+            first,
+            second,
+            userText('u1', { createdAt: 300 }),
+            third,
+            agentEvent('e1', { type: 'ready' }),
+            fourth
+        ])
+
+        expect(timestamps.get(first)).toBe(200)
+        expect(timestamps.get(third)).toBe(400)
+        expect(timestamps.get(fourth)).toBe(600)
+        expect(timestamps.size).toBe(3)
+    })
+
+    it('uses the latest grouped tool completion as response activity time', () => {
+        const first = toolCall('t1', {
+            createdAt: 100,
+            tool: {
+                ...toolCall('seed').tool,
+                id: 't1',
+                createdAt: 100,
+                completedAt: 300
+            }
+        })
+        const last = toolCall('t2', {
+            createdAt: 200,
+            tool: {
+                ...toolCall('seed').tool,
+                id: 't2',
+                createdAt: 200,
+                completedAt: 250
+            }
+        })
+        const group = toolGroup('g1', [first, last], { createdAt: 100 })
+
+        expect(getBlockPresentationTimestamp(group)).toBe(300)
+        expect(getResponseGroupTimestamps([group]).get(group)).toBe(300)
     })
 })
 
@@ -647,5 +802,46 @@ describe('aggregateResponseGroups', () => {
         const meta = aggregates.get('a1')
         expect(meta?.usage?.cache_creation_input_tokens).toBe(300)
         expect(meta?.usage?.cache_read_input_tokens).toBe(100)
+    })
+
+    it('prefers a result summary for single-turn and tool-group response metadata', () => {
+        const summary = {
+            usage: { input_tokens: 100, output_tokens: 20 },
+            modelUsage: { 'claude-opus-5': { inputTokens: 100, outputTokens: 20 } },
+            totalCostUsd: 0.02,
+            numTurns: 2,
+            durationMs: 1500
+        }
+        const singleTurn = Object.assign(agentText('single', {
+            localId: 'L1', model: 'derived-model', usage: { input_tokens: 1, output_tokens: 1 }
+        }), { roundSummary: summary })
+        const groupedTurn = Object.assign(agentText('grouped', {
+            localId: 'L2', model: 'derived-model', usage: { input_tokens: 2, output_tokens: 2 }
+        }), { roundSummary: summary })
+        const tool = toolGroup('tool-group', [toolCall('tool', { localId: 'L2' })])
+
+        expect(aggregateResponseGroups([userText('u1'), singleTurn]).get('single')?.roundSummary).toEqual(summary)
+        expect(aggregateResponseGroups([userText('u2'), groupedTurn, tool]).get('grouped')?.roundSummary).toEqual(summary)
+    })
+
+    it('preserves a tool-only result summary through tool-call to tool-group conversion', () => {
+        const summary = {
+            usage: { input_tokens: 100, output_tokens: 20 },
+            modelUsage: { 'claude-opus-5': { inputTokens: 100, outputTokens: 20 } },
+            totalCostUsd: 0.02,
+            numTurns: 2,
+            durationMs: 1500
+        }
+        const firstTool = Object.assign(toolCall('read', { localId: 'L1' }), { roundSummary: summary })
+        const visible = buildVisibleChatBlocks([
+            userText('u1'),
+            firstTool,
+            toolCall('grep', { localId: 'L1' })
+        ], { hasMoreMessages: false })
+        const group = visible.find(block => block.kind === 'tool-group')
+        if (!group || group.kind !== 'tool-group') throw new Error('Expected tool group')
+
+        expect(group.roundSummary).toEqual(summary)
+        expect(aggregateResponseGroups(visible).get(group.id)?.roundSummary).toEqual(summary)
     })
 })

@@ -69,6 +69,52 @@ describe('SDKToLogConverter', () => {
             expect(logMessage?.type).toBe('user')
             expect((logMessage as any).message.content).toHaveLength(2)
         })
+
+        it('should mark synthetic user messages as meta', () => {
+            // Skill injections arrive over stream-json as plain-text user messages
+            // flagged with isSynthetic. The on-disk transcript flags the same event
+            // with isMeta, which is what every downstream filter looks for.
+            const sdkMessage: SDKUserMessage = {
+                type: 'user',
+                isSynthetic: true,
+                message: {
+                    role: 'user',
+                    content: [
+                        { type: 'text', text: 'Base directory for this skill: /home/user/.claude/skills/foo' }
+                    ]
+                }
+            }
+
+            const logMessage = converter.convert(sdkMessage)
+
+            expect(logMessage?.type).toBe('user')
+            expect(logMessage?.isMeta).toBe(true)
+        })
+
+        it('should preserve isMeta on user messages', () => {
+            const sdkMessage: SDKUserMessage = {
+                type: 'user',
+                isMeta: true,
+                message: {
+                    role: 'user',
+                    content: 'injected context'
+                }
+            }
+
+            expect(converter.convert(sdkMessage)?.isMeta).toBe(true)
+        })
+
+        it('should not mark genuine user messages as meta', () => {
+            const sdkMessage: SDKUserMessage = {
+                type: 'user',
+                message: {
+                    role: 'user',
+                    content: 'Hello Claude'
+                }
+            }
+
+            expect(converter.convert(sdkMessage)?.isMeta).toBeUndefined()
+        })
     })
 
     describe('Assistant messages', () => {
@@ -159,7 +205,12 @@ describe('SDKToLogConverter', () => {
     })
 
     describe('Result messages', () => {
-        it('should not convert result messages that have LLM turns', () => {
+        it('converts successful results into a round-summary carrier without advancing the parent chain', () => {
+            const preceding = converter.convert({
+                type: 'user',
+                message: { role: 'user', content: 'first request' }
+            } as SDKUserMessage)
+
             const sdkMessage: SDKResultMessage = {
                 type: 'result',
                 subtype: 'success',
@@ -173,15 +224,41 @@ describe('SDKToLogConverter', () => {
                 duration_ms: 3000,
                 duration_api_ms: 2500,
                 is_error: false,
-                session_id: 'result-session'
+                session_id: 'result-session',
+                modelUsage: {
+                    'claude-opus-5': {
+                        inputTokens: 80,
+                        cacheCreationInputTokens: 20,
+                        cacheReadInputTokens: 100_000,
+                        outputTokens: 500
+                    }
+                }
             }
 
             const logMessage = converter.convert(sdkMessage)
 
-            expect(logMessage).toBeNull()
+            expect(logMessage).toMatchObject({
+                type: 'system',
+                subtype: 'turn_duration',
+                parentUuid: preceding?.uuid,
+                durationMs: 3000,
+                resultSummary: {
+                    usage: sdkMessage.usage,
+                    modelUsage: sdkMessage.modelUsage,
+                    total_cost_usd: 0.05,
+                    num_turns: 5,
+                    duration_ms: 3000
+                }
+            })
+
+            const following = converter.convert({
+                type: 'user',
+                message: { role: 'user', content: 'second request' }
+            } as SDKUserMessage)
+            expect(following?.parentUuid).toBe(preceding?.uuid)
         })
 
-        it('should not convert error results', () => {
+        it('converts error results into the same carrier shape', () => {
             const sdkMessage: SDKResultMessage = {
                 type: 'result',
                 subtype: 'error_max_turns',
@@ -195,7 +272,49 @@ describe('SDKToLogConverter', () => {
 
             const logMessage = converter.convert(sdkMessage)
 
-            expect(logMessage).toBeFalsy()
+            expect(logMessage).toMatchObject({
+                type: 'system',
+                subtype: 'turn_duration',
+                durationMs: 5000,
+                resultSummary: {
+                    total_cost_usd: 0.1,
+                    num_turns: 10,
+                    duration_ms: 5000
+                }
+            })
+        })
+
+        it('does not let a sidechain result carrier advance the sidechain parent chain', () => {
+            const parentToolUseId = 'toolu_sidechain_result'
+            const firstSidechainAssistant = converter.convert({
+                type: 'assistant',
+                parent_tool_use_id: parentToolUseId,
+                message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] }
+            } as unknown as SDKAssistantMessage)
+
+            const result = converter.convert({
+                type: 'result',
+                subtype: 'success',
+                parent_tool_use_id: parentToolUseId,
+                num_turns: 1,
+                total_cost_usd: 0,
+                duration_ms: 100,
+                duration_api_ms: 100,
+                is_error: false,
+                session_id: 'sidechain-result'
+            } as unknown as SDKResultMessage)
+
+            const followingSidechainAssistant = converter.convert({
+                type: 'assistant',
+                parent_tool_use_id: parentToolUseId,
+                message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] }
+            } as unknown as SDKAssistantMessage)
+
+            expect(result).toMatchObject({
+                isSidechain: true,
+                parentUuid: firstSidechainAssistant?.uuid
+            })
+            expect(followingSidechainAssistant?.parentUuid).toBe(firstSidechainAssistant?.uuid)
         })
 
         it('should convert slash command results (num_turns === 0) to assistant messages', () => {
@@ -224,7 +343,7 @@ describe('SDKToLogConverter', () => {
             })
         })
 
-        it('should not convert slash command result when result text is empty', () => {
+        it('does not surface an assistant bubble when the slash command result text is empty', () => {
             const sdkMessage: SDKResultMessage = {
                 type: 'result',
                 subtype: 'success',
@@ -239,7 +358,10 @@ describe('SDKToLogConverter', () => {
 
             const logMessage = converter.convert(sdkMessage)
 
-            expect(logMessage).toBeNull()
+            // Upstream now emits a round-summary carrier for every result, so this
+            // is no longer null — what matters is that an empty result never
+            // renders as an assistant message.
+            expect(logMessage).toMatchObject({ type: 'system', subtype: 'turn_duration' })
         })
     })
 
@@ -963,6 +1085,181 @@ describe('SDKToLogConverter', () => {
 
             expect(warning!.parentUuid).toBe(user!.uuid)
             expect(assistant!.parentUuid).toBe(warning!.uuid)
+        })
+    })
+
+    describe('Unknown message types', () => {
+        it('should drop tool_progress heartbeat events instead of passing them through', () => {
+            const logMessage = converter.convert({
+                type: 'tool_progress',
+                tool_use_id: 'toolu_011qMV3YCgDP89zcjHbC4rd2-heartbeat-0',
+                tool_name: 'Bash',
+                parent_tool_use_id: 'toolu_011qMV3YCgDP89zcjHbC4rd2',
+                elapsed_time_seconds: 30,
+                heartbeat: true,
+                session_id: context.sessionId
+            } as unknown as SDKMessage)
+
+            expect(logMessage).toBeNull()
+        })
+
+        it('should drop arbitrary unknown SDK message types', () => {
+            for (const type of ['stream_event', 'control_response', 'log', 'some_future_event']) {
+                expect(converter.convert({ type, payload: { foo: 'bar' } } as unknown as SDKMessage)).toBeNull()
+            }
+        })
+
+        it('should drop command_lifecycle events', () => {
+            // Second unknown type observed leaking in the wild, after
+            // tool_progress. It needed no code change to cover — which is the
+            // point of gating on an allowlist rather than naming each offender.
+            const logMessage = converter.convert({
+                type: 'command_lifecycle',
+                command_uuid: 'a0c15039-fb30-4ba3-bf1b-6afc3196cbeb',
+                state: 'started',
+                session_id: context.sessionId
+            } as unknown as SDKMessage)
+
+            expect(logMessage).toBeNull()
+        })
+
+        it('should not break parent chain when an unknown type is dropped', () => {
+            const user = converter.convert({
+                type: 'user',
+                message: { role: 'user', content: 'hi' }
+            } as SDKUserMessage)
+
+            converter.convert({
+                type: 'tool_progress',
+                parent_tool_use_id: 'toolu_abc',
+                heartbeat: true
+            } as unknown as SDKMessage)
+
+            const assistant = converter.convert({
+                type: 'assistant',
+                message: { role: 'assistant', content: [{ type: 'text', text: 'hello' }] }
+            } as SDKAssistantMessage)
+
+            expect(assistant!.parentUuid).toBe(user!.uuid)
+        })
+
+        it('should not let repeated tool_progress heartbeats hijack sidechain parent tracking', () => {
+            // A long-running Bash inside a Task subagent emits a tool_progress
+            // heartbeat every 30s, all sharing the subagent's parent_tool_use_id.
+            // Converting them would overwrite sidechainLastUUID on every tick, so
+            // the subagent's next real message would be parented to a heartbeat
+            // rather than to its own previous message.
+            const parentToolUseId = 'toolu_011qMV3YCgDP89zcjHbC4rd2'
+
+            const firstSidechainMessage = converter.convert({
+                type: 'assistant',
+                parent_tool_use_id: parentToolUseId,
+                message: { role: 'assistant', content: [{ type: 'text', text: 'working' }] }
+            } as unknown as SDKAssistantMessage)
+
+            for (let tick = 0; tick < 3; tick++) {
+                const heartbeat = converter.convert({
+                    type: 'tool_progress',
+                    tool_use_id: `${parentToolUseId}-heartbeat-${tick}`,
+                    tool_name: 'Bash',
+                    parent_tool_use_id: parentToolUseId,
+                    elapsed_time_seconds: (tick + 1) * 30,
+                    heartbeat: true,
+                    session_id: context.sessionId
+                } as unknown as SDKMessage)
+
+                expect(heartbeat).toBeNull()
+            }
+
+            const nextSidechainMessage = converter.convert({
+                type: 'assistant',
+                parent_tool_use_id: parentToolUseId,
+                message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] }
+            } as unknown as SDKAssistantMessage)
+
+            expect(nextSidechainMessage!.isSidechain).toBe(true)
+            expect(nextSidechainMessage!.parentUuid).toBe(firstSidechainMessage!.uuid)
+        })
+
+        it('should still convert every known type', () => {
+            expect(converter.convert({
+                type: 'user',
+                message: { role: 'user', content: 'hi' }
+            } as SDKUserMessage)).toBeTruthy()
+
+            expect(converter.convert({
+                type: 'assistant',
+                message: { role: 'assistant', content: [{ type: 'text', text: 'yo' }] }
+            } as SDKAssistantMessage)).toBeTruthy()
+
+            expect(converter.convert({
+                type: 'system',
+                subtype: 'init',
+                model: 'claude-opus-4-8'
+            } as SDKSystemMessage)).toBeTruthy()
+
+            expect(converter.convert({
+                type: 'tool_result',
+                tool_use_id: 'toolu_x',
+                content: 'done'
+            } as unknown as SDKMessage)).toBeTruthy()
+        })
+    })
+
+    describe('Sidechain parentToolUseId preservation (subagent trace grouping fix)', () => {
+        it('preserves parent_tool_use_id as parentToolUseId on sidechain user messages', () => {
+            const sdkMessage = {
+                type: 'user',
+                parent_tool_use_id: 'toolu_abc123',
+                message: { role: 'user', content: 'sidechain prompt' }
+            } as unknown as SDKUserMessage
+
+            const logMessage = converter.convert(sdkMessage) as any
+
+            expect(logMessage?.isSidechain).toBe(true)
+            expect(logMessage?.parentToolUseId).toBe('toolu_abc123')
+        })
+
+        it('preserves parent_tool_use_id on sidechain assistant messages (subagent turns)', () => {
+            const sdkMessage = {
+                type: 'assistant',
+                parent_tool_use_id: 'toolu_abc123',
+                message: {
+                    role: 'assistant',
+                    content: [{ type: 'text', text: 'subagent reply' }]
+                }
+            } as unknown as SDKAssistantMessage
+
+            const logMessage = converter.convert(sdkMessage) as any
+
+            expect(logMessage?.isSidechain).toBe(true)
+            expect(logMessage?.parentToolUseId).toBe('toolu_abc123')
+        })
+
+        it('does not set parentToolUseId on non-sidechain (top-level) messages', () => {
+            const sdkMessage: SDKUserMessage = {
+                type: 'user',
+                message: { role: 'user', content: 'top-level message' }
+            }
+
+            const logMessage = converter.convert(sdkMessage) as any
+
+            expect(logMessage?.isSidechain).toBe(false)
+            expect(logMessage?.parentToolUseId).toBeUndefined()
+        })
+
+        it('preserves parentToolUseId on interrupted sidechain tool results', () => {
+            const logMessage = converter.generateInterruptedToolResult('toolu_child', 'toolu_parent') as any
+
+            expect(logMessage?.isSidechain).toBe(true)
+            expect(logMessage?.parentToolUseId).toBe('toolu_parent')
+        })
+
+        it('does not set parentToolUseId on interrupted top-level tool results', () => {
+            const logMessage = converter.generateInterruptedToolResult('toolu_child') as any
+
+            expect(logMessage?.isSidechain).toBe(false)
+            expect(logMessage?.parentToolUseId).toBeUndefined()
         })
     })
 

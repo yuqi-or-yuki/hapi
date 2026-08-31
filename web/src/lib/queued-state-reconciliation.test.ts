@@ -2,23 +2,26 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiClient } from '@/api/client'
 
 vi.mock('./message-window-store', () => ({
-    fetchLatestMessages: vi.fn(),
     getQueuedReconcileCandidateLocalIds: vi.fn(),
     markMessagesConsumed: vi.fn(),
+    markMessagesIndeterminate: vi.fn(),
     reconcileQueuedLocalIds: vi.fn(),
+    syncTailMessages: vi.fn(),
 }))
 
 import {
-    fetchLatestMessages,
     getQueuedReconcileCandidateLocalIds,
     markMessagesConsumed,
+    markMessagesIndeterminate,
     reconcileQueuedLocalIds,
+    syncTailMessages,
 } from './message-window-store'
 import { reconcileQueuedStateAfterConnect } from './queued-state-reconciliation'
 
-const mockFetchLatestMessages = vi.mocked(fetchLatestMessages)
+const mockSyncTailMessages = vi.mocked(syncTailMessages)
 const mockGetCandidates = vi.mocked(getQueuedReconcileCandidateLocalIds)
 const mockMarkMessagesConsumed = vi.mocked(markMessagesConsumed)
+const mockMarkMessagesIndeterminate = vi.mocked(markMessagesIndeterminate)
 const mockReconcileQueuedLocalIds = vi.mocked(reconcileQueuedLocalIds)
 
 function createMockApi(
@@ -33,13 +36,14 @@ function createMockApi(
 describe('reconcileQueuedStateAfterConnect', () => {
     beforeEach(() => {
         vi.clearAllMocks()
-        mockFetchLatestMessages.mockResolvedValue(undefined)
+        mockSyncTailMessages.mockResolvedValue(undefined)
         mockGetCandidates.mockReturnValue([])
+        mockMarkMessagesIndeterminate.mockClear()
     })
 
     it('waits for the latest messages before snapshotting and querying queued state', async () => {
         let resolveRefresh: (() => void) | undefined
-        mockFetchLatestMessages.mockImplementationOnce(
+        mockSyncTailMessages.mockImplementationOnce(
             () => new Promise<void>((resolve) => {
                 resolveRefresh = resolve
             })
@@ -63,6 +67,11 @@ describe('reconcileQueuedStateAfterConnect', () => {
         await reconciliation
 
         expect(mockGetCandidates).toHaveBeenCalledWith('session-A')
+        expect(mockSyncTailMessages).toHaveBeenCalledWith(
+            expect.anything(),
+            'session-A',
+            { ensureAfterCurrent: true }
+        )
         expect(getQueuedState).toHaveBeenCalledWith('session-A', ['local-1'])
     })
 

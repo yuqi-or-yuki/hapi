@@ -15,6 +15,7 @@ type AppContextValue = {
     previewAgentDoneRing: (ring?: AgentDoneRing) => void
     unreadDoneOrders: Record<string, number>
     clearUnreadDone: (sessionId: string) => void
+    titleSuggestionAvailable?: boolean
 }
 
 const AppContext = createContext<AppContextValue | null>(null)

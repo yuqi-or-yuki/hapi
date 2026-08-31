@@ -14,6 +14,30 @@ import type {
 } from '@/claude/sdk'
 import type { RawJSONLines } from '@/claude/types'
 import type { ClaudePermissionMode } from '@hapi/protocol/types'
+import { logger } from '@/lib'
+
+/**
+ * SDK message types this converter knows how to turn into a transcript line.
+ *
+ * Anything outside this set is dropped. Claude Code keeps adding out-of-band
+ * SDK events (`tool_progress` heartbeats, stream events, control responses),
+ * and they are not conversation content — passing them through would stamp
+ * them with transcript base fields (parentUuid/sessionId/userType), which
+ * makes them indistinguishable from a real log line downstream. The web
+ * normalizer can't match them to any known shape and falls back to rendering
+ * the raw envelope as message text, leaking JSON into the chat.
+ *
+ * The local launcher already enforces the same allowlist via
+ * `RawJSONLinesSchema.safeParse` in sessionScanner; this keeps the remote
+ * (SDK) path at parity instead of leaving it open by default.
+ */
+const CONVERTIBLE_SDK_MESSAGE_TYPES = new Set([
+    'user',
+    'assistant',
+    'system',
+    'result',
+    'tool_result'
+])
 
 /**
  * Context for converting SDK messages to log format
@@ -200,18 +224,35 @@ export class SDKToLogConverter {
             return this.convertRateLimitEvent(sdkMessage)
         }
 
+        // Bail before allocating a uuid or touching sidechain/parent tracking —
+        // an unknown event must not advance the transcript chain it never joins.
+        if (!CONVERTIBLE_SDK_MESSAGE_TYPES.has(sdkMessage.type)) {
+            logger.debug(`[sdkToLogConverter] dropping unsupported SDK message type: ${sdkMessage.type}`)
+            return null
+        }
+
         const uuid = randomUUID()
         const timestamp = new Date().toISOString()
         let parentUuid = this.lastUuid;
         let isSidechain = false;
+        // Preserved (not just consumed) so the web tracer can group sidechain
+        // messages directly by the spawning Agent tool_use id, instead of relying
+        // solely on the SDK emitting a prompt-holding sidechain root to exact-match
+        // against. Some subagents (e.g. background/task_started) never emit that
+        // root, orphaning every child that only carries this id.
+        let parentToolUseId: string | undefined;
         if (sdkMessage.parent_tool_use_id) {
             isSidechain = true;
+            parentToolUseId = (sdkMessage as any).parent_tool_use_id;
             parentUuid = this.sidechainLastUUID.get((sdkMessage as any).parent_tool_use_id) ?? null;
-            this.sidechainLastUUID.set((sdkMessage as any).parent_tool_use_id!, uuid);
+            if (sdkMessage.type !== 'result') {
+                this.sidechainLastUUID.set((sdkMessage as any).parent_tool_use_id!, uuid);
+            }
         }
         const baseFields = {
             parentUuid: parentUuid,
             isSidechain: isSidechain,
+            parentToolUseId,
             userType: 'external' as const,
             cwd: this.context.cwd,
             sessionId: this.context.sessionId,
@@ -230,6 +271,16 @@ export class SDKToLogConverter {
                     ...baseFields,
                     type: 'user',
                     message: userMsg.message
+                }
+
+                // Claude Code injects its own user-role turns (skill bodies, compact
+                // continuation summaries). Over stream-json they are flagged
+                // `isSynthetic`, while the on-disk transcript the local launcher reads
+                // flags them `isMeta`. Normalize to `isMeta` so both paths hit the same
+                // downstream filters — otherwise the injected text reaches the web UI
+                // and is rendered as if the human had typed it.
+                if (userMsg.isSynthetic === true || userMsg.isMeta === true) {
+                    logMessage.isMeta = true
                 }
 
                 // Check if this is a tool result and add mode if available
@@ -340,11 +391,7 @@ export class SDKToLogConverter {
             }
 
             case 'result': {
-                // Result messages are not converted to log messages
-                // They're SDK-specific messages that indicate session completion
-                // Not part of the actual conversation log.
-                //
-                // But they carry the authoritative per-model contextWindow. modelUsage is
+                // Result messages carry the authoritative per-model contextWindow. modelUsage is
                 // keyed by the same raw model id the CLI reports on system/init, so the
                 // entry for the current session model is stored under resolvedContextWindowKey
                 // (which folds in the "[1m]" for fable), matching what assistant lookups use.
@@ -369,6 +416,8 @@ export class SDKToLogConverter {
                 // When Claude Code handles a slash command directly (e.g. /cost, /usage, /stats),
                 // it responds without any LLM turns (num_turns === 0) and puts the response text
                 // in the result field. Surface it as an assistant message so the user sees it.
+                // There is no real round to report usage for in that case, so the
+                // turn_duration/resultSummary telemetry below is skipped.
                 if (resultMsg.num_turns === 0 && resultMsg.result && resultMsg.subtype === 'success') {
                     logMessage = {
                         ...baseFields,
@@ -376,6 +425,20 @@ export class SDKToLogConverter {
                         message: {
                             role: 'assistant',
                             content: [{ type: 'text', text: resultMsg.result }]
+                        }
+                    }
+                } else {
+                    logMessage = {
+                        ...baseFields,
+                        type: 'system',
+                        subtype: 'turn_duration',
+                        durationMs: resultMsg.duration_ms,
+                        resultSummary: {
+                            usage: resultMsg.usage,
+                            modelUsage: resultMsg.modelUsage,
+                            total_cost_usd: resultMsg.total_cost_usd,
+                            num_turns: resultMsg.num_turns,
+                            duration_ms: resultMsg.duration_ms
                         }
                     }
                 }
@@ -412,16 +475,16 @@ export class SDKToLogConverter {
             }
 
             default:
-                // Unknown message type - pass through with all fields
-                logMessage = {
-                    ...baseFields,
-                    ...sdkMessage,
-                    type: (sdkMessage as any).type // Override type last to ensure it's set
-                } as any
+                // Unreachable: CONVERTIBLE_SDK_MESSAGE_TYPES gates this switch.
+                // Kept as a fail-closed guard so that adding a type to the set
+                // without a matching case here drops the message instead of
+                // passing an unshaped envelope through to the chat.
+                logger.debug(`[sdkToLogConverter] no case for allowlisted type: ${(sdkMessage as any).type}`)
+                break
         }
 
         // Update last UUID for parent tracking
-        if (logMessage && logMessage.type !== 'summary') {
+        if (logMessage && logMessage.type !== 'summary' && sdkMessage.type !== 'result') {
             this.lastUuid = uuid
         }
 
@@ -489,6 +552,7 @@ export class SDKToLogConverter {
         const logMessage: RawJSONLines = {
             type: 'user',
             isSidechain: isSidechain,
+            parentToolUseId: parentToolUseId ?? undefined,
             uuid,
             message: {
                 role: 'user',

@@ -1,5 +1,8 @@
-import type { AgentMessage, PlanItem } from '@/agent/types';
 import { randomUUID } from 'node:crypto';
+import { logger } from '@/ui/logger';
+import type { AgentMessage, PlanItem } from '@/agent/types';
+import { registerGeneratedImageFromAcpBlock } from '@/modules/common/generatedImages';
+import type { InlineMediaSource } from '@/modules/common/inlineMediaSource';
 import { asString, isObject } from '@hapi/protocol';
 import { deriveToolNameWithSource, isPlaceholderToolName } from '@/agent/utils';
 import { parseRateLimitText } from '@/agent/rateLimitParser';
@@ -395,6 +398,7 @@ function getSuffixPrefixOverlap(base: string, next: string): number {
 
 export class AcpMessageHandler {
     private readonly toolCalls = new Map<string, { name: string; input: unknown }>();
+    private acceptingUpdates = true;
     private bufferedText = '';
     // Array buffer avoids the O(N²) string concatenation that per-token
     // ACP streams (OpenCode/Zen emits one chunk per generated token) would
@@ -407,11 +411,24 @@ export class AcpMessageHandler {
     private reasoningSnapshotEmitted = false;
     private readonly textChunkMode: AcpTextChunkMode;
 
+    private readonly onMessage: (message: AgentMessage) => void;
+
     constructor(
-        private readonly onMessage: (message: AgentMessage) => void,
-        options: { textChunkMode?: AcpTextChunkMode } = {}
+        onMessage: (message: AgentMessage) => void,
+        private readonly options: { textChunkMode?: AcpTextChunkMode; flavor?: string } = {}
     ) {
-        this.textChunkMode = options.textChunkMode ?? 'dedupe';
+        this.onMessage = (message) => {
+            if (this.acceptingUpdates) onMessage(message);
+        };
+        this.textChunkMode = this.options.textChunkMode ?? 'dedupe';
+    }
+
+    /** Drop late updates from a cancelled prompt before the next handler exists. */
+    deactivate(): void {
+        this.acceptingUpdates = false;
+        this.bufferedText = '';
+        this.bufferedReasoning = [];
+        this.resetReasoningState();
     }
 
     /**
@@ -419,6 +436,14 @@ export class AcpMessageHandler {
      * buffer. Callers must treat this as a text-segment boundary: it is
      * invoked internally before tool_call / plan events and externally at
      * turn boundaries by AcpSdkBackend.
+     *
+     * The internal-event check in `handleUpdate` only sees one chunk at a
+     * time, so it cannot recognise an envelope that arrived in pieces — in
+     * `delta` mode (OpenCode) every chunk is a fragment and none of them
+     * parses as JSON on its own. This flush boundary is the first place the
+     * reassembled text exists, so it is the only place a split envelope can
+     * be caught. Re-checking here is what makes the filter complete rather
+     * than merely likely to fire.
      */
     flushText(): void {
         if (!this.bufferedText) {
@@ -426,6 +451,9 @@ export class AcpMessageHandler {
         }
         const text = this.bufferedText;
         this.bufferedText = '';
+        if (isInternalEventJson(text)) {
+            return;
+        }
         this.onMessage({ type: 'text', text });
     }
 
@@ -566,7 +594,7 @@ export class AcpMessageHandler {
         this.reasoningSnapshotEmitted = false;
     }
 
-    handleUpdate(update: unknown): void {
+    async handleUpdate(update: unknown): Promise<void> {
         if (!isObject(update)) return;
         const updateType = asString(update.sessionUpdate);
         if (!updateType) return;
@@ -592,6 +620,12 @@ export class AcpMessageHandler {
 
         if (updateType === ACP_SESSION_UPDATE_TYPES.agentMessageChunk) {
             const content = update.content;
+            if (isObject(content) && content.type === 'image') {
+                this.flushReasoning();
+                this.flushText();
+                await this.emitGeneratedImageFromAcpContent(content);
+                return;
+            }
             const text = extractTextContent(content);
             if (text) {
                 // Check once whether the buffered text is a prefix of this
@@ -667,6 +701,35 @@ export class AcpMessageHandler {
         }
     }
 
+    private async emitGeneratedImageFromAcpContent(content: Record<string, unknown>): Promise<void> {
+        try {
+            const image = await registerGeneratedImageFromAcpBlock(content);
+            if (!image) {
+                return;
+            }
+            this.onMessage({
+                type: 'generated_image',
+                imageId: image.id,
+                fileName: image.fileName,
+                mimeType: image.mimeType,
+                source: this.buildAcpInlineMediaSource(),
+            });
+        } catch (error) {
+            logger.debug(
+                '[AcpMessageHandler] Failed to register ACP image block:',
+                error instanceof Error ? error.message : String(error)
+            );
+        }
+    }
+
+    private buildAcpInlineMediaSource(): InlineMediaSource {
+        const source: InlineMediaSource = { ingress: 'acp' };
+        if (this.options?.flavor) {
+            source.flavor = this.options.flavor;
+        }
+        return source;
+    }
+
     private handleToolCall(update: Record<string, unknown>): void {
         const toolCallId = asString(update.toolCallId);
         if (!toolCallId) return;
@@ -704,7 +767,9 @@ export class AcpMessageHandler {
             id: toolCallId,
             name,
             input,
-            status
+            status,
+            ...(asString(update.title) ? { title: asString(update.title)! } : {}),
+            ...(asString(update.kind) ? { kind: asString(update.kind)! } : {})
         });
     }
 
@@ -714,6 +779,10 @@ export class AcpMessageHandler {
 
         const status = normalizeStatus(update.status);
         const existing = this.toolCalls.get(toolCallId);
+        const presentation = {
+            ...(asString(update.title) ? { title: asString(update.title)! } : {}),
+            ...(asString(update.kind) ? { kind: asString(update.kind)! } : {})
+        };
 
         if (isUsableRawInput(update.rawInput)) {
             const derivedName = deriveToolNameFromUpdate(update);
@@ -725,7 +794,8 @@ export class AcpMessageHandler {
                 id: toolCallId,
                 name,
                 input,
-                status
+                status,
+                ...presentation
             });
         } else if (existing) {
             // Enrich existing.input from update's kind+title when initial tool_call
@@ -758,7 +828,8 @@ export class AcpMessageHandler {
                     id: toolCallId,
                     name,
                     input,
-                    status
+                    status,
+                    ...presentation
                 });
             }
         }
@@ -784,7 +855,8 @@ export class AcpMessageHandler {
                         id: toolCallId,
                         name: hoisted.name,
                         input: hoisted.input,
-                        status
+                        status,
+                        ...presentation
                     });
                 }
             }

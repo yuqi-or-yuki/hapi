@@ -98,9 +98,10 @@ export async function runCursor(opts: {
     };
 
     session.onUserMessage((message, localId) => {
+        const queuedModel = sessionWrapperRef.current?.getModel() ?? currentModel;
         const enhancedMode: EnhancedMode = {
             permissionMode: currentPermissionMode ?? 'default',
-            model: currentModel
+            model: queuedModel
         };
         const formattedText = formatMessageWithAttachments(message.content.text, message.content.attachments);
         enqueueCursorUserMessage(messageQueue, formattedText, enhancedMode, localId);
@@ -111,6 +112,7 @@ export async function runCursor(opts: {
         logger.debug(`[cursor] cancelByLocalId(${localId}): ${removed ? 'removed' : 'not found (best-effort)'}`);
         return removed;
     });
+    session.onRetryQueuedMessage((localId) => messageQueue.releaseIndeterminateReservation(localId));
 
     session.rpcHandlerManager.registerHandler(RPC_METHODS.SetSessionConfig, async (payload: unknown) => {
         if (!payload || typeof payload !== 'object') {
@@ -183,6 +185,9 @@ export async function runCursor(opts: {
             model: opts.model,
             sessionMetadata: bootstrap.metadata,
             onModeChange: createModeChangeHandler(session),
+            onPermissionModeChanged: (permissionMode) => {
+                currentPermissionMode = permissionMode;
+            },
             onSessionReady: (instance) => {
                 sessionWrapperRef.current = instance;
                 syncSessionMode();

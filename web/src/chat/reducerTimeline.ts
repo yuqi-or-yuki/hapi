@@ -1,4 +1,4 @@
-import type { AgentReasoningBlock, AgentTextBlock, ChatBlock, CliOutputBlock, CodexReviewBlock, ToolCallBlock, ToolPermission } from '@/chat/types'
+import type { AgentEventBlock, AgentReasoningBlock, AgentTextBlock, ChatBlock, CliOutputBlock, CodexReviewBlock, RoundSummary, ToolCallBlock, ToolPermission, UserTextBlock } from '@/chat/types'
 import type { TracedMessage } from '@/chat/tracer'
 import { createCliOutputBlock, isCliOutputText, mergeCliOutputBlocks } from '@/chat/reducerCliOutput'
 import { parseMessageAsEvent } from '@/chat/reducerEvents'
@@ -297,6 +297,7 @@ export function reduceTimeline(
     const agentRunCardByAgentId = new Map<string, string>()
     const agentRunTraceMessagesByCardId = new Map<string, TracedMessage[]>()
     const pendingAgentRunCardByFingerprint = new Map<string, string>()
+    const textBlocksByStreamId = new Map<string, AgentTextBlock>()
     const reasoningBlocksByStreamId = new Map<string, AgentReasoningBlock>()
     let hasReadyEvent = false
 
@@ -475,6 +476,31 @@ export function reduceTimeline(
                 continue
             }
             if (msg.content.type === 'token-count') {
+                continue
+            }
+            // abort-restore is a side-effect signal for the web composer,
+            // not a visible chat event. Skip it in the timeline.
+            if (msg.content.type === 'abort-restore') {
+                continue
+            }
+            if (msg.content.type === 'turn-summary') {
+                const summary = msg.content.summary as RoundSummary
+                type SummaryTargetBlock = Exclude<ChatBlock, UserTextBlock | AgentEventBlock>
+                const isSummaryTarget = (block: ChatBlock): block is SummaryTargetBlock =>
+                    block.kind !== 'user-text'
+                    && block.kind !== 'agent-event'
+                    && !(block.kind === 'cli-output' && block.source === 'user')
+                let firstIndex = -1
+                for (let index = blocks.length - 1; index >= 0; index -= 1) {
+                    if (!isSummaryTarget(blocks[index])) break
+                    firstIndex = index
+                }
+                if (firstIndex !== -1) {
+                    const firstBlock = blocks[firstIndex]
+                    if (isSummaryTarget(firstBlock)) {
+                        firstBlock.roundSummary = summary
+                    }
+                }
                 continue
             }
             if (msg.content.type === 'turn-duration') {
@@ -700,7 +726,8 @@ export function reduceTimeline(
                 attachments: msg.content.attachments,
                 status: msg.status,
                 originalText: msg.originalText,
-                meta: msg.meta
+                meta: msg.meta,
+                steered: msg.steered
             })
             continue
         }
@@ -761,7 +788,20 @@ export function reduceTimeline(
                         }))
                         continue
                     }
-                    blocks.push({
+                    const streamId = asString(c.streamId)
+                    if (streamId) {
+                        const existing = textBlocksByStreamId.get(streamId)
+                        if (existing) {
+                            existing.text = c.text
+                            existing.usage = msg.usage
+                            existing.model = msg.model
+                            existing.meta = msg.meta
+                            existing.invokedAt = msg.invokedAt
+                            continue
+                        }
+                    }
+
+                    const block: AgentTextBlock = {
                         kind: 'agent-text',
                         id: `${msg.id}:${idx}`,
                         localId: msg.localId,
@@ -771,7 +811,11 @@ export function reduceTimeline(
                         model: msg.model,
                         text: c.text,
                         meta: msg.meta
-                    })
+                    }
+                    blocks.push(block)
+                    if (streamId) {
+                        textBlocksByStreamId.set(streamId, block)
+                    }
                     continue
                 }
 
@@ -785,6 +829,7 @@ export function reduceTimeline(
                         imageId: c.imageId,
                         fileName: c.fileName,
                         mimeType: c.mimeType,
+                        source: c.source,
                         meta: msg.meta
                     })
                     continue
@@ -880,6 +925,9 @@ export function reduceTimeline(
                         name: c.name,
                         input: c.input,
                         description: c.description,
+                        nativeTitle: c.nativeTitle,
+                        nativeKind: c.nativeKind,
+                        progress: c.progress,
                         permission,
                         agentTimestamp: msg.agentTimestamp
                     })

@@ -3,7 +3,7 @@ import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { Store } from './index'
+import { Store, SCHEMA_VERSION } from './index'
 
 /**
  * Tests for V8→V9 schema migration: adding blobs table.
@@ -33,7 +33,7 @@ describe('Store V8→V9 migration: blobs table', () => {
             expect(tables).toContain('blobs')
 
             const version = (db2.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
-            expect(version).toBe(12)
+            expect(version).toBe(SCHEMA_VERSION)
         } finally {
             rmSync(dir, { recursive: true, force: true })
         }

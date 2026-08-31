@@ -13,6 +13,20 @@ const harness = vi.hoisted(() => ({
     listCollaborationModeCalls: 0,
     collaborationModeResponse: { data: [{ mode: 'default' }, { mode: 'plan' }] } as unknown,
     failListCollaborationModes: false,
+    listSkillsCalls: [] as unknown[],
+    skillsListResponse: {
+        data: [{
+            cwd: '/tmp/hapi-update',
+            skills: [{
+                name: 'hapi',
+                description: 'Manage HAPI',
+                path: '/home/user/.agents/skills/hapi/SKILL.md',
+                scope: 'user',
+                enabled: true
+            }],
+            errors: []
+        }]
+    } as unknown,
     startThreadIds: [] as string[],
     startThreadParams: [] as Array<Record<string, unknown>>,
     resumeThreadIds: [] as string[],
@@ -43,6 +57,16 @@ const harness = vi.hoisted(() => ({
     failNextCompact: false,
     deferCompactCompletion: false,
     deferThreadStatusNotifications: false,
+    steerTurnParams: [] as Array<Record<string, unknown>>,
+    steerDispatchError: null as Error | null,
+    steerCompletionError: null as Error | null,
+    readThreadParams: [] as Array<Record<string, unknown>>,
+    readThreadError: null as Error | null,
+    readThreadResponse: { thread: { turns: [] as unknown[] } } as { thread: { turns?: Array<{ items?: Array<Record<string, unknown>> }> } },
+    emitStaleTaskCompleteAfterRetry: false,
+    emitStaleTaskFailedAfterRetry: false,
+    emitStaleThreadStatusFailureAfterRetry: false,
+    emitFirstTurnTaskCompleteAfterSecondRetry: false,
     emitChildThreadEvents: false,
     emitChildUsageEvents: false,
     emitChildGoalEvent: false,
@@ -66,6 +90,7 @@ const harness = vi.hoisted(() => ({
     emitParentResumeSuccess: false,
     emitParentMcpImageResult: false,
     uploadedBlobs: [] as Array<{ mimeType: string; data: string }>,
+    emitParentV2AgentTools: false,
     emitRunningChildTurnBeforeSuppressedParent: false,
     emitCompletedChildTurnBeforeSuppressedParent: false,
     emitTurnAbortedOnInterrupt: false,
@@ -73,11 +98,20 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock('./codexAppServerClient', () => {
+    const INDETERMINATE_SYMBOL = Symbol('codex-app-server-indeterminate');
     class MockCodexAppServerClient {
         private notificationHandler: ((method: string, params: unknown) => void) | null = null;
         private stderrHandler: ((text: string) => void) | null = null;
 
         async connect(): Promise<void> {}
+
+        isConnected(): boolean {
+            return true;
+        }
+
+        isInitialized(): boolean {
+            return true;
+        }
 
         async initialize(params: unknown): Promise<{ protocolVersion: number }> {
             harness.initializeCalls.push(params);
@@ -89,6 +123,8 @@ vi.mock('./codexAppServerClient', () => {
             harness.dispatchNotification = handler;
         }
 
+        setTransportAbandonedHandler(_handler: (() => void) | null): void {}
+
         setStderrHandler(handler: ((text: string) => void) | null): void {
             this.stderrHandler = handler;
         }
@@ -99,6 +135,11 @@ vi.mock('./codexAppServerClient', () => {
                 throw new Error('collaborationMode/list failed');
             }
             return harness.collaborationModeResponse;
+        }
+
+        async listSkills(params: unknown): Promise<unknown> {
+            harness.listSkillsCalls.push(params);
+            return harness.skillsListResponse;
         }
 
         async setExperimentalFeatureEnablement(params: unknown): Promise<unknown> {
@@ -171,6 +212,33 @@ vi.mock('./codexAppServerClient', () => {
         async getThreadGoal(params?: { threadId?: string }): Promise<{ goal: Record<string, unknown> | null }> {
             harness.goalGetCalls.push(params ?? {});
             return { goal: harness.goal };
+        }
+
+        async steerTurn(params?: { threadId?: string; input?: unknown[]; expectedTurnId?: string; clientUserMessageId?: string }): Promise<{
+            dispatched: Promise<void>;
+            completed: Promise<unknown>;
+        }> {
+            harness.steerTurnParams.push((params ?? {}) as Record<string, unknown>);
+            if (harness.steerDispatchError) {
+                return {
+                    dispatched: Promise.reject(harness.steerDispatchError),
+                    completed: Promise.reject(harness.steerDispatchError)
+                };
+            }
+            return {
+                dispatched: Promise.resolve(),
+                completed: harness.steerCompletionError
+                    ? Promise.reject(harness.steerCompletionError)
+                    : Promise.resolve({ turnId: 'steered-turn' })
+            };
+        }
+
+        async readThread(params?: { threadId?: string; includeTurns?: boolean }): Promise<unknown> {
+            harness.readThreadParams.push((params ?? {}) as Record<string, unknown>);
+            if (harness.readThreadError) {
+                throw harness.readThreadError;
+            }
+            return harness.readThreadResponse;
         }
 
         async clearThreadGoal(params?: { threadId?: string }): Promise<{ cleared: boolean }> {
@@ -461,6 +529,48 @@ vi.mock('./codexAppServerClient', () => {
                     const parentCompact = { thread: { id: threadId } };
                     harness.notifications.push({ method: 'thread/compacted', params: parentCompact });
                     this.notificationHandler?.('thread/compacted', parentCompact);
+                }
+
+                if (harness.emitParentV2AgentTools) {
+                    const v2Calls = [{
+                        callId: 'v2-spawn',
+                        name: 'spawn_agent',
+                        input: { task_name: 'review', message: 'Review this' },
+                        output: { task_name: '/root/review', nickname: 'Reviewer' }
+                    }, {
+                        callId: 'v2-wait',
+                        name: 'wait_agent',
+                        input: { timeout_ms: 10_000 },
+                        output: { message: 'Wait timed out.', timed_out: true }
+                    }];
+
+                    for (const call of v2Calls) {
+                        const started = {
+                            threadId,
+                            turnId,
+                            item: {
+                                type: 'function_call',
+                                namespace: 'collaboration',
+                                name: call.name,
+                                arguments: JSON.stringify(call.input),
+                                call_id: call.callId
+                            }
+                        };
+                        harness.notifications.push({ method: 'rawResponseItem/completed', params: started });
+                        this.notificationHandler?.('rawResponseItem/completed', started);
+
+                        const completed = {
+                            threadId,
+                            turnId,
+                            item: {
+                                type: 'function_call_output',
+                                call_id: call.callId,
+                                output: JSON.stringify(call.output)
+                            }
+                        };
+                        harness.notifications.push({ method: 'rawResponseItem/completed', params: completed });
+                        this.notificationHandler?.('rawResponseItem/completed', completed);
+                    }
                 }
 
                 if (harness.emitParentSpawnFailureWithoutAgentId || harness.emitParentSpawnStartWithoutEnd) {
@@ -882,6 +992,82 @@ vi.mock('./codexAppServerClient', () => {
                 }
             }
 
+            if (harness.emitStaleTaskCompleteAfterRetry && harness.startTurnThreadIds.length === 2) {
+                const assistantMessage = {
+                    item: {
+                        id: 'stale-retry-message',
+                        type: 'agentMessage',
+                        content: [{ type: 'text', text: 'done after retry' }]
+                    },
+                    threadId,
+                    turnId: 'turn-1'
+                };
+                harness.notifications.push({ method: 'item/completed', params: assistantMessage });
+                this.notificationHandler?.('item/completed', assistantMessage);
+
+                const usage = {
+                    tokenUsage: {
+                        thread_id: threadId,
+                        turn_id: 'turn-1',
+                        last_token_usage: {
+                            input_tokens: 10,
+                            output_tokens: 2
+                        },
+                        model_context_window: 200_000
+                    }
+                };
+                harness.notifications.push({ method: 'thread/tokenUsage/updated', params: usage });
+                this.notificationHandler?.('thread/tokenUsage/updated', usage);
+
+                const staleCompleted = {
+                    msg: {
+                        type: 'task_complete',
+                        thread_id: threadId,
+                        turn_id: 'turn-1'
+                    }
+                };
+                harness.notifications.push({ method: 'codex/event/task_complete', params: staleCompleted });
+                this.notificationHandler?.('codex/event/task_complete', staleCompleted);
+                return { turn: { id: turnId } };
+            }
+
+            if (harness.emitStaleTaskFailedAfterRetry && harness.startTurnThreadIds.length === 2) {
+                const staleFailed = {
+                    msg: {
+                        type: 'task_failed',
+                        thread_id: threadId,
+                        turn_id: 'turn-1',
+                        error: 'Codex thread entered systemError'
+                    }
+                };
+                harness.notifications.push({ method: 'codex/event/task_failed', params: staleFailed });
+                this.notificationHandler?.('codex/event/task_failed', staleFailed);
+            }
+
+            if (harness.emitStaleThreadStatusFailureAfterRetry && harness.startTurnThreadIds.length === 2) {
+                const staleThreadStatus = {
+                    thread: { id: threadId },
+                    turnId: 'turn-1',
+                    status: { type: 'systemError' }
+                };
+                harness.notifications.push({ method: 'thread/status/changed', params: staleThreadStatus });
+                this.notificationHandler?.('thread/status/changed', staleThreadStatus);
+                await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+
+            if (harness.emitFirstTurnTaskCompleteAfterSecondRetry && harness.startTurnThreadIds.length === 3) {
+                const staleCompleted = {
+                    msg: {
+                        type: 'task_complete',
+                        thread_id: threadId,
+                        turn_id: 'turn-1'
+                    }
+                };
+                harness.notifications.push({ method: 'codex/event/task_complete', params: staleCompleted });
+                this.notificationHandler?.('codex/event/task_complete', staleCompleted);
+                await new Promise((resolve) => setTimeout(resolve, 300));
+            }
+
             const completed = { status: 'Completed', turn: { id: turnId } };
             harness.notifications.push({ method: 'turn/completed', params: completed });
             this.notificationHandler?.('turn/completed', completed);
@@ -923,7 +1109,13 @@ vi.mock('./codexAppServerClient', () => {
         async disconnect(): Promise<void> {}
     }
 
-    return { CodexAppServerClient: MockCodexAppServerClient };
+    return {
+        CodexAppServerClient: MockCodexAppServerClient,
+        INDETERMINATE_SYMBOL,
+        isIndeterminateError: (error: unknown) => Boolean(
+            error && (error as Record<symbol, unknown>)[INDETERMINATE_SYMBOL] === true
+        )
+    };
 });
 
 vi.mock('./utils/buildHapiMcpBridge', () => ({
@@ -938,7 +1130,9 @@ vi.mock('./utils/buildHapiMcpBridge', () => ({
     }
 }));
 
-import { codexRemoteLauncher } from './codexRemoteLauncher';
+import { codexRemoteLauncher, isCurrentSteerHandler } from './codexRemoteLauncher';
+import { INDETERMINATE_SYMBOL } from './codexAppServerClient';
+import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 
 type FakeAgentState = {
     requests: Record<string, unknown>;
@@ -956,7 +1150,8 @@ function createMode(): EnhancedMode {
 function createSessionStub(
     messages = ['hello from launcher test'],
     mode = createMode(),
-    isolateMessages = false
+    isolateMessages = false,
+    closeQueue = true
 ) {
     const queue = new MessageQueue2<EnhancedMode>((mode) => JSON.stringify(mode));
     messages.forEach((message, index) => {
@@ -968,7 +1163,9 @@ function createSessionStub(
             queue.push(message, mode);
         }
     });
-    queue.close();
+    if (closeQueue) {
+        queue.close();
+    }
 
     const sessionEvents: Array<{ type: string; [key: string]: unknown }> = [];
     const codexMessages: unknown[] = [];
@@ -993,6 +1190,7 @@ function createSessionStub(
                 rpcHandlers.set(method, handler);
             }
         },
+        updateMetadata(_handler: (metadata: Record<string, unknown>) => Record<string, unknown>) {},
         updateAgentState(handler: (state: FakeAgentState) => FakeAgentState) {
             agentState = handler(agentState);
         },
@@ -1010,7 +1208,10 @@ function createSessionStub(
         },
         sendSessionEvent(event: { type: string; [key: string]: unknown }) {
             sessionEvents.push(event);
-        }
+        },
+        emitMessagesConsumed: vi.fn(),
+        emitSteerIndeterminate: vi.fn(),
+        setSteerDeliveryState: vi.fn(async () => true)
     };
 
     const session = {
@@ -1073,6 +1274,8 @@ function createSessionStub(
         foundSessionIds,
         resetThreadCalls,
         rpcHandlers,
+        emitMessagesConsumed: client.emitMessagesConsumed,
+        emitSteerIndeterminate: client.emitSteerIndeterminate,
         setPermissionMode: (nextMode: EnhancedMode['permissionMode']) => {
             currentPermissionMode = nextMode;
         },
@@ -1085,6 +1288,147 @@ function createSessionStub(
 }
 
 describe('codexRemoteLauncher', () => {
+    it('invalidates queued steer handlers after abort or cleanup', () => {
+        expect(isCurrentSteerHandler(3, 3, false)).toBe(true);
+        expect(isCurrentSteerHandler(4, 3, false)).toBe(false);
+        expect(isCurrentSteerHandler(3, 3, true)).toBe(false);
+    });
+
+    it('steers a queued message into the active turn and acks on dispatch', async () => {
+        harness.suppressTurnCompletion = true;
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: true });
+        expect(harness.steerTurnParams).toHaveLength(1);
+        expect(harness.steerTurnParams[0]).toMatchObject({
+            expectedTurnId: 'turn-1',
+            clientUserMessageId: 'local-1'
+        });
+        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }));
+        // The suppressed turn never completes, so the launcher stays busy;
+        // close the queue and leave the run promise unawaited.
+        session.queue.close();
+    });
+
+    it('restores the row when the app-server explicitly rejects after dispatch', async () => {
+        harness.suppressTurnCompletion = true;
+        // Plain Error without the indeterminate marker = definite JSON-RPC
+        // rejection: the instruction was not accepted, so restoring is safe.
+        harness.steerCompletionError = new Error('turn/steer not allowed here');
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        // Explicit rejection surfaces as failed (not a false steered), and the
+        // row is restored so the normal turn/start path delivers it later.
+        expect(result).toEqual({ steered: false, error: 'turn/steer not allowed here' });
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('local-1')).toBe(true));
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
+        session.queue.close();
+    });
+
+    it('holds an indeterminate steer for explicit retry or cancel', async () => {
+        harness.suppressTurnCompletion = true;
+        const indeterminate = new Error('Codex app-server disconnected');
+        Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
+        harness.steerCompletionError = indeterminate;
+        // Reconciliation cannot read the thread either. The row is held out of
+        // automatic replay and the user can explicitly retry or cancel it.
+        harness.readThreadError = new Error('app-server unreachable');
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        // Transport failure after dispatch: report reconciliation, persist the
+        // ambiguous state, and remove it from the automatic queue.
+        expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['local-1']);
+        expect(session.queue.cancelByLocalId('local-1')).toBe(true);
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
+        session.queue.close();
+    });
+
+    it('reconciles an indeterminate steer to accepted once the thread shows the message', async () => {
+        harness.suppressTurnCompletion = true;
+        const indeterminate = new Error('Codex app-server disconnected');
+        Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
+        harness.steerCompletionError = indeterminate;
+        harness.readThreadResponse = {
+            thread: {
+                turns: [{
+                    items: [{ type: 'userMessage', clientId: 'local-1', text: 'steer me' }]
+                }]
+            }
+        };
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
+        // The scheduled reconciliation (1s timer) reads the thread, finds the
+        // message, commits the row and fires the badge — no restore, no
+        // duplicate.
+        await vi.waitFor(() => expect(emitMessagesConsumed).toHaveBeenCalledWith(['local-1'], { steered: true }), { timeout: 5_000 });
+        // Row committed and consumed — the tombstone blocks a stale retry.
+        expect(session.queue.cancelByLocalId('local-1')).toBe('consumed');
+        session.queue.close();
+    });
+
+    it('reconciles when stdin dispatch fails indeterminately', async () => {
+        harness.suppressTurnCompletion = true;
+        const indeterminate = new Error('stdin callback timed out');
+        Object.defineProperty(indeterminate, INDETERMINATE_SYMBOL, { value: true });
+        harness.steerDispatchError = indeterminate;
+        harness.readThreadError = new Error('app-server unreachable');
+        const { session, rpcHandlers, emitMessagesConsumed, emitSteerIndeterminate } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: false, error: 'Steer outcome is being reconciled' });
+        expect(emitSteerIndeterminate).toHaveBeenCalledWith(['local-1']);
+        expect(session.queue.cancelByLocalId('local-1')).toBe(true);
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
+        session.queue.close();
+    });
+
+    it('restores the queued row when stdin dispatch fails', async () => {
+        harness.suppressTurnCompletion = true;
+        harness.steerDispatchError = new Error('stdin closed');
+        const { session, rpcHandlers, emitMessagesConsumed } = createSessionStub(['first'], createMode(), false, false);
+        const runPromise = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => expect(harness.startTurnThreadIds.length).toBe(1));
+
+        session.queue.push('steer me', createMode(), 'local-1');
+        const handler = rpcHandlers.get(RPC_METHODS.SteerQueuedMessage)!;
+        const result = await handler({ localId: 'local-1' });
+
+        expect(result).toEqual({ steered: false, error: 'stdin closed' });
+        await vi.waitFor(() => expect(session.queue.cancelByLocalId('local-1')).toBe(true));
+        expect(emitMessagesConsumed).not.toHaveBeenCalledWith(['local-1'], { steered: true });
+        session.queue.close();
+    });
     afterEach(() => {
         harness.notifications = [];
         harness.dispatchNotification = null;
@@ -1096,6 +1440,20 @@ describe('codexRemoteLauncher', () => {
         harness.listCollaborationModeCalls = 0;
         harness.collaborationModeResponse = { data: [{ mode: 'default' }, { mode: 'plan' }] };
         harness.failListCollaborationModes = false;
+        harness.listSkillsCalls = [];
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [{
+                    name: 'hapi',
+                    description: 'Manage HAPI',
+                    path: '/home/user/.agents/skills/hapi/SKILL.md',
+                    scope: 'user',
+                    enabled: true
+                }],
+                errors: []
+            }]
+        };
         harness.startThreadIds = [];
         harness.startThreadParams = [];
         harness.resumeThreadIds = [];
@@ -1126,6 +1484,16 @@ describe('codexRemoteLauncher', () => {
         harness.failNextCompact = false;
         harness.deferCompactCompletion = false;
         harness.deferThreadStatusNotifications = false;
+        harness.steerTurnParams = [];
+        harness.steerDispatchError = null;
+        harness.steerCompletionError = null;
+        harness.readThreadParams = [];
+        harness.readThreadError = null;
+        harness.readThreadResponse = { thread: { turns: [] } };
+        harness.emitStaleTaskCompleteAfterRetry = false;
+        harness.emitStaleTaskFailedAfterRetry = false;
+        harness.emitStaleThreadStatusFailureAfterRetry = false;
+        harness.emitFirstTurnTaskCompleteAfterSecondRetry = false;
         harness.emitChildThreadEvents = false;
         harness.emitChildUsageEvents = false;
         harness.emitChildGoalEvent = false;
@@ -1149,6 +1517,7 @@ describe('codexRemoteLauncher', () => {
         harness.emitParentResumeSuccess = false;
         harness.emitParentMcpImageResult = false;
         harness.uploadedBlobs = [];
+        harness.emitParentV2AgentTools = false;
         harness.emitRunningChildTurnBeforeSuppressedParent = false;
         harness.emitCompletedChildTurnBeforeSuppressedParent = false;
         harness.emitTurnAbortedOnInterrupt = false;
@@ -1190,6 +1559,73 @@ describe('codexRemoteLauncher', () => {
         expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
         expect(thinkingChanges).toContain(true);
         expect(session.thinking).toBe(false);
+    });
+
+    it('uses the native skill catalog for completion and structured turn input', async () => {
+        const { session, rpcHandlers } = createSessionStub(['$hapi inspect']);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.listSkillsCalls).toEqual([{
+            cwds: ['/tmp/hapi-update'],
+            forceReload: false
+        }]);
+        expect(Array.from(rpcHandlers.keys())).toContain('listSkills');
+        expect(await rpcHandlers.get('listSkills')?.({})).toEqual({
+            success: true,
+            skills: [{ name: 'hapi', description: 'Manage HAPI' }]
+        });
+        expect(harness.startTurnParams[0]?.input).toEqual([
+            { type: 'skill', name: 'hapi', path: '/home/user/.agents/skills/hapi/SKILL.md' },
+            { type: 'text', text: ' inspect' }
+        ]);
+    });
+
+    it('keeps the filesystem skill handler when native discovery reports errors', async () => {
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [],
+                errors: ['failed to read skills']
+            }]
+        };
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(rpcHandlers.has('listSkills')).toBe(false);
+    });
+
+    it('reloads the native skill catalog after skills/changed', async () => {
+        const { session, rpcHandlers } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+        harness.skillsListResponse = {
+            data: [{
+                cwd: '/tmp/hapi-update',
+                skills: [{
+                    name: 'new-skill',
+                    description: 'New skill',
+                    path: '/tmp/new-skill/SKILL.md',
+                    scope: 'repo',
+                    enabled: true
+                }],
+                errors: []
+            }]
+        };
+
+        harness.dispatchNotification?.('skills/changed', {});
+        await vi.waitFor(() => {
+            expect(harness.listSkillsCalls.at(-1)).toEqual({
+                cwds: ['/tmp/hapi-update'],
+                forceReload: true
+            });
+        });
+
+        expect(await rpcHandlers.get('listSkills')?.({})).toEqual({
+            success: true,
+            skills: [{ name: 'new-skill', description: 'New skill' }]
+        });
     });
 
     it('routes app-server MCP elicitation through the existing user-input transport', async () => {
@@ -1301,7 +1737,7 @@ describe('codexRemoteLauncher', () => {
         });
     });
 
-    it('retries plan turns without collaborationMode when the runtime rejects the field', async () => {
+    it('does not retry plan turns as normal turns when the runtime rejects the field', async () => {
         harness.startTurnErrors.push(new Error('unknown field collaborationMode'));
         const { session, sessionEvents } = createSessionStub(['plan this'], {
             permissionMode: 'default',
@@ -1312,19 +1748,17 @@ describe('codexRemoteLauncher', () => {
         const exitReason = await codexRemoteLauncher(session as never);
 
         expect(exitReason).toBe('exit');
-        expect(harness.startTurnParams).toHaveLength(2);
+        expect(harness.startTurnParams).toHaveLength(1);
         expect(harness.startTurnParams[0]?.collaborationMode).toMatchObject({
             mode: 'plan'
         });
-        expect(harness.startTurnParams[1]?.collaborationMode).toBeUndefined();
-        expect(harness.startTurnParams[1]?.model).toBe('gpt-5.4');
         expect(sessionEvents).toContainEqual({
             type: 'message',
-            message: 'Plan mode is not supported by this Codex runtime. Sent as a normal turn instead.'
+            message: 'Task failed: Plan mode is not supported by this Codex runtime.'
         });
     });
 
-    it('retries plan turns when unsupported errors use spaced collaboration mode wording', async () => {
+    it('does not retry plan turns when unsupported errors use spaced collaboration mode wording', async () => {
         harness.startTurnErrors.push(new Error('unsupported collaboration mode'));
         const { session, sessionEvents } = createSessionStub(['plan this'], {
             permissionMode: 'default',
@@ -1335,14 +1769,13 @@ describe('codexRemoteLauncher', () => {
         const exitReason = await codexRemoteLauncher(session as never);
 
         expect(exitReason).toBe('exit');
-        expect(harness.startTurnParams).toHaveLength(2);
+        expect(harness.startTurnParams).toHaveLength(1);
         expect(harness.startTurnParams[0]?.collaborationMode).toMatchObject({
             mode: 'plan'
         });
-        expect(harness.startTurnParams[1]?.collaborationMode).toBeUndefined();
         expect(sessionEvents).toContainEqual({
             type: 'message',
-            message: 'Plan mode is not supported by this Codex runtime. Sent as a normal turn instead.'
+            message: 'Task failed: Plan mode is not supported by this Codex runtime.'
         });
     });
 
@@ -1389,7 +1822,7 @@ describe('codexRemoteLauncher', () => {
         });
     });
 
-    it('sets a Codex goal without starting a normal turn', async () => {
+    it('sets a Codex goal without starting a duplicate client turn', async () => {
         const { session, sessionEvents, codexMessages, foundSessionIds } = createSessionStub(['/goal improve benchmark coverage']);
 
         const exitReason = await codexRemoteLauncher(session as never);
@@ -1459,6 +1892,70 @@ describe('codexRemoteLauncher', () => {
                 })
             })
         ]));
+    });
+
+    it('does not start client turns for goal commands', async () => {
+        const { session } = createSessionStub([
+            '/goal improve benchmark coverage',
+            '/goal',
+            '/goal pause',
+            '/goal resume',
+            '/goal clear'
+        ], createMode(), true);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.startTurnParams).toHaveLength(0);
+    });
+
+    it('tracks externally started turns used by app-server goals', async () => {
+        const { session, thinkingChanges } = createSessionStub(['/goal improve benchmark coverage']);
+
+        const running = codexRemoteLauncher(session as never);
+        await vi.waitFor(() => {
+            expect(harness.goalSetCalls).toHaveLength(1);
+        });
+
+        harness.dispatchNotification?.('turn/started', {
+            threadId: 'thread-1',
+            turn: { id: 'goal-turn-1' }
+        });
+        await vi.waitFor(() => {
+            expect(session.thinking).toBe(true);
+        });
+
+        harness.dispatchNotification?.('turn/completed', {
+            threadId: 'thread-1',
+            turn: { id: 'goal-turn-1', status: 'completed' }
+        });
+        await vi.waitFor(() => {
+            expect(session.thinking).toBe(false);
+        });
+
+        expect(thinkingChanges).toEqual(expect.arrayContaining([true, false]));
+        expect(await running).toBe('exit');
+    });
+
+    it('formats usage-limited goal status', async () => {
+        harness.goal = {
+            threadId: 'thread-1',
+            objective: 'improve benchmark coverage',
+            status: 'usageLimited',
+            tokenBudget: null,
+            tokensUsed: 10,
+            timeUsedSeconds: 1,
+            createdAt: 1,
+            updatedAt: 2
+        };
+        const { session, sessionEvents } = createSessionStub(['/goal']);
+
+        await codexRemoteLauncher(session as never);
+
+        expect(harness.startTurnParams).toHaveLength(0);
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Goal limited by usage · 10 tokens'
+        });
     });
 
     it('does not emit ready when a goal command interrupts an active turn', async () => {
@@ -1546,6 +2043,76 @@ describe('codexRemoteLauncher', () => {
             type: 'message',
             message: 'Task failed: Codex thread entered systemError'
         });
+        expect(session.thinking).toBe(false);
+    });
+
+    it('emits ready when same-thread retry completes with a stale terminal turn id', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitStaleTaskCompleteAfterRetry = true;
+        const {
+            session,
+            sessionEvents,
+            codexMessages,
+            rpcHandlers
+        } = createSessionStub(['first message']);
+
+        const running = codexRemoteLauncher(session as never);
+        const timeout = new Promise<'timeout'>((resolve) => {
+            setTimeout(() => resolve('timeout'), 500);
+        });
+        const result = await Promise.race([running, timeout]);
+        if (result === 'timeout') {
+            await rpcHandlers.get('switch')?.({});
+            await running;
+        }
+
+        expect(result).toBe('exit');
+        expect(harness.startThreadIds).toEqual(['thread-1']);
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
+        expect(harness.startTurnMessages).toEqual(['first message', 'first message']);
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'message',
+            message: 'done after retry'
+        }));
+        expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('ignores a stale same-thread failure after retry has started', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitStaleTaskFailedAfterRetry = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
+        expect(sessionEvents.filter((event) => event.type === 'ready').length).toBeGreaterThanOrEqual(1);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('ignores a stale thread-status failure after retry has started', async () => {
+        harness.remainingThreadSystemErrors = 1;
+        harness.emitStaleThreadStatusFailureAfterRetry = true;
+        const { session } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1']);
+        expect(session.thinking).toBe(false);
+    });
+
+    it('ignores a first-turn completion while the second retry is running', async () => {
+        harness.remainingThreadSystemErrors = 2;
+        harness.emitFirstTurnTaskCompleteAfterSecondRetry = true;
+        const { session, sessionEvents } = createSessionStub(['first message']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(harness.startTurnThreadIds).toEqual(['thread-1', 'thread-1', 'thread-1']);
+        expect(sessionEvents.filter((event) => event.type === 'ready')).toHaveLength(1);
         expect(session.thinking).toBe(false);
     });
 
@@ -2461,6 +3028,8 @@ describe('codexRemoteLauncher', () => {
         expect(codexMessages).toContainEqual(expect.objectContaining({
             type: 'token_count',
             thread_id: 'thread-1',
+            usageSchema: 'hapi.usage.v1',
+            inputTokenSemantics: 'includes-cache',
             scope_role: 'parent',
             scope: expect.objectContaining({
                 role: 'parent',
@@ -2539,6 +3108,44 @@ describe('codexRemoteLauncher', () => {
                 status: 'failed',
                 error: 'invalid spawn arguments'
             })
+        }));
+    });
+
+    it('forwards shared MultiAgent V2 tools as direct tool cards', async () => {
+        harness.emitParentV2AgentTools = true;
+        const { session, codexMessages } = createSessionStub();
+
+        await codexRemoteLauncher(session as never);
+
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call',
+            name: 'spawn_agent',
+            callId: 'v2-spawn',
+            input: { task_name: 'review', message: 'Review this' }
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call-result',
+            callId: 'v2-spawn',
+            output: '{"task_name":"/root/review","nickname":"Reviewer"}'
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call',
+            name: 'wait_agent',
+            callId: 'v2-wait',
+            input: { timeout_ms: 10_000 }
+        }));
+        expect(codexMessages).toContainEqual(expect.objectContaining({
+            type: 'tool-call-result',
+            callId: 'v2-wait',
+            output: '{"message":"Wait timed out.","timed_out":true}'
+        }));
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-start',
+            cardId: 'v2-spawn'
+        }));
+        expect(codexMessages).not.toContainEqual(expect.objectContaining({
+            type: 'agent-run-update',
+            agentId: 'spawn-error:v2-spawn'
         }));
     });
 

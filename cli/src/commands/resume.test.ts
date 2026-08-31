@@ -12,6 +12,7 @@ const {
     runClaudeMock,
     runGrokMock,
     runPiMock,
+    runAgyMock,
     assertCodexLocalSupportedMock,
     existsSyncMock
 } = vi.hoisted(() => ({
@@ -26,6 +27,7 @@ const {
     runClaudeMock: vi.fn(async () => {}),
     runGrokMock: vi.fn(async () => {}),
     runPiMock: vi.fn(async () => {}),
+    runAgyMock: vi.fn(async () => {}),
     assertCodexLocalSupportedMock: vi.fn(),
     existsSyncMock: vi.fn(() => true)
 }))
@@ -50,6 +52,7 @@ vi.mock('@/codex/runCodex', () => ({ runCodex: runCodexMock }))
 vi.mock('@/claude/runClaude', () => ({ runClaude: runClaudeMock }))
 vi.mock('@/grok/runGrok', () => ({ runGrok: runGrokMock }))
 vi.mock('@/pi/runPi', () => ({ runPi: runPiMock }))
+vi.mock('@/agy/runAgy', () => ({ runAgy: runAgyMock }))
 vi.mock('@/codex/utils/codexVersion', () => ({ assertCodexLocalSupported: assertCodexLocalSupportedMock }))
 vi.mock('node:fs', () => ({ existsSync: existsSyncMock }))
 
@@ -80,6 +83,7 @@ describe('resumeCommand', () => {
         runClaudeMock.mockClear()
         runGrokMock.mockClear()
         runPiMock.mockClear()
+        runAgyMock.mockClear()
         assertCodexLocalSupportedMock.mockClear()
         existsSyncMock.mockReturnValue(true)
     })
@@ -113,6 +117,66 @@ describe('resumeCommand', () => {
             model: 'gpt-5.4',
             modelReasoningEffort: 'xhigh',
             collaborationMode: 'default'
+        })
+    })
+
+    it('rejects resuming an active AGY session (turn could start before handoff)', async () => {
+        const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const exitSpy = vi.spyOn(process, 'exit').mockImplementation(((code?: number) => {
+            throw new Error(`process.exit:${code ?? 'undefined'}`)
+        }) as never)
+
+        getLocalResumeTargetMock.mockResolvedValue({
+            sessionId: 'hapi-session-agy',
+            flavor: 'agy',
+            directory: '/tmp/project',
+            machineId: 'machine-1',
+            active: true,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'agy-brain-1',
+            model: 'gemini-3.1-pro',
+            permissionMode: 'default'
+        })
+
+        try {
+            await expect(resumeCommand.run(createContext(['hapi-session-agy']))).rejects.toThrow('process.exit:1')
+            expect(handoffSessionToLocalMock).not.toHaveBeenCalled()
+            expect(runAgyMock).not.toHaveBeenCalled()
+            expect(consoleErrorSpy).toHaveBeenCalledWith(expect.any(String), expect.stringContaining('is active'))
+        } finally {
+            consoleErrorSpy.mockRestore()
+            exitSpy.mockRestore()
+        }
+    })
+
+    it('resumes an AGY target in remote mode instead of falling through to Cursor', async () => {
+        getLocalResumeTargetMock.mockResolvedValue({
+            sessionId: 'hapi-session-agy',
+            flavor: 'agy',
+            directory: '/tmp/project',
+            machineId: 'machine-1',
+            active: false,
+            thinking: false,
+            controlledByUser: false,
+            agentSessionId: 'agy-brain-1',
+            model: 'gemini-3.1-pro',
+            effort: 'high',
+            permissionMode: 'default'
+        })
+
+        await resumeCommand.run(createContext(['hapi-session-agy']))
+
+        expect(handoffSessionToLocalMock).not.toHaveBeenCalled()
+        expect(runAgyMock).toHaveBeenCalledWith({
+            existingSessionId: 'hapi-session-agy',
+            workingDirectory: '/tmp/project',
+            resumeSessionId: 'agy-brain-1',
+            startedBy: 'terminal',
+            permissionMode: 'default',
+            startingMode: 'remote',
+            model: 'gemini-3.1-pro',
+            effort: 'high'
         })
     })
 

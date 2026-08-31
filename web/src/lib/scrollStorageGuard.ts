@@ -65,7 +65,10 @@ export function installScrollRestorationGuard(
     if (guarded[GUARD_MARKER]) {
         return () => {}
     }
-    const originalSetItem = storage.setItem.bind(storage)
+    // Keep the raw reference for restoration (uninstall must hand back the
+    // exact same function), and a bound copy for invoking it.
+    const rawSetItem = storage.setItem
+    const originalSetItem = rawSetItem.bind(storage)
 
     const wrappedSetItem = (key: string, value: string): void => {
         if (key === STORAGE_KEY) {
@@ -112,7 +115,7 @@ export function installScrollRestorationGuard(
     guarded[GUARD_MARKER] = true
     return () => {
         if (storage.setItem === wrappedSetItem) {
-            storage.setItem = originalSetItem
+            storage.setItem = rawSetItem
             delete guarded[GUARD_MARKER]
         }
     }

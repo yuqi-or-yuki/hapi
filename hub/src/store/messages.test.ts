@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test'
+import { AGENT_MESSAGE_PAYLOAD_TYPE } from '@hapi/protocol'
+import { getReasoningStreamId } from '@hapi/protocol/messages'
 import { Store } from './index'
 
 function makeStore(): Store {
@@ -24,6 +26,7 @@ describe('cancelQueuedMessage', () => {
         // Row should be gone from uninvoked list
         const remaining = store.messages.getUninvokedLocalMessages(session.id)
         expect(remaining).toHaveLength(0)
+        expect(store.messages.getMessageEpoch(session.id)).toBe(1)
     })
 
     it('already-invoked: returns status=invoked with full message row, row stays in DB', () => {
@@ -67,6 +70,7 @@ describe('cancelQueuedMessage', () => {
         if (second.status === 'cancelled') {
             expect(second.localId).toBeNull()
         }
+        expect(store.messages.getMessageEpoch(session.id)).toBe(1)
     })
 
     it('non-existent messageId: returns status=cancelled with localId=null', () => {
@@ -170,6 +174,127 @@ describe('cancelQueuedMessage', () => {
         // Row still exists
         const messages = store.messages.getMessages(session.id)
         expect(messages.some(m => m.id === msg.id)).toBe(true)
+    })
+})
+
+describe('recordMessagesConsumed', () => {
+    it('rolls back the invocation transition when the session namespace cannot be verified', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'consumed-rollback-wrong-namespace')
+        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'hello' } }, 'local-rollback')
+        const originalUpdatedAt = store.sessions.getSession(session.id)?.updatedAt
+
+        expect(() => store.recordMessagesConsumed(session.id, ['local-rollback'], 2_000, 'other-namespace'))
+            .toThrow('session not found after messages-consumed transition')
+        expect(store.messages.getLocalMessageStates(session.id, ['local-rollback']))
+            .toEqual([{ localId: 'local-rollback', invokedAt: null }])
+        expect(store.sessions.getSession(session.id)?.updatedAt).toBe(originalUpdatedAt)
+    })
+})
+
+describe('position pagination and structural epochs', () => {
+    it('returns rows strictly after a cursor and respects an inclusive snapshot head', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'position-after')
+        const first = store.messages.addMessage(session.id, { text: 'first' })
+        const second = store.messages.addMessage(session.id, { text: 'second' })
+        const third = store.messages.addMessage(session.id, { text: 'third' })
+        store.messages.addMessage(session.id, { text: 'fourth' })
+
+        const rows = store.messages.getMessagesAfterPosition(
+            session.id,
+            10,
+            { at: first.invokedAt ?? first.createdAt, seq: first.seq },
+            { at: third.invokedAt ?? third.createdAt, seq: third.seq }
+        )
+
+        expect(rows.map((message) => message.id)).toEqual([second.id, third.id])
+    })
+
+    it('reports the newest composite position', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'position-head')
+        const first = store.messages.addMessage(session.id, { text: 'first' })
+        const second = store.messages.addMessage(session.id, { text: 'second' })
+
+        expect(store.messages.getNewestMessagePosition(session.id)).toEqual({
+            at: second.invokedAt ?? second.createdAt,
+            seq: second.seq
+        })
+        expect(first.seq).toBeLessThan(second.seq)
+    })
+
+    it('bumps both epochs when session history is merged', () => {
+        const store = makeStore()
+        const source = makeSession(store, 'epoch-merge-source')
+        const target = makeSession(store, 'epoch-merge-target')
+        store.messages.addMessage(source.id, { text: 'source' })
+        store.messages.addMessage(target.id, { text: 'target' })
+
+        const result = store.messages.mergeSessionMessages(source.id, target.id)
+
+        expect(result.moved).toBe(1)
+        expect(store.messages.getMessageEpoch(source.id)).toBe(1)
+        expect(store.messages.getMessageEpoch(target.id)).toBe(1)
+    })
+
+    it('clamps future client timestamps to hub receive time', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'future-client-clock')
+        const before = Date.now()
+
+        const message = store.messages.addMessage(
+            session.id,
+            { text: 'future clock' },
+            undefined,
+            undefined,
+            before + 60_000,
+        )
+
+        expect(message.createdAt).toBeGreaterThanOrEqual(before)
+        expect(message.createdAt).toBeLessThanOrEqual(Date.now())
+        expect(message.invokedAt).toBe(message.createdAt)
+    })
+
+    it('bumps the epoch when a newly inserted message is backdated behind the cached head', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'epoch-backdated-insert')
+        const head = store.messages.addMessage(session.id, { text: 'head' })
+        const headPosition = { at: head.invokedAt ?? head.createdAt, seq: head.seq }
+
+        const backdated = store.messages.addMessage(
+            session.id,
+            { text: 'backdated' },
+            undefined,
+            undefined,
+            headPosition.at - 1_000,
+        )
+
+        expect(backdated.seq).toBeGreaterThan(head.seq)
+        expect(store.messages.getMessagesAfterPosition(session.id, 10, headPosition)).toEqual([])
+        expect(store.messages.getMessageEpoch(session.id)).toBe(1)
+    })
+
+    it('bumps the target epoch when a copied message lands behind the cached head', () => {
+        const store = makeStore()
+        const target = makeSession(store, 'epoch-copy-target')
+        const head = store.messages.addMessage(target.id, { text: 'head' })
+        const headPosition = {
+            at: head.invokedAt ?? head.createdAt,
+            seq: head.seq
+        }
+
+        const copied = store.messages.copyMessageToSession(target.id, {
+            content: { text: 'historical' },
+            createdAt: headPosition.at - 1_000,
+            localId: null,
+            invokedAt: headPosition.at - 1_000,
+            scheduledAt: null
+        })
+
+        expect(copied.seq).toBeGreaterThan(head.seq)
+        expect(store.messages.getMessagesAfterPosition(target.id, 10, headPosition)).toEqual([])
+        expect(store.messages.getMessageEpoch(target.id)).toBe(1)
     })
 })
 
@@ -346,5 +471,243 @@ describe('countFutureScheduledLocalMessages', () => {
         const nextAt = store.messages.minFutureScheduledAtBySessionIds([sessionA.id, sessionB.id], now)
         expect(nextAt.get(sessionA.id)).toBe(now + 60_000)
         expect(nextAt.get(sessionB.id)).toBeUndefined()
+    })
+})
+
+describe('moveUninvokedScheduledMessages', () => {
+    it('atomically moves only pending scheduled rows to the replacement session', () => {
+        const store = makeStore()
+        const source = makeSession(store, 'scheduled-source')
+        const replacement = makeSession(store, 'scheduled-replacement')
+        const now = Date.now()
+        const scheduled = store.messages.addMessage(source.id, { text: 'later' }, 'scheduled-local', now + 60_000)
+        store.messages.addMessage(source.id, { text: 'ordinary queued' }, 'ordinary-local')
+
+        expect(store.messages.moveUninvokedScheduledMessages(source.id, replacement.id)).toBe(1)
+        expect(store.messages.getAllMessages(source.id).map((message) => message.id)).not.toContain(scheduled.id)
+        expect(store.messages.getAllMessages(replacement.id)).toEqual([
+            expect.objectContaining({ id: scheduled.id, localId: 'scheduled-local', scheduledAt: now + 60_000, invokedAt: null })
+        ])
+        expect(store.messages.getUninvokedLocalMessages(source.id)).toEqual([
+            expect.objectContaining({ localId: 'ordinary-local', scheduledAt: null })
+        ])
+    })
+})
+
+describe('markUninvokedImmediateMessages', () => {
+    it('settles immediate queued rows while preserving scheduled rows for clear transfer', () => {
+        const store = makeStore()
+        const source = makeSession(store, 'clear-source-immediate')
+        const invokedAt = Date.now()
+        store.messages.addMessage(source.id, { text: 'immediate' }, 'immediate-local')
+        store.messages.addMessage(source.id, { text: 'scheduled' }, 'scheduled-local', invokedAt + 60_000)
+
+        expect(store.messages.markUninvokedImmediateMessages(source.id, invokedAt)).toEqual(['immediate-local'])
+        expect(store.messages.getAllMessages(source.id)).toEqual(expect.arrayContaining([
+            expect.objectContaining({ localId: 'immediate-local', invokedAt }),
+            expect.objectContaining({ localId: 'scheduled-local', invokedAt: null })
+        ]))
+    })
+})
+
+describe('content codec integration', () => {
+    it('stores large agent content compressed and returns it truncated on read', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'codec-agent')
+        const stdout = 'line\n'.repeat(60_000) // ~300KB, above the truncate limit
+        const content = {
+            role: 'agent',
+            content: { type: 'codex', data: { type: 'tool-call-result', callId: 'c1', output: { stdout } } }
+        }
+
+        const added = store.messages.addMessage(session.id, content)
+        const read = store.messages.getMessages(session.id, 10)
+        expect(read).toHaveLength(1)
+
+        const readContent = read[0]!.content as typeof content
+        expect(readContent.content.data.output.stdout.length).toBeLessThan(stdout.length)
+        expect(readContent.content.data.output.stdout).toContain('[hapi: truncated')
+        expect(readContent.content.data.callId).toBe('c1')
+        // addMessage's return value matches what a later read sees (SSE broadcast uses it)
+        expect(added.content).toEqual(read[0]!.content)
+    })
+
+    it('round-trips large queued user prompts verbatim (delivery path must not truncate)', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'codec-user')
+        const text = 'prompt '.repeat(30_000) // ~210KB user paste
+        store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text } },
+            'lid-big',
+            Date.now() + 60_000
+        )
+
+        const scheduled = store.messages.getMatureScheduledMessages(Date.now() + 120_000)
+        expect(scheduled).toHaveLength(1)
+        const delivered = scheduled[0]!.content as { content: { text: string } }
+        expect(delivered.content.text).toBe(text)
+    })
+
+    it('requeues an indeterminate delivery only on explicit request', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'requeue-indeterminate')
+        const msg = store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'retry me' } },
+            'lid-retry'
+        )
+        expect(store.messages.setMessagesDeliveryState(session.id, ['lid-retry'], 'dispatching')).toBe(1)
+        expect(store.messages.setMessagesDeliveryState(session.id, ['lid-retry'], 'indeterminate')).toBe(1)
+        expect(store.messages.getDeliverableMessagesAfter(session.id, 0, Date.now())).toHaveLength(0)
+        const claimed = store.messages.claimIndeterminateMessage(session.id, msg.id)
+        expect(claimed).toMatchObject({ id: msg.id, invokedAt: null, deliveryState: 'indeterminate' })
+        expect(store.messages.claimIndeterminateMessage(session.id, msg.id)).toBeNull()
+        expect(store.messages.getDeliverableMessagesAfter(session.id, 0, Date.now())).toHaveLength(0)
+        expect(store.messages.setMessagesDeliveryState(session.id, ['lid-retry'], 'queued')).toBe(1)
+        expect(store.messages.getDeliverableMessagesAfter(session.id, 0, Date.now())).toHaveLength(1)
+    })
+
+    it('holds indeterminate delivery out of replay without stamping invoked_at', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'indeterminate')
+        const msg = store.messages.addMessage(
+            session.id,
+            { role: 'user', content: { type: 'text', text: 'uncertain' } },
+            'lid-uncertain'
+        )
+
+        expect(store.messages.markMessagesIndeterminate(session.id, ['lid-uncertain'])).toBe(1)
+        expect(store.messages.markMessagesIndeterminate(session.id, ['lid-uncertain'])).toBe(0)
+        expect(store.messages.getDeliverableMessagesAfter(session.id, 0, Date.now())).toHaveLength(0)
+        expect(store.messages.getImmediateQueuedLocalMessages(session.id)).toHaveLength(0)
+        expect(store.messages.getUninvokedLocalMessages(session.id)[0]).toMatchObject({
+            id: msg.id,
+            deliveryState: 'indeterminate',
+            invokedAt: null
+        })
+        expect(store.messages.lookupQueuedMessage(session.id, msg.id)).toEqual({
+            status: 'indeterminate',
+            localId: 'lid-uncertain',
+            resolvedId: msg.id,
+            scheduledAt: null
+        })
+
+        const invokedAt = Date.now()
+        expect(store.messages.markMessagesInvoked(session.id, ['lid-uncertain'], invokedAt)).toBe(1)
+        expect(store.messages.getMessages(session.id)[0]).toMatchObject({ invokedAt })
+    })
+})
+
+describe('deleteLiveReasoningSnapshots', () => {
+    function reasoningMessage(streamId: string, text: string, live: boolean) {
+        return {
+            role: 'agent',
+            content: {
+                type: AGENT_MESSAGE_PAYLOAD_TYPE,
+                data: { type: 'reasoning', message: text, id: streamId, ...(live ? { live: true } : {}) }
+            }
+        }
+    }
+
+    function reasoningTexts(store: Store, sessionId: string): string[] {
+        return store.messages.getAllMessages(sessionId)
+            .map((message) => getReasoningStreamId(message.content) === null
+                ? null
+                : ((message.content as { content: { data: { message: string } } }).content.data.message))
+            .filter((text): text is string => text !== null)
+    }
+
+    it('keeps only the newest snapshot of a stream', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'reasoning-collapse')
+
+        for (const text of ['a', 'ab', 'abc']) {
+            const stored = store.messages.addMessage(session.id, reasoningMessage('stream-1', text, true))
+            store.messages.deleteLiveReasoningSnapshots(session.id, 'stream-1', stored.id)
+        }
+
+        expect(reasoningTexts(store, session.id)).toEqual(['abc'])
+    })
+
+    it('lets a settled message supersede the snapshots of its own stream', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'reasoning-settle')
+
+        store.messages.addMessage(session.id, reasoningMessage('stream-1', 'partial', true))
+        const settled = store.messages.addMessage(session.id, reasoningMessage('stream-1', 'final', false))
+        store.messages.deleteLiveReasoningSnapshots(session.id, 'stream-1', settled.id)
+
+        expect(reasoningTexts(store, session.id)).toEqual(['final'])
+    })
+
+    it('never removes a settled message', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'reasoning-settled-kept')
+
+        store.messages.addMessage(session.id, reasoningMessage('stream-1', 'final', false))
+        const removed = store.messages.deleteLiveReasoningSnapshots(session.id, 'stream-1')
+
+        expect(removed).toBe(0)
+        expect(reasoningTexts(store, session.id)).toEqual(['final'])
+    })
+
+    it('leaves other streams alone', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'reasoning-other-stream')
+
+        store.messages.addMessage(session.id, reasoningMessage('stream-1', 'first', true))
+        const other = store.messages.addMessage(session.id, reasoningMessage('stream-2', 'second', true))
+        store.messages.deleteLiveReasoningSnapshots(session.id, 'stream-2', other.id)
+
+        expect(reasoningTexts(store, session.id)).toEqual(['first', 'second'])
+    })
+
+    it('never crosses a session boundary', () => {
+        const store = makeStore()
+        const mine = makeSession(store, 'reasoning-mine')
+        const theirs = makeSession(store, 'reasoning-theirs')
+
+        store.messages.addMessage(theirs.id, reasoningMessage('stream-1', 'theirs', true))
+        store.messages.deleteLiveReasoningSnapshots(mine.id, 'stream-1')
+
+        expect(reasoningTexts(store, theirs.id)).toEqual(['theirs'])
+    })
+
+    it('spares the message that replaced the snapshots', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'reasoning-keep-replacement')
+
+        const replacement = store.messages.addMessage(session.id, reasoningMessage('stream-1', 'newest', true))
+        const removed = store.messages.deleteLiveReasoningSnapshots(session.id, 'stream-1', replacement.id)
+
+        expect(removed).toBe(0)
+        expect(reasoningTexts(store, session.id)).toEqual(['newest'])
+    })
+
+    it('never lets a stream pass through zero rows', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'reasoning-never-empty')
+
+        // Walk a stream the way the handler does — store, then sweep — and
+        // assert the stream is represented after every single step.
+        for (const text of ['a', 'ab', 'abc', 'abcd']) {
+            const stored = store.messages.addMessage(session.id, reasoningMessage('stream-1', text, true))
+            expect(reasoningTexts(store, session.id).length).toBeGreaterThan(0)
+            store.messages.deleteLiveReasoningSnapshots(session.id, 'stream-1', stored.id)
+            expect(reasoningTexts(store, session.id)).toEqual([text])
+        }
+    })
+
+    it('leaves unrelated messages untouched', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'reasoning-unrelated')
+
+        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'hello' } })
+        store.messages.addMessage(session.id, reasoningMessage('stream-1', 'partial', true))
+        store.messages.deleteLiveReasoningSnapshots(session.id, 'stream-1')
+
+        expect(store.messages.getAllMessages(session.id)).toHaveLength(1)
+        expect(reasoningTexts(store, session.id)).toEqual([])
     })
 })

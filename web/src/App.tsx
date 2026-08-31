@@ -9,13 +9,14 @@ import { useAuth } from '@/hooks/useAuth'
 import { useAuthSource } from '@/hooks/useAuthSource'
 import { useServerUrl } from '@/hooks/useServerUrl'
 import { useSSE } from '@/hooks/useSSE'
+import { useReconnectingState } from '@/hooks/useReconnectingState'
 import { useSyncingState } from '@/hooks/useSyncingState'
 import { usePushNotifications } from '@/hooks/usePushNotifications'
 import { useViewportHeight } from '@/hooks/useViewportHeight'
 import { useVisibilityReporter } from '@/hooks/useVisibilityReporter'
 import { queryKeys } from '@/lib/query-keys'
 import { AppContextProvider } from '@/lib/app-context'
-import { clearMessageWindow, fetchLatestMessages } from '@/lib/message-window-store'
+import { clearMessageWindow, syncTailMessages } from '@/lib/message-window-store'
 import { useAppGoBack } from '@/hooks/useAppGoBack'
 import { useTranslation } from '@/lib/use-translation'
 import { VoiceProvider } from '@/lib/voice-context'
@@ -29,6 +30,7 @@ import { PwaUpdateBanner, PwaUpdateBannerWithStatusOffset } from '@/components/P
 import { SyncingBanner } from '@/components/SyncingBanner'
 import { ReconnectingBanner } from '@/components/ReconnectingBanner'
 import { VoiceErrorBanner } from '@/components/VoiceErrorBanner'
+import { RunnerVersionSkewBanner } from '@/components/RunnerVersionSkewBanner'
 import { LoadingState } from '@/components/LoadingState'
 import { ToastContainer } from '@/components/ToastContainer'
 import { PwaUpdateProvider } from '@/lib/pwa-update-context'
@@ -156,6 +158,7 @@ function AppInner() {
     const { serverUrl, baseUrl, setServerUrl, clearServerUrl } = useServerUrl()
     const { authSource, isLoading: isAuthSourceLoading, setAccessToken } = useAuthSource(baseUrl)
     const { token, api, isLoading: isAuthLoading, error: authError, needsBinding, bind } = useAuth(authSource, baseUrl)
+    const [titleSuggestionAvailable, setTitleSuggestionAvailable] = useState(false)
     const goBack = useAppGoBack()
     const pathname = useLocation({ select: (location) => location.pathname })
     const matchRoute = useMatchRoute()
@@ -233,6 +236,26 @@ function AppInner() {
     }, [])
 
     useEffect(() => {
+        let cancelled = false
+        setTitleSuggestionAvailable(false)
+        if (!api) return () => { cancelled = true }
+
+        void api.getHealth()
+            .then((health) => {
+                if (!cancelled) {
+                    setTitleSuggestionAvailable(health.capabilities?.titleSuggestion === true)
+                }
+            })
+            .catch(() => {
+                if (!cancelled) setTitleSuggestionAvailable(false)
+            })
+
+        return () => {
+            cancelled = true
+        }
+    }, [api])
+
+    useEffect(() => {
         const tg = getTelegramWebApp()
         tg?.ready()
         tg?.expand()
@@ -302,8 +325,12 @@ function AppInner() {
     const sessionMatch = matchRoute({ to: '/sessions/$sessionId' })
     const selectedSessionId = sessionMatch && sessionMatch.sessionId !== 'new' ? sessionMatch.sessionId : null
     const { isSyncing, startSync, endSync } = useSyncingState()
-    const [sseDisconnected, setSseDisconnected] = useState(false)
-    const [sseDisconnectReason, setSseDisconnectReason] = useState<string | null>(null)
+    const {
+        isReconnecting: sseDisconnected,
+        reason: sseDisconnectReason,
+        reportConnect: reportSseConnect,
+        reportDisconnect: reportSseDisconnect
+    } = useReconnectingState()
     const syncTokenRef = useRef(0)
     const isFirstConnectRef = useRef(true)
     const baseUrlRef = useRef(baseUrl)
@@ -365,10 +392,17 @@ function AppInner() {
         void run()
     }, [api, isPushSupported, pushPermission, requestPermission, subscribe, token])
 
-    const handleSseConnect = useCallback(() => {
+    const handleSseConnect = useCallback((info: { resumed: boolean }) => {
         // Clear disconnected state on successful connection
-        setSseDisconnected(false)
-        setSseDisconnectReason(null)
+        reportSseConnect()
+
+        // The hub replayed every event missed during the gap, so the caches
+        // are already consistent - the full refetch below would only re-download
+        // what the replay just delivered. First connects and long gaps arrive
+        // with resumed=false and take the resync path.
+        if (info.resumed && !isFirstConnectRef.current) {
+            return
+        }
 
         // Increment token to track this specific connection
         const token = ++syncTokenRef.current
@@ -392,7 +426,7 @@ function AppInner() {
             queryClient.invalidateQueries({ queryKey: ['session'] })
         ]
         const refreshMessages = (selectedSessionId && api)
-            ? fetchLatestMessages(api, selectedSessionId)
+            ? syncTailMessages(api, selectedSessionId)
             : Promise.resolve()
         Promise.all([...invalidations, refreshMessages])
             .catch((error) => {
@@ -404,15 +438,14 @@ function AppInner() {
                     endSync()
                 }
             })
-    }, [api, queryClient, selectedSessionId, startSync, endSync])
+    }, [api, queryClient, selectedSessionId, startSync, endSync, reportSseConnect])
 
     const handleSseDisconnect = useCallback((reason: string) => {
         // Only show reconnecting banner if we've already connected once
         if (!isFirstConnectRef.current) {
-            setSseDisconnected(true)
-            setSseDisconnectReason(reason)
+            reportSseDisconnect(reason)
         }
-    }, [])
+    }, [reportSseDisconnect])
 
     const handleSseEvent = useCallback((event: SyncEvent) => {
         if (event.type !== 'messages-invalidated') {
@@ -422,7 +455,7 @@ function AppInner() {
             return
         }
         clearMessageWindow(event.sessionId)
-        void fetchLatestMessages(api, event.sessionId)
+        void syncTailMessages(api, event.sessionId)
     }, [api, selectedSessionId])
 
     const handleSessionFinished = useCallback((event: { sessionId: string; allClear: boolean }) => {
@@ -436,8 +469,13 @@ function AppInner() {
         playDoneSound(event.sessionId, agentDoneRing)
     }, [markUnreadDone, selectedSessionId, playDoneSound, allDoneRing, agentDoneRing])
 
-    const handleSessionSseConnect = useCallback(() => {
+    const handleSessionSseConnect = useCallback((info: { resumed: boolean }) => {
         if (!api || !selectedSessionId) {
+            return
+        }
+        // A resumed connection replayed messages-consumed/message events for
+        // this session, so the queued-state snapshot cannot have drifted.
+        if (info.resumed) {
             return
         }
         void reconcileQueuedStateAfterConnect(api, selectedSessionId).catch((error) => {
@@ -505,6 +543,7 @@ function AppInner() {
         [selectedSessionId]
     )
     const sseEnabled = Boolean(api && token)
+    const showReconnectingBanner = sseDisconnected && !isSyncing
 
     const { subscriptionId: globalSubscriptionId } = useSSE({
         enabled: sseEnabled,
@@ -624,6 +663,7 @@ function AppInner() {
             api,
             token,
             baseUrl,
+            titleSuggestionAvailable,
             agentDoneSoundMuted,
             setAgentDoneSoundMuted,
             agentDoneRing,
@@ -637,15 +677,19 @@ function AppInner() {
             <VoiceProvider>
                 <PwaUpdateBannerWithStatusOffset
                     isSyncing={isSyncing}
-                    isReconnecting={sseDisconnected && !isSyncing}
+                    isReconnecting={showReconnectingBanner}
                 />
                 <SyncingBanner isSyncing={isSyncing} />
                 <ReconnectingBanner
-                    isReconnecting={sseDisconnected && !isSyncing}
+                    isReconnecting={showReconnectingBanner}
                     reason={sseDisconnectReason}
                 />
                 <VoiceErrorBanner />
-                <OfflineBanner />
+                <OfflineBanner
+                    isHubConnected={globalSubscriptionId !== null}
+                    isReconnecting={showReconnectingBanner}
+                />
+                <RunnerVersionSkewBanner />
                 <div className="h-full min-h-0 flex flex-col">
                     <Outlet />
                 </div>

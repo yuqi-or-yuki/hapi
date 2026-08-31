@@ -116,6 +116,9 @@ export function convertZeroshotLedgerRow(row: ZeroshotLedgerRow): ZeroshotConver
             return {
                 message: {
                     type: 'token_count',
+                    model: null,
+                    usageSchema: 'hapi.usage.v1',
+                    inputTokenSemantics: 'includes-cache',
                     info: {
                         total: { inputTokens, outputTokens, cachedInputTokens }
                     }

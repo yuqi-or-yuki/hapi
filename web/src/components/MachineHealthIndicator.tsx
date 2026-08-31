@@ -9,42 +9,6 @@ import {
 import { cn } from '@/lib/utils'
 import { useTranslation } from '@/lib/use-translation'
 
-function HealthMeterBar(props: {
-    label: string
-    percent: number
-    tone: MachineHealthPresentation['overallTone']
-    layout: 'stack' | 'inline'
-    compact?: boolean
-}) {
-    const barWidthClass = props.compact ? 'w-8' : props.layout === 'inline' ? 'w-14' : 'w-11'
-    const labelWidthClass = props.compact ? 'w-5 text-[8px]' : 'w-6 text-[9px]'
-
-    return (
-        <div className="flex items-center gap-0.5 min-w-0">
-            <span className={cn('shrink-0 font-semibold uppercase tracking-wide text-[var(--app-hint)]', labelWidthClass)}>
-                {props.label}
-            </span>
-            <div
-                className={cn(
-                    'relative h-1.5 shrink-0 overflow-hidden rounded-full bg-[var(--app-border)]/80',
-                    barWidthClass
-                )}
-                aria-hidden="true"
-            >
-                <div
-                    className={cn('h-full rounded-full transition-[width]', MACHINE_HEALTH_BAR_FILL_CLASS[props.tone])}
-                    style={{ width: `${Math.max(4, Math.min(100, props.percent))}%` }}
-                />
-            </div>
-            {props.layout === 'inline' && !props.compact ? (
-                <span className="w-7 shrink-0 text-[10px] tabular-nums text-[var(--app-fg)]/80">
-                    {props.percent}%
-                </span>
-            ) : null}
-        </div>
-    )
-}
-
 function TooltipMetricStat(props: {
     metric: MachineHealthMetricPresentation
     label: string
@@ -131,7 +95,7 @@ function MachineHealthHint() {
     )
 }
 
-function MachineHealthTooltipBody(props: {
+export function MachineHealthTooltipBody(props: {
     presentation: MachineHealthPresentation
 }) {
     const { t } = useTranslation()
@@ -173,6 +137,42 @@ function MachineHealthTooltipBody(props: {
                 ) : null}
             </span>
         </span>
+    )
+}
+
+function HealthMeterBar(props: {
+    label: string
+    percent: number
+    tone: MachineHealthPresentation['overallTone']
+    layout: 'stack' | 'inline'
+    compact?: boolean
+}) {
+    const barWidthClass = props.compact ? 'w-8' : props.layout === 'inline' ? 'w-14' : 'w-11'
+    const labelWidthClass = props.compact ? 'w-5 text-[8px]' : 'w-6 text-[9px]'
+
+    return (
+        <div className="flex items-center gap-0.5 min-w-0">
+            <span className={cn('shrink-0 font-semibold uppercase tracking-wide text-[var(--app-hint)]', labelWidthClass)}>
+                {props.label}
+            </span>
+            <div
+                className={cn(
+                    'relative h-1.5 shrink-0 overflow-hidden rounded-full bg-[var(--app-border)]/80',
+                    barWidthClass
+                )}
+                aria-hidden="true"
+            >
+                <div
+                    className={cn('h-full rounded-full transition-[width]', MACHINE_HEALTH_BAR_FILL_CLASS[props.tone])}
+                    style={{ width: `${Math.max(4, Math.min(100, props.percent))}%` }}
+                />
+            </div>
+            {props.layout === 'inline' && !props.compact ? (
+                <span className="w-7 shrink-0 text-[10px] tabular-nums text-[var(--app-fg)]/80">
+                    {props.percent}%
+                </span>
+            ) : null}
+        </div>
     )
 }
 

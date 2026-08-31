@@ -11,6 +11,8 @@ import type { SyncEngine } from '../../sync/syncEngine'
 import type { WebAppEnv } from '../middleware/auth'
 import { createMessagesRoutes } from './messages'
 
+type GetMessagesPage = SyncEngine['getMessagesPage']
+
 // TS note: engine is cast to unknown→SyncEngine so test helpers don't need to
 // satisfy the full SyncEngine shape (only the subset the route under test uses).
 
@@ -21,10 +23,13 @@ import { createMessagesRoutes } from './messages'
 function createApp(opts: {
     active?: boolean
     sendMessage?: (sessionId: string, payload: unknown) => Promise<void>
+    getMessagesPage?: GetMessagesPage
     getQueuedState?: (sessionId: string, localIds: string[]) => {
         queuedLocalIds: string[]
+        indeterminateLocalIds: string[]
         invokedLocalMessages: Array<{ localId: string; invokedAt: number }>
     }
+    steerQueuedMessage?: (sessionId: string, messageId: string) => Promise<unknown>
 }) {
     const sentMessages: Array<{ sessionId: string; payload: unknown }> = []
     const queuedStateCalls: Array<{ sessionId: string; localIds: string[] }> = []
@@ -35,11 +40,28 @@ function createApp(opts: {
         queuedStateCalls.push({ sessionId, localIds })
         return {
             queuedLocalIds: localIds.filter((localId) => localId.startsWith('queued-')),
+            indeterminateLocalIds: [],
             invokedLocalMessages: localIds
                 .filter((localId) => localId.startsWith('invoked-'))
                 .map((localId) => ({ localId, invokedAt: 1_000 }))
         }
     })
+    const getMessagesPage = opts.getMessagesPage ?? (() => ({
+        messages: [],
+        page: {
+            direction: 'latest',
+            limit: 50,
+            epoch: 0,
+            reset: false,
+            nextBeforeSeq: null,
+            nextBeforeAt: null,
+            nextAfterSeq: null,
+            nextAfterAt: null,
+            snapshotHeadSeq: null,
+            snapshotHeadAt: null,
+            hasMore: false
+        }
+    }))
 
     const engine = {
         resolveSessionAccess: () => ({
@@ -50,7 +72,8 @@ function createApp(opts: {
         sendMessage,
         getQueuedState,
         cancelQueuedMessage: async () => ({ status: 'cancelled' }),
-        getMessagesPage: () => ({ messages: [], page: {} }),
+        steerQueuedMessage: opts.steerQueuedMessage ?? (async () => ({ status: 'failed', error: 'Steer failed', localId: null })),
+        getMessagesPage,
     } as unknown as SyncEngine
 
     const app = new Hono<WebAppEnv>()
@@ -62,6 +85,116 @@ function createApp(opts: {
 
     return { app, sentMessages, queuedStateCalls }
 }
+
+describe('GET /api/sessions/:id/messages', () => {
+    it('uses latest mode by default and returns the full page metadata', async () => {
+        const calls: Array<{ sessionId: string; options: Parameters<GetMessagesPage>[1] }> = []
+        const { app } = createApp({
+            getMessagesPage: (sessionId, options) => {
+                calls.push({ sessionId, options })
+                return {
+                    messages: [],
+                    page: {
+                        direction: 'latest',
+                        limit: options.limit,
+                        epoch: 4,
+                        reset: false,
+                        nextBeforeSeq: 10,
+                        nextBeforeAt: 1_000,
+                        nextAfterSeq: null,
+                        nextAfterAt: null,
+                        snapshotHeadSeq: 20,
+                        snapshotHeadAt: 2_000,
+                        hasMore: true
+                    }
+                }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/messages')
+
+        expect(response.status).toBe(200)
+        expect(calls).toEqual([{
+            sessionId: 'session-1',
+            options: { limit: 50, before: null, after: null, until: null, epoch: null }
+        }])
+        expect(await response.json()).toEqual({
+            messages: [],
+            page: {
+                direction: 'latest',
+                limit: 50,
+                epoch: 4,
+                reset: false,
+                nextBeforeSeq: 10,
+                nextBeforeAt: 1_000,
+                nextAfterSeq: null,
+                nextAfterAt: null,
+                snapshotHeadSeq: 20,
+                snapshotHeadAt: 2_000,
+                hasMore: true
+            }
+        })
+    })
+
+    it('forwards after, snapshot-head, epoch, and limit query parameters', async () => {
+        const calls: Array<{ sessionId: string; options: Parameters<GetMessagesPage>[1] }> = []
+        const { app } = createApp({
+            getMessagesPage: (sessionId, options) => {
+                calls.push({ sessionId, options })
+                return {
+                    messages: [],
+                    page: {
+                        direction: 'after',
+                        limit: options.limit,
+                        epoch: options.epoch ?? 0,
+                        reset: false,
+                        nextBeforeSeq: null,
+                        nextBeforeAt: null,
+                        nextAfterSeq: 11,
+                        nextAfterAt: 1_100,
+                        snapshotHeadSeq: 20,
+                        snapshotHeadAt: 2_000,
+                        hasMore: true
+                    }
+                }
+            }
+        })
+
+        const response = await app.request(
+            '/api/sessions/session-1/messages?afterAt=1000&afterSeq=10&untilAt=2000&untilSeq=20&epoch=3&limit=25'
+        )
+
+        expect(response.status).toBe(200)
+        expect(calls).toEqual([{
+            sessionId: 'session-1',
+            options: {
+                limit: 25,
+                before: null,
+                after: { at: 1_000, seq: 10 },
+                until: { at: 2_000, seq: 20 },
+                epoch: 3
+            }
+        }])
+    })
+
+    it('rejects mixed directional cursors before calling the engine', async () => {
+        let called = false
+        const { app } = createApp({
+            getMessagesPage: () => {
+                called = true
+                throw new Error('must not be called')
+            }
+        })
+
+        const response = await app.request(
+            '/api/sessions/session-1/messages?beforeAt=1000&beforeSeq=10&afterAt=2000&afterSeq=20'
+        )
+
+        expect(response.status).toBe(400)
+        expect(await response.json()).toMatchObject({ error: 'Invalid query' })
+        expect(called).toBe(false)
+    })
+})
 
 // ---------------------------------------------------------------------------
 // #2 server-side scheduledAt upper bound
@@ -127,6 +260,50 @@ describe('POST /api/sessions/:id/messages — #2 scheduledAt upper bound', () =>
 
         expect(response.status).toBe(200)
         expect(sentMessages).toHaveLength(1)
+    })
+})
+
+describe('POST /api/sessions/:id/messages — deliveryMode', () => {
+    it('forwards an immediate steer intent to the hub', async () => {
+        const { app, sentMessages } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ text: 'steer now', localId: 'local-steer', deliveryMode: 'steer' })
+        })
+
+        expect(response.status).toBe(200)
+        expect(sentMessages).toEqual([{
+            sessionId: 'session-1',
+            payload: {
+                text: 'steer now',
+                localId: 'local-steer',
+                attachments: undefined,
+                sentFrom: 'webapp',
+                scheduledAt: undefined,
+                deliveryMode: 'steer'
+            }
+        }])
+    })
+
+    it('rejects scheduled steer delivery before calling the hub', async () => {
+        const { app, sentMessages } = createApp({})
+
+        const response = await app.request('/api/sessions/session-1/messages', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                text: 'steer later',
+                localId: 'local-scheduled-steer',
+                scheduledAt: Date.now() + 60_000,
+                deliveryMode: 'steer'
+            })
+        })
+
+        expect(response.status).toBe(400)
+        expect(JSON.stringify(await response.json())).toContain('deliveryMode')
+        expect(sentMessages).toHaveLength(0)
     })
 })
 
@@ -272,6 +449,7 @@ describe('POST /api/sessions/:id/messages/queued-state', () => {
         expect(response.status).toBe(200)
         expect(await response.json()).toEqual({
             queuedLocalIds: ['queued-2', 'queued-1'],
+            indeterminateLocalIds: [],
             invokedLocalMessages: [{ localId: 'invoked-1', invokedAt: 1_000 }]
         })
         expect(queuedStateCalls).toEqual([{
@@ -290,7 +468,7 @@ describe('POST /api/sessions/:id/messages/queued-state', () => {
         })
 
         expect(response.status).toBe(200)
-        expect(await response.json()).toEqual({ queuedLocalIds: [], invokedLocalMessages: [] })
+        expect(await response.json()).toEqual({ queuedLocalIds: [], indeterminateLocalIds: [], invokedLocalMessages: [] })
         expect(queuedStateCalls).toHaveLength(0)
     })
 
@@ -310,5 +488,34 @@ describe('POST /api/sessions/:id/messages/queued-state', () => {
         expect(response.status).toBe(400)
         expect(await response.json()).toMatchObject({ error: 'Invalid body' })
         expect(queuedStateCalls).toHaveLength(0)
+    })
+})
+
+describe('POST /api/sessions/:id/messages/:messageId/steer', () => {
+    it('forwards the steer request to the engine and returns its result', async () => {
+        const calls: Array<{ sessionId: string; messageId: string }> = []
+        const { app } = createApp({
+            steerQueuedMessage: async (sessionId: string, messageId: string) => {
+                calls.push({ sessionId, messageId })
+                return { status: 'steered', localId: 'local-1' }
+            }
+        })
+
+        const response = await app.request('/api/sessions/session-1/messages/msg-1/steer', { method: 'POST' })
+
+        expect(response.status).toBe(200)
+        expect(calls).toEqual([{ sessionId: 'session-1', messageId: 'msg-1' }])
+        expect(await response.json()).toEqual({ status: 'steered', localId: 'local-1' })
+    })
+
+    it('rejects inactive sessions', async () => {
+        const { app } = createApp({ active: false })
+
+        const response = await app.request('/api/sessions/session-1/messages/msg-1/steer', { method: 'POST' })
+
+        expect(response.status).toBe(409)
+        const body = await response.json() as { error: string; code: string }
+        expect(body.error).toBe('Session is inactive')
+        expect(body.code).toBe('session_inactive')
     })
 })

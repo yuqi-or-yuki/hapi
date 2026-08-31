@@ -3,14 +3,25 @@ import { writeFileSync, mkdirSync, unlinkSync, existsSync } from 'node:fs';
 import { configuration } from '@/configuration';
 import { logger } from '@/ui/logger';
 import { getHappyCliCommand } from '@/utils/spawnHappyCLI';
+import { shellJoin } from '@/modules/common/shellQuote';
 
 type HookCommandConfig = {
-    matcher: string;
+    matcher?: string;
     hooks: Array<{
         type: 'command';
         command: string;
+        /** Per-command timeout in SECONDS (claude's hook schema). */
+        timeout?: number;
     }>;
 };
+
+// PreToolUse bridges a tool approval to the web and blocks the (synchronous)
+// hook until the user answers on their phone — which can take minutes. claude's
+// default command-hook timeout is 60s; on timeout the decision is dropped and
+// claude falls back to its own permission prompt (which renders in the TUI
+// and stalls the chat flow). Give the PreToolUse hook a generous timeout so a
+// human has time to respond.
+const PRE_TOOL_USE_TIMEOUT_SECONDS = 3600;
 
 type HookSettings = {
     hooksConfig?: {
@@ -18,6 +29,8 @@ type HookSettings = {
     };
     hooks: {
         SessionStart: HookCommandConfig[];
+        UserPromptSubmit?: HookCommandConfig[];
+        PreToolUse?: HookCommandConfig[];
     };
 };
 
@@ -25,38 +38,59 @@ export type HookSettingsOptions = {
     filenamePrefix: string;
     logLabel: string;
     hooksEnabled?: boolean;
+    /**
+     * Also forward UserPromptSubmit and PreToolUse hooks. Unlike SessionStart,
+     * their payloads carry `permission_mode`, letting HAPI track the mode the
+     * user picks inside the interactive TUI (shift+tab). Keep this off for the
+     * remote SDK process: these hooks block Claude while the forwarder runs,
+     * and remote permission state is owned by the hub/RPC path anyway.
+     */
+    trackPermissionMode?: boolean;
+    /**
+     * Register a PreToolUse hook (PTY mode only). The SDK path routes tool
+     * approvals through the SDK's canUseTool callback, so it must NOT register
+     * PreToolUse or every tool would be double-handled. PTY sessions have no
+     * SDK callback, so they rely on this hook to bridge tool approvals to the
+     * web. The same forwarder command serves both events; it branches on the
+     * stdin `hook_event_name`.
+     */
+    includePreToolUse?: boolean;
 };
 
-function shellQuote(value: string): string {
-    if (value.length === 0) {
-        return '""';
-    }
-
-    if (/^[A-Za-z0-9_\/:=-]+$/.test(value)) {
-        return value;
-    }
-
-    return '"' + value.replace(/(["\\$`])/g, '\\$1') + '"';
-}
-
-function shellJoin(parts: string[]): string {
-    return parts.map(shellQuote).join(' ');
-}
-
-function buildHookSettings(command: string, hooksEnabled?: boolean): HookSettings {
-    const hooks: HookSettings['hooks'] = {
-        SessionStart: [
+export function buildHookSettings(
+    command: string,
+    hooksEnabled?: boolean,
+    trackPermissionMode?: boolean,
+    includePreToolUse?: boolean
+): HookSettings {
+    const commandHook = {
+        hooks: [
             {
-                matcher: '*',
-                hooks: [
-                    {
-                        type: 'command',
-                        command
-                    }
-                ]
+                type: 'command' as const,
+                command
             }
         ]
     };
+    const hooks: HookSettings['hooks'] = {
+        SessionStart: [{ matcher: '*', ...commandHook }]
+    };
+    if (trackPermissionMode) {
+        hooks.UserPromptSubmit = [commandHook];
+        hooks.PreToolUse = [{ matcher: '*', ...commandHook }];
+    }
+
+    if (includePreToolUse) {
+        // matcher '*' matches every tool name (claude's matcher: !q || q==='*' → all).
+        // The same forwarder command serves both events; it branches on the
+        // stdin hook_event_name. The long timeout keeps the (blocking) hook
+        // alive while the user approves on their phone.
+        hooks.PreToolUse = [
+            {
+                matcher: '*',
+                hooks: [{ type: 'command', command, timeout: PRE_TOOL_USE_TIMEOUT_SECONDS }]
+            }
+        ];
+    }
 
     const settings: HookSettings = { hooks };
     if (hooksEnabled !== undefined) {
@@ -81,6 +115,7 @@ export function generateHookSettingsFile(
 
     const { command, args } = getHappyCliCommand([
         'hook-forwarder',
+        '--flavor', 'claude',
         '--port',
         String(port),
         '--token',
@@ -88,7 +123,12 @@ export function generateHookSettingsFile(
     ]);
     const hookCommand = shellJoin([command, ...args]);
 
-    const settings = buildHookSettings(hookCommand, options.hooksEnabled);
+    const settings = buildHookSettings(
+        hookCommand,
+        options.hooksEnabled,
+        options.trackPermissionMode,
+        options.includePreToolUse
+    );
 
     writeFileSync(filepath, JSON.stringify(settings, null, 4));
     logger.debug(`[${options.logLabel}] Created hook settings file: ${filepath}`);

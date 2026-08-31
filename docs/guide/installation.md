@@ -4,7 +4,7 @@ Install the HAPI CLI and set up the hub.
 
 ## Prerequisites
 
-- Claude Code, OpenAI Codex CLI, Cursor Agent CLI, Google Gemini CLI, or OpenCode CLI installed
+- At least one supported agent CLI installed (Claude Code, Codex, Cursor Agent, Grok Build, OpenCode, DeepSeek Harness ACP server, and more — see [Supported Agents](./agents.md))
 
 Verify your CLI is installed:
 
@@ -18,8 +18,8 @@ codex --version
 # For Cursor Agent CLI
 agent --version
 
-# For Google Gemini CLI
-gemini --version
+# For Grok Build CLI
+grok --version
 
 # For OpenCode CLI
 opencode --version
@@ -31,7 +31,7 @@ HAPI has three components:
 
 | Component | Role | Required |
 |-----------|------|----------|
-| **CLI** | Wraps AI agents (Claude/Codex/Cursor/Gemini/OpenCode), runs sessions | Yes |
+| **CLI** | Wraps AI coding agents, runs sessions | Yes |
 | **Hub** | Central coordinator: persistence, real-time sync, remote access | Yes |
 | **Runner** | Background service for remote session spawning | Optional |
 
@@ -109,14 +109,18 @@ sudo mv ./hapi /usr/local/bin/
 <details>
 <summary>Build from source</summary>
 
+Requires Bun 1.4.0.
+
 ```bash
 git clone https://github.com/tiann/hapi.git
 cd hapi
 bun install
 bun build:single-exe
 
-./cli/dist/hapi
+./cli/dist-exe/<target>/hapi
 ```
+
+`<target>` is the Bun build target (e.g., `bun-linux-x64`, `bun-darwin-arm64`); it defaults to the host platform and architecture.
 </details>
 
 ## Hub setup
@@ -140,7 +144,7 @@ The terminal displays a URL and QR code. Scan to access from anywhere.
 - No configuration needed
 - Works behind NAT, firewalls, and any network
 
-> **Tip:** The relay uses UDP by default. If you experience connectivity issues, set `HAPI_RELAY_FORCE_TCP=true` to force TCP mode.
+For relay key management, TCP fallback, and self-hosted tunnel alternatives, see [Deployment](./deployment.md#relay-tunnel-details).
 
 ### Local Only
 
@@ -184,13 +188,37 @@ On first run, HAPI:
 | `CORS_ORIGINS` | - | `corsOrigins` | Allowed CORS origins (comma-separated) |
 | `TELEGRAM_BOT_TOKEN` | - | `telegramBotToken` | Telegram Bot API token |
 | `TELEGRAM_NOTIFICATION` | `true` | `telegramNotification` | Enable Telegram notifications |
+| `SERVERCHAN_SENDKEY` | - | `serverChanSendKey` | Server酱 (ServerChan) SendKey for push notifications |
+| `SERVERCHAN_NOTIFICATION` | `true` | `serverChanNotification` | Enable ServerChan notifications |
+| `SERVERCHAN_BACKGROUND_ONLY` | `false` | `serverChanBackgroundOnly` | Only send ServerChan notifications when no visible HAPI connection exists in the namespace |
+| `HAPI_RELAY_API` | `relay.hapi.run` | - | Relay API domain for the public relay |
+| `HAPI_RELAY_AUTH` | Per-hub key issued by the relay | `relayAuthKey` | Relay auth key override (set only when an operator provides a key) |
 | `HAPI_RELAY_FORCE_TCP` | `false` | - | Force TCP mode for relay |
+| `HAPI_OFFICIAL_WEB_URL` | `https://app.hapi.run` | - | Official web app origin, added to CORS when the relay is enabled |
 | `VAPID_SUBJECT` | `mailto:admin@hapi.run` | - | Web Push contact info |
 | `HAPI_HOME` | `~/.hapi` | - | Config directory path |
 | `DB_PATH` | `~/.hapi/hapi.db` | - | Database file path |
-| `ELEVENLABS_API_KEY` | - | - | ElevenLabs API key for voice |
+| `HAPI_EXPERIMENTAL` | - | - | CLI: enable experimental features (`true`/`1`/`yes`) |
+| `ELEVENLABS_API_KEY` | - | Settings / env | ElevenLabs API key for voice + dictation |
 | `ELEVENLABS_AGENT_ID` | Auto-created | - | Custom ElevenLabs agent ID |
+| `OPENAI_API_KEY` | - | Settings / env | OpenAI API key for dictation (`gpt-transcribe` / `gpt-live-transcribe`) |
+| `DEEPGRAM_API_KEY` | - | Settings / env | Deepgram API key for dictation (`nova-3`) |
+| `GROQ_API_KEY` | - | Settings / env | Groq API key for dictation (`whisper-large-v3`) |
+| `TRANSCRIPTION_BASE_URL` | - | Settings / env | OpenAI-compatible/local transcription base URL |
+| `TRANSCRIPTION_MODEL` | - | Settings / env | Model for the OpenAI-compatible transcription endpoint |
+| `TRANSCRIPTION_API_KEY` | - | Settings / env | Optional bearer token for that endpoint |
+| `HAPI_TITLE_PROVIDER_BASE_URL` | - | - | Server-only OpenAI-compatible Chat Completions base URL for generated session titles |
+| `HAPI_TITLE_PROVIDER_API_KEY` | - | - | Server-only API key for generated session titles; never sent to the browser |
+| `HAPI_TITLE_PROVIDER_MODEL` | - | - | Server-only lightweight model used for generated session titles |
+| `HAPI_TITLE_SUGGESTION_RATE_LIMIT` | `5` | - | Maximum title suggestions per session in the rate-limit window |
+| `HAPI_TITLE_SUGGESTION_RATE_WINDOW_MS` | `600000` | - | Title suggestion rate-limit window in milliseconds |
 </details>
+
+The session rename dialog's **Generate** action is unavailable until all three
+`HAPI_TITLE_PROVIDER_*` variables are configured on the Hub. The provider is
+called only on demand; the existing manual rename flow does not require these
+variables. Each request sends recent visible user/assistant conversation text
+(up to 200 stored messages and a bounded prompt) to that configured provider.
 
 <details>
 <summary>settings.json example</summary>
@@ -212,7 +240,7 @@ When ENV values are set and not present in settings.json, they are automatically
 }
 ```
 
-JSON Schema: [settings.schema.json](https://hapi.run/schemas/settings.schema.json)
+JSON Schema: [settings.schema.json](https://hapi.run/docs/schemas/settings.schema.json)
 </details>
 
 ## CLI setup
@@ -245,116 +273,16 @@ Each machine gets a unique ID stored in `~/.hapi/settings.json`. This allows:
 - Remote session spawning on specific machines
 - Machine health monitoring
 
-## Operations
+### Diagnostics
 
-### Self-hosted tunnels
-
-If you prefer not to use the public relay (e.g., for lower latency or self-managed infrastructure), you can use these alternatives:
-
-<details>
-<summary>Cloudflare Tunnel</summary>
-
-https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/
-
-> **Note:** Cloudflare Quick Tunnels (TryCloudflare) are not supported because they [do not support SSE](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/), which HAPI uses for real-time updates. Use a Named Tunnel instead.
-
-**Named tunnel setup:**
+Run `hapi doctor` for a full diagnostics report: configuration, runner status, logs, and relevant environment info.
 
 ```bash
-# Install cloudflared: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
-
-# Create and configure a named tunnel
-cloudflared tunnel create hapi
-cloudflared tunnel route dns hapi hapi.yourdomain.com
-
-# Run the tunnel
-cloudflared tunnel --protocol http2 run hapi
+hapi doctor          # Diagnostics report
+hapi doctor clean    # Kill runaway hapi processes
 ```
 
-> **Tip:** Use `--protocol http2` instead of QUIC (the default) to avoid potential timeout issues with long-lived connections.
-
-</details>
-
-<details>
-<summary>Tailscale</summary>
-
-https://tailscale.com/download
-
-```bash
-sudo tailscale up
-hapi hub
-```
-
-Access via your Tailscale IP:
-
-```
-http://100.x.x.x:3006
-```
-
-> **Note:** Plain `http://` on a Tailscale IP is not a secure browser context, so mic access for the [voice assistant](./voice-assistant.md) won't work (`navigator.mediaDevices` is unavailable). For voice, serve over HTTPS instead using Tailscale's built-in certs:
->
-> ```bash
-> tailscale serve --bg --https=443 localhost:3006
-> tailscale serve status  # prints your https://<machine>.<tailnet>.ts.net/ URL
-> ```
-</details>
-
-<details>
-<summary>Public IP / Reverse Proxy</summary>
-
-If the hub has a public IP, access directly via `http://your-hub-ip:3006`.
-
-Use HTTPS (via Nginx, Caddy, etc.) for production.
-
-**Self-signed certificates (HTTPS)**
-
-If `HAPI_API_URL` is set to an `https://...` URL with a self-signed (or otherwise untrusted) certificate, the CLI may fail with:
-
-```
-Error: self signed certificate
-```
-
-Recommended fixes (in order):
-
-1. Use a publicly trusted certificate (e.g., Let's Encrypt)
-2. Trust your private CA (recommended for private networks)
-3. Dev-only workaround: disable TLS verification (insecure)
-
-```bash
-# Preferred: trust your own CA
-export NODE_EXTRA_CA_CERTS="/path/to/your-ca.pem"
-
-# Dev-only workaround: disable TLS verification (INSECURE)
-export NODE_TLS_REJECT_UNAUTHORIZED=0
-```
-
-If you use the dev-only workaround, assume MITM risk; do not use on public networks.
-
-</details>
-
-### Telegram setup
-
-Enable Telegram notifications and Mini App access:
-
-1. Message [@BotFather](https://t.me/BotFather) and create a bot
-2. Set the bot token and public URL
-3. Start the hub and bind your account
-
-```bash
-export TELEGRAM_BOT_TOKEN="your-bot-token"
-export HAPI_PUBLIC_URL="https://your-public-url"
-
-hapi hub
-```
-
-Then message your bot with `/start`, open the app, and enter your `CLI_API_TOKEN`.
-
-**Troubleshooting:**
-
-- If binding fails, verify `HAPI_PUBLIC_URL` is accessible from the internet
-- Telegram Mini App requires HTTPS (not HTTP)
-
-### Runner setup
+## Runner setup
 
 Run a background service for remote session spawning:
 
@@ -371,233 +299,57 @@ With the runner running:
 - You can spawn sessions remotely from the web app
 - Sessions persist even when the terminal is closed
 
-<details>
-<summary>Alternative: pm2</summary>
+#### Split hub + remote runner (peer discovery)
 
-If you prefer pm2 for process management:
+When the hub runs on one host and the runner on another, agents inside runner-spawned sessions should discover peers via MCP **`list_peers`** (same hub credentials as the session CLI). Prefer that over shelling `hapi ping-peer --list`.
+
+```
+[Hub host]  hapi hub          ← sessions DB + /api/sessions
+     ▲
+     │ HAPI_API_URL + CLI_API_TOKEN
+     │
+[Runner host]  hapi runner start  → spawns session CLIs
+                     │
+                     ▼
+              agent session  → MCP list_peers / inspect_peer / ping_peer
+```
+
+On the runner host, configure the **same** hub URL and token the hub uses:
 
 ```bash
-pm2 start "hapi runner start-sync" --name hapi-runner
-pm2 save
+export HAPI_API_URL="http://your-hub:3006"   # or Tailscale / public URL
+export CLI_API_TOKEN="your-token-here"
+# or: hapi auth login   # saves the token; still set HAPI_API_URL for a remote hub
+hapi runner start
 ```
-</details>
 
-### Background service deployment
+Session CLI may export an **explicit** non-default `HAPI_API_URL` (from env or settings) into child env so shell helpers hit the same remote hub. It does **not** mirror `CLI_API_TOKEN` into wrapped agents (settings/prompt-backed secrets stay out of agent env; a fresh `hapi` re-reads `~/.hapi/settings.json`, and systemd/env tokens already inherit). Prefer MCP `list_peers` inside a session. Web terminal PTYs still strip hub secrets. If `--list` fails with an auth/URL error, the message points at `hapi auth login` and the configured hub URL.
 
-Keep HAPI running persistently so it survives terminal closes, system restarts, and continues running in the background.
-
-<details>
-<summary>Quick: nohup</summary>
-
-Simple one-liner for quick background runs:
+Additional runner commands:
 
 ```bash
-# Hub
-nohup hapi hub --relay > ~/.hapi/logs/hub.log 2>&1 &
-
-# Runner
-nohup hapi runner start-sync > ~/.hapi/logs/runner.log 2>&1 &
+hapi runner list                      # List active sessions
+hapi runner stop-session <sessionId>  # Stop a single session managed by the runner
 ```
 
-View logs:
+Use `--workspace-root <path>` to restrict which directories the runner can browse and spawn sessions in. Repeat the flag to allow multiple directories; supports `~` expansion:
 
 ```bash
-tail -f ~/.hapi/logs/hub.log
-tail -f ~/.hapi/logs/runner.log
+hapi runner start --workspace-root ~/projects --workspace-root ~/work
 ```
 
-Stop processes:
+Without `--workspace-root`, manually entered spawn paths remain unrestricted.
+Session directory autocomplete and native pickers browse only beneath the
+runner's home directory; configuring roots makes both browsing and spawning
+use those roots instead.
 
-```bash
-pkill -f "hapi hub"
-pkill -f "hapi runner"
-```
-</details>
+For running the hub and runner as persistent background services (pm2, launchd, systemd), see [Deployment](./deployment.md). Supervised installs should set `HAPI_RUNNER_SUPERVISED=1` on the runner process (systemd `Environment=` / pm2 `--env`) so the web **Restart** control can safely stop-runner knowing the supervisor will cold-start it.
 
-<details>
-<summary>pm2 (recommended for Node.js users)</summary>
+### Multi-machine hubs
 
-pm2 provides process management with auto-restart on crashes and system reboot.
+You can run **one hub** and **runners on many machines** (each machine installs its own CLI). When you upgrade the hub, upgrade the HAPI CLI on every machine that parents sessions. After the CLI binary on disk changes, that machine’s runner normally **self-restarts** via version handoff (unless `HAPI_DISABLE_VERSION_HANDOFF=1`). Until a runner reports the capabilities the hub requires, the web UI shows a **Runner out of date** banner (minimizable / snoozeable) with the host name and upgrade steps. The banner’s per-host **Restart** is only an escape hatch when handoff is stuck or disabled — the hub never downloads or installs packages on remotes.
 
-```bash
-# Install pm2
-npm install -g pm2
-
-# Start hub and runner
-pm2 start "hapi hub --relay" --name hapi-hub
-pm2 start "hapi runner start-sync" --name hapi-runner
-
-# View status and logs
-pm2 status
-pm2 logs hapi-hub
-pm2 logs hapi-runner
-
-# Auto-restart on system reboot
-pm2 startup    # Follow the printed instructions
-pm2 save       # Save current process list
-```
-</details>
-
-<details>
-<summary>macOS: launchd</summary>
-
-Create plist files for automatic startup on macOS.
-
-**Hub** (`~/Library/LaunchAgents/com.hapi.hub.plist`):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.hapi.hub</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/hapi</string>
-        <string>hub</string>
-        <string>--relay</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/.hapi/logs/hub.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/.hapi/logs/hub.log</string>
-</dict>
-</plist>
-```
-
-**Runner** (`~/Library/LaunchAgents/com.hapi.runner.plist`):
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.hapi.runner</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/hapi</string>
-        <string>runner</string>
-        <string>start-sync</string>
-    </array>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/Users/YOUR_USERNAME/.hapi/logs/runner.log</string>
-    <key>StandardErrorPath</key>
-    <string>/Users/YOUR_USERNAME/.hapi/logs/runner.log</string>
-</dict>
-</plist>
-```
-
-Load/unload services:
-
-```bash
-# Load (start)
-launchctl load ~/Library/LaunchAgents/com.hapi.hub.plist
-launchctl load ~/Library/LaunchAgents/com.hapi.runner.plist
-
-# Unload (stop)
-launchctl unload ~/Library/LaunchAgents/com.hapi.hub.plist
-launchctl unload ~/Library/LaunchAgents/com.hapi.runner.plist
-```
-
-> **macOS sleep note:** macOS may suspend background processes when the display sleeps. Use `caffeinate` to prevent this:
-> ```bash
-> caffeinate -dimsu hapi hub --relay
-> ```
-> Or run `caffeinate -dimsu` in a separate terminal while HAPI is running.
-</details>
-
-<details>
-<summary>Linux: systemd</summary>
-
-Create user-level systemd services for automatic startup.
-
-**Hub** (`~/.config/systemd/user/hapi-hub.service`):
-
-```ini
-[Unit]
-Description=HAPI Hub
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/hapi hub --relay
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-**Runner** (`~/.config/systemd/user/hapi-runner.service`):
-
-```ini
-[Unit]
-Description=HAPI Runner
-After=network.target hapi-hub.service
-
-[Service]
-Type=simple
-KillMode=process
-ExecStart=/usr/local/bin/hapi runner start-sync
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=default.target
-```
-
-> **Why `KillMode=process`?** The runner spawns each agent session as a detached child process (`detached: true` in `cli/src/runner/run.ts`) so that sessions stay alive when the runner exits. Without `KillMode=process`, systemd's default `KillMode=control-group` sends SIGTERM to every PID in the runner's cgroup when the unit stops, defeating the detach and forcibly archiving every running session. `KillMode=process` preserves the contract: stopping or restarting the runner only signals the runner itself; agent sessions stay alive, and a fresh runner re-establishes control via the existing socket.io reconnect path. This applies to runner upgrades, manual restarts, and any reboot in which the runner unit is stopped before agents have finished.
-
-Enable and start:
-
-```bash
-# Reload systemd
-systemctl --user daemon-reload
-
-# Enable (auto-start on login)
-systemctl --user enable hapi-hub
-systemctl --user enable hapi-runner
-
-# Start now
-systemctl --user start hapi-hub
-systemctl --user start hapi-runner
-
-# View status/logs
-systemctl --user status hapi-hub
-journalctl --user -u hapi-hub -f
-```
-
-> **Persist after logout:** To keep services running even when not logged in:
-> ```bash
-> loginctl enable-linger $USER
-> ```
-</details>
-
-### Voice assistant setup
-
-Enable voice control:
-
-1. Get an API key from [elevenlabs.io](https://elevenlabs.io/app/settings/api-keys)
-2. Set the environment variable:
-
-```bash
-export ELEVENLABS_API_KEY="your-api-key"
-hapi hub --relay
-```
-
-See [Voice Assistant](./voice-assistant.md) for usage details.
-
-### Security notes
+## Security notes
 
 - Keep tokens secret and rotate if needed
 - Use HTTPS for public access

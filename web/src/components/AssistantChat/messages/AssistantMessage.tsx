@@ -1,5 +1,4 @@
-import { MessagePrimitive, useAssistantState } from '@assistant-ui/react'
-import { MarkdownText } from '@/components/assistant-ui/markdown-text'
+import { MessagePrimitive, useAuiState, type TextMessagePart } from '@assistant-ui/react'
 import { Reasoning, ReasoningGroup } from '@/components/assistant-ui/reasoning'
 import { HappyToolMessage } from '@/components/AssistantChat/messages/ToolMessage'
 import { CliOutputBlock } from '@/components/CliOutputBlock'
@@ -8,13 +7,16 @@ import { getAssistantCopyText } from '@/components/AssistantChat/messages/assist
 import { getConversationMessageAnchorId } from '@/chat/outline'
 import { CodexReviewCard } from '@/components/AssistantChat/messages/CodexReviewCard'
 import { MessageActions } from '@/components/AssistantChat/messages/MessageActions'
+import { useHappyChatContext } from '@/components/AssistantChat/context'
+import { NotifySummaryText } from '@/components/AssistantChat/messages/NotifySummaryText'
+import { useSessionSummaryInChat } from '@/hooks/useSessionSummaryInChat'
 
 const TOOL_COMPONENTS = {
     Fallback: HappyToolMessage
 } as const
 
 const MESSAGE_PART_COMPONENTS = {
-    Text: MarkdownText,
+    Text: NotifySummaryText,
     Reasoning: Reasoning,
     ReasoningGroup: ReasoningGroup,
     tools: TOOL_COMPONENTS
@@ -45,36 +47,50 @@ function SentTime({ value }: { value: Date | number | string | null | undefined 
 }
 
 export function HappyAssistantMessage() {
-    const messageId = useAssistantState(({ message }) => message.id)
-    const isCliOutput = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const ctx = useHappyChatContext()
+    const showSessionSummaryInChat = useSessionSummaryInChat()
+    const messageId = useAuiState((s) => s.message.id)
+    const elementId = getConversationMessageAnchorId(messageId)
+    const isCliOutput = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'cli-output'
     })
-    const codexReview = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const codexReview = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         return custom?.kind === 'codex-review' ? custom.review : undefined
     })
-    const cliText = useAssistantState(({ message }) => {
-        const custom = message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
+    const cliText = useAuiState((s) => {
+        const custom = s.message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined
         if (custom?.kind !== 'cli-output') return ''
-        return message.content.find((part) => part.type === 'text')?.text ?? ''
+        return s.message.content.find((part): part is TextMessagePart => part.type === 'text')?.text ?? ''
     })
-    const toolOnly = useAssistantState(({ message }) => {
-        if (message.role !== 'assistant') return false
-        const parts = message.content
+    const toolOnly = useAuiState((s) => {
+        if (s.message.role !== 'assistant') return false
+        const parts = s.message.content
         return parts.length > 0 && parts.every((part) => part.type === 'tool-call')
     })
-    const copyText = useAssistantState(({ message }) => {
-        if (message.role !== 'assistant') return ''
-        return getAssistantCopyText(message.content)
+    const copyText = useAuiState((s) => {
+        if (s.message.role !== 'assistant') return ''
+        return getAssistantCopyText(s.message.content, {
+            stripNotifySummary: !showSessionSummaryInChat
+        })
     })
 
-    const durationMs = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.durationMs)
-    const usage = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.usage)
-    const messageModel = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.model)
-    const turnCount = useAssistantState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.turnCount)
+    const durationMs = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.durationMs)
+    const usage = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.usage)
+    const messageModel = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.model)
+    const turnCount = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.turnCount)
+    const roundSummary = useAuiState(({ message }) => (message.metadata.custom as Partial<HappyChatMessageMetadata> | undefined)?.roundSummary)
 
-    const metadata = { durationMs, usage, model: messageModel ?? null, turnCount }
+    const metadata = { durationMs, usage, model: messageModel ?? null, turnCount, roundSummary }
+
+    const history = ctx.metadata?.capabilities?.conversationHistory
+    const showForkCurrent = Boolean(
+        history?.forkCurrent
+        && ctx.isLatestCompletedBoundary?.(messageId)
+        && !ctx.disabled
+        && ctx.onForkConversation
+    )
 
     const rootClass = toolOnly
         ? 'py-1 min-w-0 max-w-full overflow-x-hidden'
@@ -82,7 +98,8 @@ export function HappyAssistantMessage() {
 
     return (
         <MessagePrimitive.Root
-            id={getConversationMessageAnchorId(messageId)}
+            id={elementId}
+            data-hapi-message-role="assistant"
             className={`happy-message ${rootClass} scroll-mt-4`}
         >
             {isCliOutput
@@ -90,7 +107,15 @@ export function HappyAssistantMessage() {
                 : codexReview
                     ? <CodexReviewCard review={codexReview} />
                     : <MessagePrimitive.Content components={MESSAGE_PART_COMPONENTS} />}
-            <MessageActions align="start" copyText={copyText || undefined} metadata={metadata} />
+            <MessageActions
+                align="start"
+                copyText={copyText || undefined}
+                metadata={metadata}
+                messageElementId={elementId}
+                showFork={showForkCurrent}
+                historyActionPending={ctx.historyActionPending}
+                onFork={showForkCurrent ? () => ctx.onForkConversation!() : undefined}
+            />
         </MessagePrimitive.Root>
     )
 }

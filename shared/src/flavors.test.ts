@@ -10,6 +10,11 @@ import {
 } from './flavors'
 
 describe('hasCapability', () => {
+    test('agy supports model-change but not effort', () => {
+        expect(hasCapability('agy', Capabilities.ModelChange)).toBe(true)
+        expect(hasCapability('agy', Capabilities.Effort)).toBe(false)
+    })
+
     test('claude supports model-change', () => {
         expect(hasCapability('claude', Capabilities.ModelChange)).toBe(true)
     })
@@ -21,6 +26,11 @@ describe('hasCapability', () => {
     test('gemini supports model-change but not effort', () => {
         expect(hasCapability('gemini', Capabilities.ModelChange)).toBe(true)
         expect(hasCapability('gemini', Capabilities.Effort)).toBe(false)
+    })
+
+    test('dsh has no runtime model or effort switching', () => {
+        expect(hasCapability('dsh', Capabilities.ModelChange)).toBe(false)
+        expect(hasCapability('dsh', Capabilities.Effort)).toBe(false)
     })
 
     test('codex supports model-change but not effort', () => {
@@ -48,6 +58,11 @@ describe('hasCapability', () => {
         expect(hasCapability('kimi', Capabilities.Effort)).toBe(false)
     })
 
+    test('copilot supports model-change but not effort', () => {
+        expect(hasCapability('copilot', Capabilities.ModelChange)).toBe(true)
+        expect(hasCapability('copilot', Capabilities.Effort)).toBe(false)
+    })
+
     test('grok supports runtime model and effort switching through ACP', () => {
         expect(hasCapability('grok', Capabilities.ModelChange)).toBe(true)
         expect(hasCapability('grok', Capabilities.Effort)).toBe(true)
@@ -65,13 +80,16 @@ describe('hasCapability', () => {
 
 describe('getFlavorLabel', () => {
     test('known flavors return display names', () => {
+        expect(getFlavorLabel('agy')).toBe('Antigravity')
         expect(getFlavorLabel('claude')).toBe('Claude')
         expect(getFlavorLabel('gemini')).toBe('Gemini')
         expect(getFlavorLabel('codex')).toBe('Codex')
+        expect(getFlavorLabel('dsh')).toBe('DeepSeek Harness')
         expect(getFlavorLabel('cursor')).toBe('Cursor')
         expect(getFlavorLabel('opencode')).toBe('OpenCode')
         expect(getFlavorLabel('pi')).toBe('Pi')
         expect(getFlavorLabel('kimi')).toBe('Kimi')
+        expect(getFlavorLabel('copilot')).toBe('Copilot')
         expect(getFlavorLabel('grok')).toBe('Grok Build')
     })
 
@@ -87,13 +105,16 @@ describe('getFlavorLabel', () => {
 
 describe('isKnownFlavor', () => {
     test('returns true for registered flavors', () => {
+        expect(isKnownFlavor('agy')).toBe(true)
         expect(isKnownFlavor('claude')).toBe(true)
         expect(isKnownFlavor('gemini')).toBe(true)
         expect(isKnownFlavor('codex')).toBe(true)
+        expect(isKnownFlavor('dsh')).toBe(true)
         expect(isKnownFlavor('cursor')).toBe(true)
         expect(isKnownFlavor('opencode')).toBe(true)
         expect(isKnownFlavor('pi')).toBe(true)
         expect(isKnownFlavor('kimi')).toBe(true)
+        expect(isKnownFlavor('copilot')).toBe(true)
         expect(isKnownFlavor('grok')).toBe(true)
     })
 
@@ -110,6 +131,7 @@ describe('convenience functions', () => {
     })
 
     test('supportsModelChange matches hasCapability', () => {
+        expect(supportsModelChange('agy')).toBe(true)
         expect(supportsModelChange('claude')).toBe(true)
         expect(supportsModelChange('gemini')).toBe(true)
         expect(supportsModelChange('codex')).toBe(true)

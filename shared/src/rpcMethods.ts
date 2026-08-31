@@ -10,6 +10,7 @@ export const RPC_METHODS = {
     StopRunner: 'stop-runner',
     ListMachineDirectory: 'list-directory',
     PathExists: 'path-exists',
+    AgentAvailability: 'agent-availability',
     CursorChatStoreStatus: 'cursor-chat-store-status',
     GitStatus: 'git-status',
     GitDiffNumstat: 'git-diff-numstat',
@@ -18,6 +19,7 @@ export const RPC_METHODS = {
     ReadGeneratedImage: 'readGeneratedImage',
     WriteFile: 'writeFile',
     ListDirectory: 'listDirectory',
+    StatFiles: 'statFiles',
     GetDirectoryTree: 'getDirectoryTree',
     UploadFile: 'uploadFile',
     DeleteUpload: 'deleteUpload',
@@ -27,16 +29,27 @@ export const RPC_METHODS = {
     ListSlashCommands: 'listSlashCommands',
     ListSkills: 'listSkills',
     ListCodexModels: 'listCodexModels',
+    ListPiModelsForMachine: 'listPiModelsForMachine',
     ListCodexSessions: 'listCodexSessions',
     ArchiveCodexSession: 'archiveCodexSession',
     ListCursorModels: 'listCursorModels',
     ListPiModels: 'listPiModels',
+    ListPiSessions: 'listPiSessions',
     ListOpencodeModels: 'listOpencodeModels',
     ListOpencodeModelsForCwd: 'listOpencodeModelsForCwd',
     ListGrokModelsForCwd: 'listGrokModelsForCwd',
     ListGrokModels: 'listGrokModels',
     ListGrokReasoningEffortOptions: 'listGrokReasoningEffortOptions',
-    ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions'
+    ListCopilotModelsForCwd: 'listCopilotModelsForCwd',
+    ListCopilotModels: 'listCopilotModels',
+    ListOpencodeReasoningEffortOptions: 'listOpencodeReasoningEffortOptions',
+    ListAgyModels: 'listAgyModels',
+    /** Deliver one queued message into the active Pi turn (native steer). */
+    SteerQueuedMessage: 'steer-queued-message',
+    ForkConversation: 'fork-conversation',
+    RewindConversation: 'rewind-conversation',
 } as const
+
+export const RPC_TARGET_MISSING_ERROR_CODE = 'rpc_target_missing' as const
 
 export type RpcMethod = typeof RPC_METHODS[keyof typeof RPC_METHODS]
