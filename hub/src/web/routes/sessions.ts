@@ -16,7 +16,7 @@ import {
     toSessionSummary,
     UploadFileRequestSchema
 } from '@hapi/protocol'
-import { existsSync, readFileSync, readdirSync } from 'fs'
+import { readFile, readdir } from 'fs/promises'
 import { join } from 'path'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand } from '@hapi/protocol/apiTypes'
@@ -72,13 +72,35 @@ function isPidAlive(pid: number): boolean {
     try { process.kill(pid, 0); return true } catch { return false }
 }
 
-function isNativeLoopActive(sessionPath: string, hapiSessionId?: string): boolean {
+// Badge helpers read files inside session working directories (often under
+// ~/Documents). They must never run synchronously on the event loop: if macOS
+// TCC revokes the hub's access to those folders (e.g. after a binary rebuild
+// invalidates the grant), a sync open can block indefinitely on a pending
+// permission prompt and wedge the single-threaded hub. Everything here uses
+// fs/promises so a stuck read only parks an I/O pool thread.
+async function readFileIfExists(path: string): Promise<string | null> {
+    try {
+        return await readFile(path, 'utf-8')
+    } catch {
+        return null
+    }
+}
+
+async function readdirIfExists(path: string): Promise<string[]> {
+    try {
+        return await readdir(path)
+    } catch {
+        return []
+    }
+}
+
+async function isNativeLoopActive(sessionPath: string, hapiSessionId?: string): Promise<boolean> {
     // Badge shows only while the loop is actively running (lock held + PID alive).
     // When the loop finishes, releaseLock removes the lock and the badge clears.
-    const lockPath = join(sessionPath, '.hapi', 'loop-lock')
-    if (!existsSync(lockPath)) return false
+    const raw = await readFileIfExists(join(sessionPath, '.hapi', 'loop-lock'))
+    if (raw === null) return false
     try {
-        const data = JSON.parse(readFileSync(lockPath, 'utf-8'))
+        const data = JSON.parse(raw)
         if (hapiSessionId && data.hapiSessionId && data.hapiSessionId !== hapiSessionId) return false
         return isPidAlive(data.pid)
     } catch {
@@ -86,25 +108,16 @@ function isNativeLoopActive(sessionPath: string, hapiSessionId?: string): boolea
     }
 }
 
-function readDispatcherSessionId(sessionPath: string): string | null {
-    const sidPath = join(sessionPath, '.loop-logs', 'hapi-session-id')
-    if (!existsSync(sidPath)) return null
-    try {
-        return readFileSync(sidPath, 'utf-8').trim() || null
-    } catch {
-        return null
-    }
+async function readDispatcherSessionId(sessionPath: string): Promise<string | null> {
+    const raw = await readFileIfExists(join(sessionPath, '.loop-logs', 'hapi-session-id'))
+    return raw?.trim() || null
 }
 
-function isDispatcherLoopAlive(sessionPath: string): boolean {
-    const pidPath = join(sessionPath, '.loop-logs', 'pid')
-    if (!existsSync(pidPath)) return false
-    try {
-        const pid = parseInt(readFileSync(pidPath, 'utf-8').trim(), 10)
-        return !isNaN(pid) && isPidAlive(pid)
-    } catch {
-        return false
-    }
+async function isDispatcherLoopAlive(sessionPath: string): Promise<boolean> {
+    const raw = await readFileIfExists(join(sessionPath, '.loop-logs', 'pid'))
+    if (raw === null) return false
+    const pid = parseInt(raw.trim(), 10)
+    return !isNaN(pid) && isPidAlive(pid)
 }
 
 /**
@@ -113,29 +126,22 @@ function isDispatcherLoopAlive(sessionPath: string): boolean {
  * would never be found. Returns session IDs of worktree loops that are still RUNNING
  * (badge clears once the loop finishes).
  */
-function collectWorktreeLoopOwners(basePath: string): string[] {
+async function collectWorktreeLoopOwners(basePath: string): Promise<string[]> {
     const owners: string[] = []
     const worktreesDir = join(basePath, '.claude', 'worktrees')
-    if (!existsSync(worktreesDir)) return owners
-    let entries: string[]
-    try {
-        entries = readdirSync(worktreesDir)
-    } catch {
-        return owners
-    }
-    for (const name of entries) {
+    for (const name of await readdirIfExists(worktreesDir)) {
         if (!name.startsWith('loop-')) continue
         const wt = join(worktreesDir, name)
         // Dispatcher claim — only counts while the loop is still alive
-        if (isDispatcherLoopAlive(wt)) {
-            const claimed = readDispatcherSessionId(wt)
+        if (await isDispatcherLoopAlive(wt)) {
+            const claimed = await readDispatcherSessionId(wt)
             if (claimed) owners.push(claimed)
         }
         // HAPI-native lock carrying a session id — only while alive
-        const lock = join(wt, '.hapi', 'loop-lock')
-        if (existsSync(lock)) {
+        const raw = await readFileIfExists(join(wt, '.hapi', 'loop-lock'))
+        if (raw !== null) {
             try {
-                const data = JSON.parse(readFileSync(lock, 'utf-8'))
+                const data = JSON.parse(raw)
                 if (data.hapiSessionId && isPidAlive(data.pid)) owners.push(data.hapiSessionId)
             } catch {}
         }
@@ -144,24 +150,16 @@ function collectWorktreeLoopOwners(basePath: string): string[] {
 }
 
 
-function readSessionIdFile(path: string): string | null {
-    if (!existsSync(path)) return null
-    try {
-        return readFileSync(path, 'utf-8').trim() || null
-    } catch {
-        return null
-    }
+async function readDebateSessionId(runDir: string): Promise<string | null> {
+    const raw = await readFileIfExists(join(runDir, 'hapi-session-id'))
+    return raw?.trim() || null
 }
 
-function readDebateSessionId(runDir: string): string | null {
-    return readSessionIdFile(join(runDir, 'hapi-session-id'))
-}
-
-function isDebateRunActive(runDir: string): boolean {
-    const statePath = join(runDir, 'state.json')
-    if (!existsSync(statePath)) return false
+async function isDebateRunActive(runDir: string): Promise<boolean> {
+    const raw = await readFileIfExists(join(runDir, 'state.json'))
+    if (raw === null) return false
     try {
-        const data = JSON.parse(readFileSync(statePath, 'utf-8')) as {
+        const data = JSON.parse(raw) as {
             status?: string
             orchestratorPid?: number
             blue?: { pid?: number; status?: string }
@@ -181,26 +179,19 @@ function isDebateRunActive(runDir: string): boolean {
     }
 }
 
-function collectDebateOwners(basePath: string): string[] {
+async function collectDebateOwners(basePath: string): Promise<string[]> {
     const owners: string[] = []
     const debatesDir = join(basePath, '.hapi-debates')
-    if (!existsSync(debatesDir)) return owners
-    let entries: string[]
-    try {
-        entries = readdirSync(debatesDir)
-    } catch {
-        return owners
-    }
-    for (const name of entries) {
+    for (const name of await readdirIfExists(debatesDir)) {
         const runDir = join(debatesDir, name)
-        if (!isDebateRunActive(runDir)) continue
-        const ownerId = readDebateSessionId(runDir)
+        if (!(await isDebateRunActive(runDir))) continue
+        const ownerId = await readDebateSessionId(runDir)
         if (ownerId) owners.push(ownerId)
     }
     return owners
 }
 
-function computeDebateActiveIds(sessions: Session[]): Set<string> {
+async function computeDebateActiveIds(sessions: Session[]): Promise<Set<string>> {
     const result = new Set<string>()
     const knownIds = new Set(sessions.map(s => s.id))
     const scannedBases = new Set<string>()
@@ -208,7 +199,7 @@ function computeDebateActiveIds(sessions: Session[]): Set<string> {
         const p = s.metadata?.path
         if (!p || scannedBases.has(p)) continue
         scannedBases.add(p)
-        for (const ownerId of collectDebateOwners(p)) {
+        for (const ownerId of await collectDebateOwners(p)) {
             if (knownIds.has(ownerId)) result.add(ownerId)
         }
     }
@@ -220,13 +211,13 @@ function computeDebateActiveIds(sessions: Session[]): Set<string> {
  * we have no session ID in the pid file, so we only mark the most-recently-updated
  * session per directory to avoid tagging every session in the project.
  */
-function computeLoopActiveIds(sessions: Session[]): Set<string> {
+async function computeLoopActiveIds(sessions: Session[]): Promise<Set<string>> {
     const result = new Set<string>()
     const knownIds = new Set(sessions.map(s => s.id))
 
     // HAPI-native lock: per-session match via hapiSessionId
     for (const s of sessions) {
-        if (s.metadata?.path && isNativeLoopActive(s.metadata.path, s.id)) {
+        if (s.metadata?.path && await isNativeLoopActive(s.metadata.path, s.id)) {
             result.add(s.id)
         }
     }
@@ -241,8 +232,8 @@ function computeLoopActiveIds(sessions: Session[]): Set<string> {
         byPath.get(p)!.push(s)
     }
     for (const [path, group] of byPath) {
-        if (!isDispatcherLoopAlive(path)) continue
-        const claimedSessionId = readDispatcherSessionId(path)
+        if (!(await isDispatcherLoopAlive(path))) continue
+        const claimedSessionId = await readDispatcherSessionId(path)
         if (claimedSessionId) {
             // Tag the session that called claim_loop
             const owner = group.find(s => s.id === claimedSessionId)
@@ -260,7 +251,7 @@ function computeLoopActiveIds(sessions: Session[]): Set<string> {
     for (const p of byPath.keys()) {
         if (scannedBases.has(p)) continue
         scannedBases.add(p)
-        for (const ownerId of collectWorktreeLoopOwners(p)) {
+        for (const ownerId of await collectWorktreeLoopOwners(p)) {
             if (knownIds.has(ownerId)) result.add(ownerId)
         }
     }
@@ -268,10 +259,59 @@ function computeLoopActiveIds(sessions: Session[]): Set<string> {
     return result
 }
 
+// One badge scan at a time, and requests never wait longer than the timeout:
+// they fall back to the last completed snapshot (initially empty). If a scan
+// wedges on blocked file access, the in-flight guard stays set, so no further
+// scans pile onto the stuck I/O pool and the hub keeps serving instantly.
+const BADGE_SCAN_TIMEOUT_MS = 1500
+
+interface BadgeSnapshot {
+    loopActiveIds: Set<string>
+    debateActiveIds: Set<string>
+}
+
+let badgeSnapshot: BadgeSnapshot = { loopActiveIds: new Set(), debateActiveIds: new Set() }
+let badgeScanInFlight: Promise<void> | null = null
+let badgeScanTimedOut = false
+
+async function currentBadgeIds(sessions: Session[]): Promise<BadgeSnapshot> {
+    if (!badgeScanInFlight) {
+        badgeScanInFlight = (async () => {
+            const [loopActiveIds, debateActiveIds] = await Promise.all([
+                computeLoopActiveIds(sessions),
+                computeDebateActiveIds(sessions)
+            ])
+            badgeSnapshot = { loopActiveIds, debateActiveIds }
+        })()
+            .catch(() => {})
+            .then(() => {
+                badgeScanInFlight = null
+                badgeScanTimedOut = false
+            })
+    } else if (badgeScanTimedOut) {
+        // The in-flight scan already blew its deadline once (blocked file access
+        // to a session directory?) — don't make every request re-wait for it.
+        return badgeSnapshot
+    }
+    const scan = badgeScanInFlight
+    const timedOut = await Promise.race([
+        scan.then(() => false),
+        new Promise<boolean>((resolve) => {
+            const timer = setTimeout(() => resolve(true), BADGE_SCAN_TIMEOUT_MS);
+            (timer as { unref?: () => void }).unref?.()
+        })
+    ])
+    if (timedOut && !badgeScanTimedOut) {
+        badgeScanTimedOut = true
+        console.warn('[sessions] badge scan exceeded timeout (blocked file access to a session directory?); serving cached badge state')
+    }
+    return badgeSnapshot
+}
+
 export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, store: Store): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
-    app.get('/sessions', (c) => {
+    app.get('/sessions', async (c) => {
         const engine = requireSyncEngine(c, getSyncEngine)
         if (engine instanceof Response) {
             return engine
@@ -281,8 +321,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
 
         const namespace = c.get('namespace')
         const allSessions = engine.getSessionsByNamespace(namespace)
-        const loopActiveIds = computeLoopActiveIds(allSessions)
-        const debateActiveIds = computeDebateActiveIds(allSessions)
+        const { loopActiveIds, debateActiveIds } = await currentBadgeIds(allSessions)
         const scheduledDueAtsBySessionId = new Map<string, number[]>()
         for (const m of store.scheduledMessages.list(namespace, { status: 'pending' })) {
             if (!m.enabled) continue

@@ -24,6 +24,43 @@
         <!-- Safari Pinned Tab -->
         <link rel="mask-icon" href="/mask-icon.svg" color="#111827" />
 
+        <!-- Clear bloated TanStack scroll cache before app boot (quota can hard-block UI). -->
+        <script>
+            (function () {
+                function wipeScrollKeys(storage) {
+                    if (!storage) return
+                    try {
+                        var doomed = []
+                        for (var i = 0; i < storage.length; i++) {
+                            var key = storage.key(i)
+                            if (key && key.indexOf('tsr-scroll-restoration') === 0) doomed.push(key)
+                        }
+                        for (var j = 0; j < doomed.length; j++) storage.removeItem(doomed[j])
+                        // If the tsr key alone is still huge (or quota is already blown),
+                        // drop it explicitly and free more space if needed.
+                        try {
+                            var raw = storage.getItem('tsr-scroll-restoration-v1_3')
+                            if (raw && raw.length > 200000) storage.removeItem('tsr-scroll-restoration-v1_3')
+                        } catch (_) {
+                            try { storage.removeItem('tsr-scroll-restoration-v1_3') } catch (__) {}
+                        }
+                    } catch (error) {
+                        try { storage.removeItem('tsr-scroll-restoration-v1_3') } catch (_) {}
+                        try { storage.clear() } catch (_) {}
+                    }
+                }
+                try { wipeScrollKeys(window.sessionStorage) } catch (_) {}
+                try { wipeScrollKeys(window.localStorage) } catch (_) {}
+                // Probe write: if storage is still full, clear sessionStorage entirely.
+                try {
+                    window.sessionStorage.setItem('__hapi_storage_probe__', '1')
+                    window.sessionStorage.removeItem('__hapi_storage_probe__')
+                } catch (_) {
+                    try { window.sessionStorage.clear() } catch (__) {}
+                }
+            })()
+        </script>
+
         <script>
             (function () {
                 try {

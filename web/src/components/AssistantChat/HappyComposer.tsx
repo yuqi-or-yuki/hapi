@@ -175,7 +175,7 @@ export function HappyComposer(props: {
     onEffortChange?: (effort: string | null) => void
     /** Codex Fast mode (service tier): current value ('fast' or null/standard). */
     serviceTier?: string | null
-    /** When provided, a Fast-mode toggle renders (Codex GPT-5.5 / GPT-5.4 only). */
+    /** When provided, a Fast-mode toggle renders for catalog-supported Codex models. */
     onServiceTierChange?: (serviceTier: string | null) => void
     onSwitchToRemote?: () => void
     onTerminal?: () => void

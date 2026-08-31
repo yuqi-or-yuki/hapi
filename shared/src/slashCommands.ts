@@ -20,7 +20,7 @@ export const BUILTIN_SLASH_COMMANDS = {
         { name: 'default', description: 'Return Codex collaboration mode to default', source: 'builtin' },
         { name: 'execute', description: 'Return Codex collaboration mode to default', source: 'builtin' },
         { name: 'status', description: 'Show current Codex session config', source: 'builtin' },
-        { name: 'model', description: 'Show or set Codex model, e.g. /model gpt-5.5', source: 'builtin' },
+        { name: 'model', description: 'Show or set Codex model, e.g. /model <model-id>', source: 'builtin' },
         { name: 'reasoning', description: 'Show or set reasoning effort', source: 'builtin' },
         { name: 'effort', description: 'Alias for /reasoning', source: 'builtin' },
         { name: 'permissions', description: 'Show or set permission mode', source: 'builtin' },

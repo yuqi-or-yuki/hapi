@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback, useState } from 'react'
+import { useEffect, useCallback, useState } from 'react'
 import { useConversation } from '@elevenlabs/react'
 import { registerVoiceSession, resetRealtimeSessionState, unregisterVoiceSession } from './RealtimeSession'
 import { realtimeClientTools, registerSessionStore } from './realtimeClientTools'
@@ -18,6 +18,25 @@ let conversationInstance: ReturnType<typeof useConversation> | null = null
 
 // Store reference for status updates
 let statusCallback: StatusCallback | null = null
+
+function describeMicrophoneError(error: unknown): string {
+    const name = error instanceof DOMException ? error.name : undefined
+    switch (name) {
+        case 'NotAllowedError':
+        case 'PermissionDeniedError':
+            return 'Microphone permission denied'
+        case 'NotFoundError':
+        case 'DevicesNotFoundError':
+            return 'No microphone found'
+        case 'NotReadableError':
+        case 'TrackStartError':
+            return 'Microphone is in use by another application'
+        case 'SecurityError':
+            return 'Microphone access blocked (insecure connection)'
+        default:
+            return error instanceof Error ? `Microphone error: ${error.message}` : 'Microphone error'
+    }
+}
 
 // Global voice session implementation
 class RealtimeVoiceSessionImpl implements VoiceSession {
@@ -43,7 +62,7 @@ class RealtimeVoiceSessionImpl implements VoiceSession {
             permissionStream = await navigator.mediaDevices.getUserMedia({ audio: true })
         } catch (error) {
             console.error('[Voice] Failed to get microphone permission:', error)
-            statusCallback?.('error', 'Microphone permission denied')
+            statusCallback?.('error', describeMicrophoneError(error))
             throw error
         } finally {
             permissionStream?.getTracks().forEach((track) => track.stop())
@@ -179,8 +198,6 @@ export function RealtimeVoiceSession({
     approvePermission,
     denyPermission
 }: RealtimeVoiceSessionProps) {
-    const hasRegistered = useRef(false)
-
     // Use local state for micMuted that syncs with prop
     // This is recommended by ElevenLabs SDK docs
     const [micMuted, setMicMuted] = useState(micMutedProp)
@@ -260,19 +277,23 @@ export function RealtimeVoiceSession({
         onDebug: handleDebug
     })
 
+    // Keep the module-level conversation instance current on every render.
+    // useConversation() returns a new object each render, so this must not
+    // be tied to the register/unregister effect below (see next effect).
     useEffect(() => {
-        // Store the conversation instance globally
         conversationInstance = conversation
+    }, [conversation])
 
-        // Register the voice session once
-        if (!hasRegistered.current) {
-            try {
-                registerVoiceSession(new RealtimeVoiceSessionImpl(api))
-                hasRegistered.current = true
-                onRegistered?.()
-            } catch (error) {
-                console.error('[Voice] Failed to register voice session:', error)
-            }
+    // Register the voice session once per mount. Deliberately excludes
+    // `conversation` from deps: it's a fresh object every render, and
+    // re-running this effect would unregister the session (via cleanup)
+    // without ever re-registering it, since it only registers once.
+    useEffect(() => {
+        try {
+            registerVoiceSession(new RealtimeVoiceSessionImpl(api))
+            onRegistered?.()
+        } catch (error) {
+            console.error('[Voice] Failed to register voice session:', error)
         }
 
         return () => {
@@ -280,7 +301,8 @@ export function RealtimeVoiceSession({
             conversationInstance = null
             unregisterVoiceSession()
         }
-    }, [conversation, api])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [api])
 
     // This component doesn't render anything visible
     return null

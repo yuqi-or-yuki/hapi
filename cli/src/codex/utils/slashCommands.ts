@@ -241,7 +241,7 @@ export function resolveCodexSlashCommand(
                 '- `/status` — show current Codex session config',
                 '- `/model [name|auto]` — show or set model',
                 '- `/reasoning [level|default]` — show or set reasoning effort',
-                '- `/fast [on|off|status]` — toggle Fast mode (GPT-5.5 / GPT-5.4, ChatGPT login)',
+                '- `/fast [on|off|status]` — toggle Fast mode when the Codex model catalog advertises it',
                 '- `/permissions [default|read-only|safe-yolo|yolo]` — show or set permission mode',
                 '',
                 'Custom `/commands` from `.codex/prompts` are expanded before sending.'

@@ -1,5 +1,7 @@
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import path from 'node:path';
 import { logger } from '@/ui/logger';
 import { JsonLineParser } from '@/utils/jsonLineParser';
 import { killProcessByChildProcess } from '@/utils/process';
@@ -77,7 +79,7 @@ function createAbortError(): Error {
 
 type CodexCommandCandidate = {
     command: string;
-    source: 'desktop' | 'path';
+    source: 'desktop' | 'path' | 'npm-global';
     version: number[] | null;
 };
 
@@ -111,26 +113,127 @@ function compareVersion(a: number[] | null, b: number[] | null): number {
     return 0;
 }
 
-function resolveCodexAppServerCommand(): string {
+function addCandidate(
+    candidates: CodexCommandCandidate[],
+    seen: Set<string>,
+    command: string,
+    source: CodexCommandCandidate['source']
+): void {
+    if (seen.has(command)) {
+        return;
+    }
+    seen.add(command);
+    candidates.push({
+        command,
+        source,
+        version: getCodexVersion(command)
+    });
+}
+
+function findPathCommands(): string[] {
+    if (process.platform === 'win32') {
+        return ['codex'];
+    }
+
+    try {
+        const output = execFileSync('which', ['-a', 'codex'], {
+            encoding: 'utf8',
+            timeout: 3_000,
+            stdio: ['ignore', 'pipe', 'ignore']
+        });
+        const commands = output
+            .split(/\r?\n/u)
+            .map((line) => line.trim())
+            .filter(Boolean);
+        return commands.length > 0 ? commands : ['codex'];
+    } catch {
+        return ['codex'];
+    }
+}
+
+function addIfExists(paths: string[], candidate: string): void {
+    if (existsSync(candidate)) {
+        paths.push(candidate);
+    }
+}
+
+function findNvmCodexBins(): string[] {
+    const bins: string[] = [];
+    const versionsRoot = path.join(homedir(), '.nvm', 'versions', 'node');
+
+    try {
+        for (const version of readdirSync(versionsRoot, { withFileTypes: true })) {
+            if (!version.isDirectory()) {
+                continue;
+            }
+            addIfExists(
+                bins,
+                path.join(versionsRoot, version.name, 'lib', 'node_modules', '@openai', 'codex', 'bin', 'codex.js')
+            );
+        }
+    } catch {
+        // nvm is optional.
+    }
+
+    return bins;
+}
+
+function findNpmGlobalCodexBins(): string[] {
+    const bins: string[] = [];
+    const roots = new Set<string>();
+
+    try {
+        const npmRoot = execFileSync('npm', ['root', '-g'], {
+            encoding: 'utf8',
+            timeout: 3_000,
+            stdio: ['ignore', 'pipe', 'ignore']
+        }).trim();
+        if (npmRoot) roots.add(npmRoot);
+    } catch {
+        // npm is optional; static filesystem roots below still cover common installs.
+    }
+
+    roots.add(path.join(homedir(), '.local', 'lib', 'node_modules'));
+    roots.add('/opt/homebrew/lib/node_modules');
+    roots.add('/usr/local/lib/node_modules');
+
+    for (const root of roots) {
+        addIfExists(bins, path.join(root, '@openai', 'codex', 'bin', 'codex.js'));
+    }
+
+    bins.push(...findNvmCodexBins());
+    return bins;
+}
+
+export function resolveCodexAppServerCommand(): string {
     if (process.env.HAPI_CODEX_APP_SERVER_BIN) {
         return process.env.HAPI_CODEX_APP_SERVER_BIN;
     }
 
-    const candidates: CodexCommandCandidate[] = [{
-        command: 'codex',
-        source: 'path',
-        version: getCodexVersion('codex')
-    }];
+    const candidates: CodexCommandCandidate[] = [];
+    const seen = new Set<string>();
+
+    for (const command of findPathCommands()) {
+        addCandidate(candidates, seen, command, 'path');
+    }
 
     if (process.platform === 'darwin') {
-        const desktopCodex = '/Applications/Codex.app/Contents/Resources/codex';
-        if (existsSync(desktopCodex)) {
-            candidates.push({
-                command: desktopCodex,
-                source: 'desktop',
-                version: getCodexVersion(desktopCodex)
-            });
+        for (const desktopCodex of [
+            '/Applications/Codex.app/Contents/Resources/codex',
+            path.join(homedir(), 'Applications', 'Codex.app', 'Contents', 'Resources', 'codex')
+        ]) {
+            if (existsSync(desktopCodex)) {
+                addCandidate(candidates, seen, desktopCodex, 'desktop');
+            }
         }
+    }
+
+    for (const npmCodex of findNpmGlobalCodexBins()) {
+        addCandidate(candidates, seen, npmCodex, 'npm-global');
+    }
+
+    if (candidates.length === 0) {
+        addCandidate(candidates, seen, 'codex', 'path');
     }
 
     // 中文注释：Codex Desktop 与 npm CLI 都可能写 thread-store；恢复时选择版本更新的 app-server，
@@ -139,7 +242,11 @@ function resolveCodexAppServerCommand(): string {
         const versionDiff = compareVersion(right.version, left.version);
         if (versionDiff !== 0) return versionDiff;
         if (left.source === right.source) return 0;
-        return left.source === 'desktop' ? -1 : 1;
+        if (left.source === 'desktop') return -1;
+        if (right.source === 'desktop') return 1;
+        if (left.source === 'path') return -1;
+        if (right.source === 'path') return 1;
+        return 0;
     })[0];
 
     logger.debug('[CodexAppServer] Resolved codex command', {

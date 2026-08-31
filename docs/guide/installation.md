@@ -290,6 +290,13 @@ Access via your Tailscale IP:
 ```
 http://100.x.x.x:3006
 ```
+
+> **Note:** Plain `http://` on a Tailscale IP is not a secure browser context, so mic access for the [voice assistant](./voice-assistant.md) won't work (`navigator.mediaDevices` is unavailable). For voice, serve over HTTPS instead using Tailscale's built-in certs:
+>
+> ```bash
+> tailscale serve --bg --https=443 localhost:3006
+> tailscale serve status  # prints your https://<machine>.<tailnet>.ts.net/ URL
+> ```
 </details>
 
 <details>

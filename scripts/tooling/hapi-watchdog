@@ -1,0 +1,496 @@
+#!/bin/zsh
+# HAPI watchdog: health + singleton repair + orphan/pressure reaper.
+# Safe defaults:
+# - never kill normal Chrome profiles
+# - never kill healthy single hub/runner pair
+# - never kill same-calendar-day agent/MCP work (only pre-today leftovers)
+export HOME="/Users/yuqili"
+export PATH="/Users/yuqili/.hapi/bin:/Users/yuqili/.bun/bin:/Users/yuqili/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+export HAPI_HOME="/Users/yuqili/.hapi"
+export TZ="${TZ:-America/Los_Angeles}"
+
+LOG="/Users/yuqili/Library/Logs/hapi/watchdog.log"
+STRIKES_FILE="/tmp/hapi-watchdog-strikes"
+NO_LISTEN_STRIKES_FILE="/tmp/hapi-watchdog-nolisten-strikes"
+STATUS_FILE="/Users/yuqili/.hapi/watchdog-status.json"
+REAP_STAMP_FILE="/tmp/hapi-watchdog-last-reap"
+DRY_RUN=0
+STATUS_ONLY=0
+
+# Caps (override via env). Soft caps only apply to pre-today processes.
+MAX_AGENT_WORKERS=${HAPI_MAX_AGENT_WORKERS:-12}
+MAX_HAPI_MCP=${HAPI_MAX_HAPI_MCP:-16}
+MAX_CHROME_MCP_PROCS=${HAPI_MAX_CHROME_MCP_PROCS:-200}
+MAX_APP_SERVERS=${HAPI_MAX_APP_SERVERS:-24}
+# Free pages threshold (~16KB pages). Only triggers pre-today cleanup.
+MIN_FREE_PAGES=${HAPI_MIN_FREE_PAGES:-12000}
+# Absolute floor age for any non-orphan kill (default 24h). Same-day always protected on top.
+IDLE_TTL_SEC=${HAPI_AGENT_IDLE_TTL_SEC:-86400}
+# How often heavy reap runs even if launchd ticks more often (default 30m)
+REAP_EVERY_SEC=${HAPI_REAP_EVERY_SEC:-1800}
+# 1 = never kill processes started today (local TZ). Orphans with dead parents still cleaned.
+PROTECT_SAME_DAY=${HAPI_PROTECT_SAME_DAY:-1}
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    --status) STATUS_ONLY=1 ;;
+    --help|-h)
+      cat <<'HELP'
+hapi-watchdog [--dry-run] [--status]
+  Default: health/singleton every launchd tick; heavy reap slower and never kills same-day work.
+  --dry-run  log actions only, do not kill/restart
+  --status   print counts/memory/health JSON and exit
+HELP
+      exit 0
+      ;;
+  esac
+done
+
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+log() { print -- "$(ts) $*" >> "$LOG"; }
+
+# Seconds since local midnight (America/Los_Angeles unless TZ overridden)
+seconds_since_midnight() {
+  python3 - <<'PY'
+from datetime import datetime
+import os
+try:
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo(os.environ.get("TZ", "America/Los_Angeles"))
+    now = datetime.now(tz)
+except Exception:
+    now = datetime.now()
+mid = now.replace(hour=0, minute=0, second=0, microsecond=0)
+print(int((now - mid).total_seconds()))
+PY
+}
+
+# Minimum age (seconds) a process must have before non-orphan kill is allowed.
+min_killable_age_sec() {
+  local floor=$IDLE_TTL_SEC
+  if (( PROTECT_SAME_DAY )); then
+    local since_mid
+    since_mid=$(seconds_since_midnight)
+    # Protect everything started today: must be older than time-since-midnight.
+    # Also keep absolute floor (default 24h) so early-morning doesn't free last night too eagerly unless > floor.
+    if (( since_mid > floor )); then
+      print -- "$since_mid"
+    else
+      print -- "$floor"
+    fi
+  else
+    print -- "$floor"
+  fi
+}
+
+run_kill() {
+  local sig="$1"; shift
+  if (( DRY_RUN )); then
+    log "DRY kill -$sig: $*"
+    return 0
+  fi
+  kill "-$sig" "$@" 2>/dev/null || true
+}
+
+count_regex() {
+  ps -axo pid=,command= 2>/dev/null | awk -v re="$1" '
+    $0 ~ re { c++ }
+    END { print c+0 }
+  '
+}
+
+list_pids_regex() {
+  ps -axo pid=,command= 2>/dev/null | awk -v re="$1" '
+    $0 ~ re { print $1 }
+  '
+}
+
+etime_to_sec() {
+  # stdin: etime string -> seconds
+  awk '{
+    et=$1; n=split(et,a,/[-:]/); sec=0;
+    if(n==2) sec=a[1]*60+a[2];
+    else if(n==3) sec=a[1]*3600+a[2]*60+a[3];
+    else if(n==4) sec=a[1]*86400+a[2]*3600+a[3]*60+a[4];
+    print sec+0
+  }'
+}
+
+pid_age_sec() {
+  local pid="$1"
+  ps -o etime= -p "$pid" 2>/dev/null | awk '{print $1}' | etime_to_sec
+}
+
+list_agent_workers_by_age() {
+  # oldest first: age_sec pid
+  ps -axo pid=,etime=,command= 2>/dev/null | awk '
+    $0 ~ /\/\.hapi\/bin\/hapi (codex|claude|cursor|opencode|gemini)( |$)/ {
+      pid=$1; et=$2;
+      n=split(et, a, /[-:]/);
+      sec=0;
+      if (n==2) sec=a[1]*60+a[2];
+      else if (n==3) sec=a[1]*3600+a[2]*60+a[3];
+      else if (n==4) sec=a[1]*86400+a[2]*3600+a[3]*60+a[4];
+      print sec, pid;
+    }
+  ' | sort -n
+}
+
+free_pages() {
+  vm_stat 2>/dev/null | awk '/Pages free/ {gsub(/\./,"",$3); print $3+0; exit}'
+}
+
+hub_listen_pid() {
+  lsof -nP -iTCP:3006 -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {print $2; exit}'
+}
+
+health_ok() {
+  local health
+  health="$(curl -fsS -m 10 http://127.0.0.1:3006/health 2>/dev/null || true)"
+  print -- "$health" | grep -q '"status":"ok"'
+}
+
+collect_counts() {
+  CNT_SERVER=$(count_regex '/\.hapi/bin/hapi server( |$)')
+  CNT_RUNNER=$(count_regex '/\.hapi/bin/hapi runner( |$)')
+  CNT_CODEX=$(count_regex '/\.hapi/bin/hapi codex( |$)')
+  CNT_CLAUDE=$(count_regex '/\.hapi/bin/hapi claude( |$)')
+  CNT_AGENT=$(( CNT_CODEX + CNT_CLAUDE + $(count_regex '/\.hapi/bin/hapi (cursor|opencode|gemini)( |$)') ))
+  CNT_HAPI_MCP=$(count_regex '/\.hapi/bin/hapi mcp( |$)')
+  CNT_CHROME_MCP=$(count_regex 'chrome-devtools-mcp')
+  CNT_PLAYWRIGHT=$(count_regex 'playwright-mcp')
+  CNT_APP_SERVER=$(count_regex 'codex app-server')
+  CNT_FREE_PAGES=$(free_pages)
+  LISTEN_PID=$(hub_listen_pid)
+  MIN_KILL_AGE=$(min_killable_age_sec)
+  if health_ok; then HEALTH=1; else HEALTH=0; fi
+}
+
+write_status() {
+  mkdir -p /Users/yuqili/.hapi /Users/yuqili/Library/Logs/hapi 2>/dev/null || true
+  cat > "$STATUS_FILE" <<JSON
+{
+  "ts": "$(ts)",
+  "health_ok": $HEALTH,
+  "listen_pid": ${LISTEN_PID:-null},
+  "server": $CNT_SERVER,
+  "runner": $CNT_RUNNER,
+  "agent_workers": $CNT_AGENT,
+  "codex": $CNT_CODEX,
+  "claude": $CNT_CLAUDE,
+  "hapi_mcp": $CNT_HAPI_MCP,
+  "chrome_devtools_mcp": $CNT_CHROME_MCP,
+  "playwright_mcp": $CNT_PLAYWRIGHT,
+  "codex_app_server": $CNT_APP_SERVER,
+  "free_pages": ${CNT_FREE_PAGES:-0},
+  "min_killable_age_sec": ${MIN_KILL_AGE:-0},
+  "protect_same_day": $PROTECT_SAME_DAY,
+  "caps": {
+    "max_agent_workers": $MAX_AGENT_WORKERS,
+    "max_hapi_mcp": $MAX_HAPI_MCP,
+    "max_chrome_mcp_procs": $MAX_CHROME_MCP_PROCS,
+    "max_app_servers": $MAX_APP_SERVERS,
+    "min_free_pages": $MIN_FREE_PAGES,
+    "idle_ttl_sec": $IDLE_TTL_SEC,
+    "reap_every_sec": $REAP_EVERY_SEC
+  },
+  "dry_run": $DRY_RUN
+}
+JSON
+}
+
+print_status() {
+  write_status
+  cat "$STATUS_FILE"
+}
+
+should_run_heavy_reap() {
+  local now last
+  now=$(date +%s)
+  last=$(cat "$REAP_STAMP_FILE" 2>/dev/null || echo 0)
+  if (( now - last >= REAP_EVERY_SEC )); then
+    return 0
+  fi
+  return 1
+}
+
+mark_heavy_reap() {
+  date +%s > "$REAP_STAMP_FILE"
+}
+
+repair_singletons() {
+  local keep_server keep_runner p
+  keep_server="$LISTEN_PID"
+  if [[ -z "$keep_server" ]]; then
+    keep_server=$(ps -axo pid=,etime=,command= 2>/dev/null | awk '
+      $0 ~ /\/\.hapi\/bin\/hapi server( |$)/ {
+        pid=$1; et=$2; n=split(et,a,/[-:]/); sec=0;
+        if(n==2)sec=a[1]*60+a[2]; else if(n==3)sec=a[1]*3600+a[2]*60+a[3]; else if(n==4)sec=a[1]*86400+a[2]*3600+a[3]*60+a[4];
+        print sec, pid
+      }' | sort -n | awk 'NR==1{print $2}')
+  fi
+
+  if [[ -n "$keep_server" ]]; then
+    for p in $(list_pids_regex '/\.hapi/bin/hapi server( |$)'); do
+      if [[ "$p" != "$keep_server" ]]; then
+        log "singleton: kill extra server pid=$p keep=$keep_server"
+        run_kill 9 "$p"
+      fi
+    done
+  fi
+
+  keep_runner=""
+  if [[ -n "$keep_server" ]]; then
+    keep_runner=$(ps -axo pid=,ppid=,command= 2>/dev/null | awk -v sp="$keep_server" '
+      $2==sp && $0 ~ /\/\.hapi\/bin\/hapi runner/ { print $1; exit }
+    ')
+  fi
+  if [[ -z "$keep_runner" && -f /Users/yuqili/.hapi/runner.state.json ]]; then
+    keep_runner=$(python3 -c 'import json;print(json.load(open("/Users/yuqili/.hapi/runner.state.json")).get("pid",""))' 2>/dev/null || true)
+  fi
+  if [[ -z "$keep_runner" ]]; then
+    keep_runner=$(ps -axo pid=,etime=,command= 2>/dev/null | awk '
+      $0 ~ /\/\.hapi\/bin\/hapi runner/ {
+        pid=$1; et=$2; n=split(et,a,/[-:]/); sec=0;
+        if(n==2)sec=a[1]*60+a[2]; else if(n==3)sec=a[1]*3600+a[2]*60+a[3]; else if(n==4)sec=a[1]*86400+a[2]*3600+a[3]*60+a[4];
+        print sec, pid
+      }' | sort -n | awk 'NR==1{print $2}')
+  fi
+
+  if [[ -n "$keep_runner" ]]; then
+    for p in $(list_pids_regex '/\.hapi/bin/hapi runner'); do
+      if [[ "$p" != "$keep_runner" ]]; then
+        log "singleton: kill extra runner pid=$p keep=$keep_runner"
+        run_kill 9 "$p"
+      fi
+    done
+  fi
+}
+
+kill_tree() {
+  local pid="$1"
+  local pgid
+  pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')
+  if [[ -n "$pgid" && "$pgid" != "0" && "$pgid" != "1" ]]; then
+    log "reap tree pgid=$pgid root_pid=$pid"
+    run_kill 15 "-$pgid"
+    sleep 0.2
+    run_kill 9 "-$pgid"
+  else
+    log "reap pid=$pid"
+    run_kill 15 "$pid"
+    sleep 0.1
+    run_kill 9 "$pid"
+  fi
+}
+
+# True orphans only: dead parent. Safe even for same-day leftovers of crashed parents.
+reap_orphan_mcp_stack() {
+  local before_chrome before_pw before_app before_mcp
+  before_chrome=$CNT_CHROME_MCP
+  before_pw=$CNT_PLAYWRIGHT
+  before_app=$CNT_APP_SERVER
+  before_mcp=$CNT_HAPI_MCP
+
+  local pid ppid cmd
+  while read -r pid ppid cmd; do
+    [[ -z "$pid" ]] && continue
+    if ! ps -p "$ppid" >/dev/null 2>&1; then
+      log "orphan hapi-mcp pid=$pid ppid=$ppid dead-parent"
+      kill_tree "$pid"
+    fi
+  done < <(ps -axo pid=,ppid=,command= 2>/dev/null | awk '$0 ~ /\/\.hapi\/bin\/hapi mcp( |$)/ {print $1,$2,substr($0,index($0,$3))}')
+
+  while read -r pid ppid cmd; do
+    [[ -z "$pid" ]] && continue
+    # skip helpers / our own awk
+    case "$cmd" in
+      *awk*|*hapi-watchdog*|*[[:space:]]rg[[:space:]]*|*grep*) continue ;;
+    esac
+    if ! ps -p "$ppid" >/dev/null 2>&1; then
+      log "orphan mcp-child pid=$pid ppid=$ppid dead-parent"
+      kill_tree "$pid"
+    fi
+  done < <(ps -axo pid=,ppid=,command= 2>/dev/null | awk '
+    $0 ~ /(^|\/)(node|npm|chrome-devtools-mcp|playwright-mcp)/ &&
+    $0 ~ /chrome-devtools-mcp|playwright-mcp/ &&
+    $0 !~ /hapi-watchdog|awk |rg |grep / {
+      print $1,$2,substr($0,index($0,$3))
+    }')
+
+  while read -r pid ppid cmd; do
+    [[ -z "$pid" ]] && continue
+    if ! ps -p "$ppid" >/dev/null 2>&1; then
+      log "orphan codex-app-server pid=$pid dead-parent"
+      kill_tree "$pid"
+    fi
+  done < <(ps -axo pid=,ppid=,command= 2>/dev/null | awk '$0 ~ /codex app-server/ {print $1,$2,substr($0,index($0,$3))}')
+
+  if ! pgrep -f 'chrome-devtools-mcp' >/dev/null 2>&1; then
+    local bpid
+    for bpid in $(ps -axo pid=,command= 2>/dev/null | awk '
+      $0 ~ /Google Chrome.*user-data-dir=\/Users\/yuqili\/\.cache\/chrome-devtools-mcp\/profiles\// {print $1}
+      $0 ~ /Google Chrome.*user-data-dir=\/Users\/yuqili\/\.codex\/chrome-devtools-mcp-profile/ {print $1}
+    '); do
+      log "orphan mcp-chrome pid=$bpid (no chrome-devtools-mcp alive)"
+      run_kill 9 "$bpid"
+    done
+  fi
+
+  collect_counts
+  if (( CNT_CHROME_MCP != before_chrome || CNT_PLAYWRIGHT != before_pw || CNT_APP_SERVER != before_app || CNT_HAPI_MCP != before_mcp )); then
+    log "after orphan-mcp reap: hapi_mcp=$CNT_HAPI_MCP chrome_mcp=$CNT_CHROME_MCP playwright=$CNT_PLAYWRIGHT app_server=$CNT_APP_SERVER"
+  fi
+}
+
+reap_over_budget() {
+  local min_age pressure=0
+  min_age=${MIN_KILL_AGE:-$(min_killable_age_sec)}
+
+  if (( CNT_FREE_PAGES > 0 && CNT_FREE_PAGES < MIN_FREE_PAGES )); then
+    pressure=1
+    log "pressure: free_pages=$CNT_FREE_PAGES < min=$MIN_FREE_PAGES (only pre-today kills, min_age=${min_age}s)"
+  fi
+  if (( CNT_AGENT > MAX_AGENT_WORKERS || CNT_CHROME_MCP > MAX_CHROME_MCP_PROCS || CNT_HAPI_MCP > MAX_HAPI_MCP || CNT_APP_SERVER > MAX_APP_SERVERS )); then
+    pressure=1
+  fi
+  (( pressure )) || return 0
+
+  log "pressure-reap before: agents=$CNT_AGENT hapi_mcp=$CNT_HAPI_MCP chrome_mcp=$CNT_CHROME_MCP app_server=$CNT_APP_SERVER free_pages=$CNT_FREE_PAGES min_age=${min_age}s"
+
+  # 1) idle/old agents only if older than min_age (same-day protected)
+  local age pid
+  while read -r age pid; do
+    [[ -z "$pid" ]] && continue
+    if (( age >= min_age )); then
+      log "idle/old reap agent pid=$pid age_sec=$age min_age=$min_age"
+      kill_tree "$pid"
+    fi
+  done < <(list_agent_workers_by_age)
+
+  collect_counts
+
+  # 2) over agent cap: only kill pre-today/old agents
+  if (( CNT_AGENT > MAX_AGENT_WORKERS )); then
+    local need=$(( CNT_AGENT - MAX_AGENT_WORKERS ))
+    while read -r age pid; do
+      (( need > 0 )) || break
+      [[ -z "$pid" ]] && continue
+      if (( age < min_age )); then
+        log "skip same-day/recent agent pid=$pid age_sec=$age (< min_age=$min_age)"
+        continue
+      fi
+      log "over-cap reap agent pid=$pid age_sec=$age (cap=$MAX_AGENT_WORKERS)"
+      kill_tree "$pid"
+      need=$(( need - 1 ))
+    done < <(list_agent_workers_by_age)
+  fi
+
+  collect_counts
+
+  # 3) chrome-mcp over cap: only kill old roots, never same-day
+  if (( CNT_CHROME_MCP > MAX_CHROME_MCP_PROCS )); then
+    log "chrome-mcp over cap $CNT_CHROME_MCP > $MAX_CHROME_MCP_PROCS; only reaping age>=$min_age"
+    ps -axo pid=,etime=,command= 2>/dev/null | awk '
+      $0 ~ /chrome-devtools-mcp/ && $0 !~ /Google Chrome/ {
+        pid=$1; et=$2; n=split(et,a,/[-:]/); sec=0;
+        if(n==2)sec=a[1]*60+a[2]; else if(n==3)sec=a[1]*3600+a[2]*60+a[3]; else if(n==4)sec=a[1]*86400+a[2]*3600+a[3]*60+a[4];
+        print sec, pid
+      }' | sort -nr | while read -r age pid; do
+      collect_counts
+      (( CNT_CHROME_MCP > MAX_CHROME_MCP_PROCS )) || break
+      if (( age < min_age )); then
+        continue
+      fi
+      log "over-cap reap chrome-mcp pid=$pid age_sec=$age"
+      kill_tree "$pid"
+    done
+  fi
+
+  collect_counts
+  log "pressure-reap after: agents=$CNT_AGENT hapi_mcp=$CNT_HAPI_MCP chrome_mcp=$CNT_CHROME_MCP app_server=$CNT_APP_SERVER free_pages=$CNT_FREE_PAGES"
+}
+
+ensure_hub_listening() {
+  local server_count listen
+  server_count=$(count_regex '/\.hapi/bin/hapi server( |$)')
+  listen=$(hub_listen_pid)
+
+  if [[ -n "$listen" ]] && health_ok; then
+    echo 0 > "$NO_LISTEN_STRIKES_FILE"
+    echo 0 > "$STRIKES_FILE"
+    if ! pgrep -f 'hapi runner start-sync' >/dev/null 2>&1; then
+      log "health ok but runner missing; starting runner"
+      if (( ! DRY_RUN )); then
+        launchctl kickstart "gui/$(id -u)/ai.hapi.runner" 2>>"$LOG" || true
+      fi
+    fi
+    return 0
+  fi
+
+  if (( server_count > 0 )) && [[ -z "$listen" ]]; then
+    local strikes
+    strikes=$(( $(cat "$NO_LISTEN_STRIKES_FILE" 2>/dev/null || echo 0) + 1 ))
+    echo "$strikes" > "$NO_LISTEN_STRIKES_FILE"
+    log "hub process alive but :3006 not listening (strike $strikes/2)"
+    if (( strikes >= 2 )); then
+      echo 0 > "$NO_LISTEN_STRIKES_FILE"
+      log "restarting hub via launchctl (no-listen)"
+      if (( ! DRY_RUN )); then
+        launchctl kickstart -k "gui/$(id -u)/ai.hapi.hub" 2>>"$LOG" || true
+      fi
+    fi
+    return 0
+  fi
+
+  if ! health_ok; then
+    local strikes
+    strikes=$(( $(cat "$STRIKES_FILE" 2>/dev/null || echo 0) + 1 ))
+    echo "$strikes" > "$STRIKES_FILE"
+    if (( strikes < 2 )); then
+      log "health failed (strike $strikes/2); waiting for next probe"
+      return 0
+    fi
+    echo 0 > "$STRIKES_FILE"
+    log "health failed twice; restarting hub (runner untouched)"
+    if (( ! DRY_RUN )); then
+      launchctl kickstart -k "gui/$(id -u)/ai.hapi.hub" 2>>"$LOG" || true
+    fi
+  fi
+}
+
+main() {
+  mkdir -p /Users/yuqili/Library/Logs/hapi 2>/dev/null || true
+  collect_counts
+
+  if (( STATUS_ONLY )); then
+    print_status
+    exit 0
+  fi
+
+  log "tick before: health=$HEALTH listen=${LISTEN_PID:-none} server=$CNT_SERVER runner=$CNT_RUNNER agents=$CNT_AGENT hapi_mcp=$CNT_HAPI_MCP chrome_mcp=$CNT_CHROME_MCP app_server=$CNT_APP_SERVER free_pages=${CNT_FREE_PAGES:-0} min_kill_age=${MIN_KILL_AGE}s"
+
+  # Always cheap: singleton + health
+  repair_singletons
+  collect_counts
+  ensure_hub_listening
+  collect_counts
+
+  # Heavy reap less often; never kills same-day non-orphan work
+  if should_run_heavy_reap; then
+    log "heavy-reap window open (every ${REAP_EVERY_SEC}s)"
+    reap_orphan_mcp_stack
+    collect_counts
+    reap_over_budget
+    collect_counts
+    mark_heavy_reap
+  else
+    log "skip heavy-reap (next after ${REAP_EVERY_SEC}s cadence; same-day work protected)"
+  fi
+
+  write_status
+  log "tick after: health=$HEALTH listen=${LISTEN_PID:-none} server=$CNT_SERVER runner=$CNT_RUNNER agents=$CNT_AGENT hapi_mcp=$CNT_HAPI_MCP chrome_mcp=$CNT_CHROME_MCP app_server=$CNT_APP_SERVER free_pages=${CNT_FREE_PAGES:-0}"
+}
+
+main

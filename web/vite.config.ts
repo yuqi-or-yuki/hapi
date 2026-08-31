@@ -146,8 +146,16 @@ export default defineConfig({
     ],
     base,
     resolve: {
+        // Force a single React instance. Nested Radix packages can otherwise
+        // resolve a second copy and crash with:
+        // "Cannot read properties of null (reading 'useMemo')".
+        dedupe: ['react', 'react-dom'],
         alias: {
-            '@': resolve(__dirname, 'src')
+            '@': resolve(__dirname, 'src'),
+            react: resolve(__dirname, 'node_modules/react'),
+            'react-dom': resolve(__dirname, 'node_modules/react-dom'),
+            'react/jsx-runtime': resolve(__dirname, 'node_modules/react/jsx-runtime.js'),
+            'react/jsx-dev-runtime': resolve(__dirname, 'node_modules/react/jsx-dev-runtime.js'),
         }
     },
     build: {

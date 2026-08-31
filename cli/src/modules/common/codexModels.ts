@@ -1,5 +1,6 @@
 import type { CodexModelsResponse, CodexModelSummary } from '@hapi/protocol/apiTypes';
 import { CodexAppServerClient } from '@/codex/codexAppServerClient';
+import type { ModelListParams, ModelListResponse } from '@/codex/appServerTypes';
 import { getErrorMessage } from './rpcResponses';
 
 export interface ListCodexModelsRequest {
@@ -7,6 +8,13 @@ export interface ListCodexModelsRequest {
 }
 
 export type ListCodexModelsResponse = CodexModelsResponse;
+
+type CodexModelListClient = {
+    connect(): Promise<void>;
+    initialize(params: Parameters<CodexAppServerClient['initialize']>[0]): Promise<unknown>;
+    listModels(params?: ModelListParams): Promise<ModelListResponse>;
+    disconnect(): Promise<void>;
+};
 
 function asNonEmptyString(value: unknown): string | null {
     return typeof value === 'string' && value.trim().length > 0 ? value.trim() : null;
@@ -58,7 +66,7 @@ function normalizeServiceTiers(value: unknown): string[] | undefined {
     return tokens.size > 0 ? [...tokens] : undefined;
 }
 
-function normalizeModel(entry: unknown): CodexModelSummary | null {
+export function normalizeCodexModel(entry: unknown): CodexModelSummary | null {
     if (!entry || typeof entry !== 'object') {
         return null;
     }
@@ -79,27 +87,66 @@ function normalizeModel(entry: unknown): CodexModelSummary | null {
     };
 }
 
+function responseModels(response: ModelListResponse): unknown[] {
+    if (Array.isArray(response.data)) {
+        return response.data;
+    }
+
+    // Be lenient with future Codex app-server response envelopes while still
+    // treating Codex as the source of truth. No HAPI-side static catalog/fallback.
+    const record = response as Record<string, unknown>;
+    if (Array.isArray(record.models)) {
+        return record.models;
+    }
+    if (Array.isArray(record.items)) {
+        return record.items;
+    }
+    return [];
+}
+
+export async function listCodexModelsWithClient(
+    client: CodexModelListClient,
+    includeHidden: boolean = false
+): Promise<CodexModelSummary[]> {
+    await client.connect();
+    await client.initialize({
+        clientInfo: {
+            name: 'hapi-codex-models',
+            version: '1.0.0'
+        },
+        capabilities: {
+            experimentalApi: true
+        }
+    });
+
+    const models: CodexModelSummary[] = [];
+    const seen = new Set<string>();
+    let cursor: string | null | undefined;
+
+    do {
+        const response = await client.listModels({
+            includeHidden,
+            ...(cursor ? { cursor } : {})
+        });
+        for (const model of responseModels(response)) {
+            const normalized = normalizeCodexModel(model);
+            if (!normalized || seen.has(normalized.id)) {
+                continue;
+            }
+            seen.add(normalized.id);
+            models.push(normalized);
+        }
+        cursor = asNonEmptyString(response.nextCursor);
+    } while (cursor);
+
+    return models;
+}
+
 export async function listCodexModels(includeHidden: boolean = false): Promise<CodexModelSummary[]> {
     const client = new CodexAppServerClient();
 
     try {
-        await client.connect();
-        await client.initialize({
-            clientInfo: {
-                name: 'hapi-codex-models',
-                version: '1.0.0'
-            },
-            capabilities: {
-                experimentalApi: true
-            }
-        });
-
-        const response = await client.listModels({ includeHidden });
-        const models = Array.isArray(response.data)
-            ? response.data.map(normalizeModel).filter((model): model is CodexModelSummary => model !== null)
-            : [];
-
-        return models;
+        return await listCodexModelsWithClient(client, includeHidden);
     } catch (error) {
         throw new Error(getErrorMessage(error, 'Failed to list Codex models'));
     } finally {

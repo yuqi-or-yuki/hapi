@@ -33,6 +33,7 @@ export interface InitializeResponse {
 
 export interface ModelListParams {
     includeHidden?: boolean;
+    cursor?: string;
 }
 
 export interface ModelListItem {

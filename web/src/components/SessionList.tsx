@@ -1820,7 +1820,11 @@ export function SessionList(props: {
                                                                 // project group (e.g. after a rename that changes metadata).
                                                                 .map(id => group.sessions.find(s => s.id === id) ?? allSessions.find(s => s.id === id))
                                                                 .filter((s): s is SessionSummary => !!s)
-                                                            if (isFiltering && ugSessions.length === 0) return null
+                                                            // Hide a user group whose members are all filtered out (archived,
+                                                            // deleted, or hidden by the active-only toggle). Previously this only
+                                                            // applied while searching, so an emptied group kept rendering a stale
+                                                            // (0) header on every restart.
+                                                            if (ugSessions.length === 0) return null
                                                             return (
                                                                 <div key={ug.id} className="mb-0.5">
                                                                     <UserGroupHeader

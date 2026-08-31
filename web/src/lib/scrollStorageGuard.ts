@@ -2,7 +2,8 @@ import { storageKey } from '@tanstack/router-core'
 
 const STORAGE_KEY = storageKey
 
-const TARGET_ENTRIES_AFTER_PRUNE = 50
+const TARGET_ENTRIES_AFTER_PRUNE = 20
+const MAX_VALUE_CHARS = 100_000
 
 const GUARD_MARKER = '__hapiScrollRestorationGuard'
 
@@ -18,11 +19,38 @@ function hardResetScrollRestorationPersistedState(storage: Storage): void {
     }
 }
 
+function pruneScrollValue(value: string): string | null {
+    try {
+        const parsed = JSON.parse(value) as Record<string, unknown>
+        const keys = Object.keys(parsed)
+        let keepKeys = keys.length > TARGET_ENTRIES_AFTER_PRUNE
+            ? keys.slice(-TARGET_ENTRIES_AFTER_PRUNE)
+            : keys
+
+        // Keep shrinking until under size budget or nothing left.
+        while (keepKeys.length > 0) {
+            const next: Record<string, unknown> = {}
+            for (const k of keepKeys) {
+                next[k] = parsed[k]
+            }
+            const trimmed = JSON.stringify(next)
+            if (trimmed.length <= MAX_VALUE_CHARS) {
+                return trimmed
+            }
+            // Drop oldest half when still too large.
+            keepKeys = keepKeys.slice(Math.ceil(keepKeys.length / 2))
+        }
+        return '{}'
+    } catch {
+        return null
+    }
+}
+
 /**
- * Wrap `sessionStorage.setItem` so writes to the scroll restoration cache
+ * Wrap storage.setItem so writes to the scroll restoration cache
  * survive quota exhaustion. The default throws synchronously during a React
  * commit, blocking the UI (see tiann/hapi#611). We prune oldest entries and
- * retry once; if still failing, we drop the key so navigation can continue.
+ * retry; if still failing, we drop the key so navigation can continue.
  *
  * Upstream >=1.145.6 also wraps setItem with try-catch, so this guard is an
  * additional safety net that proactively keeps the cache small.
@@ -37,38 +65,47 @@ export function installScrollRestorationGuard(
     if (guarded[GUARD_MARKER]) {
         return () => {}
     }
-    const originalSetItem = storage.setItem
+    const originalSetItem = storage.setItem.bind(storage)
 
     const wrappedSetItem = (key: string, value: string): void => {
-        try {
-            originalSetItem.call(storage, key, value)
-            return
-        } catch (err) {
-            if (key !== STORAGE_KEY) {
-                throw err
+        if (key === STORAGE_KEY) {
+            // Proactively shrink before first write so we never hit quota.
+            if (value.length > MAX_VALUE_CHARS) {
+                const pruned = pruneScrollValue(value)
+                if (pruned == null) {
+                    hardResetScrollRestorationPersistedState(storage)
+                    return
+                }
+                value = pruned
+            }
+            try {
+                originalSetItem(key, value)
+                return
+            } catch {
+                const pruned = pruneScrollValue(value)
+                if (pruned && pruned !== value) {
+                    try {
+                        originalSetItem(key, pruned)
+                        return
+                    } catch {
+                        // fall through
+                    }
+                }
+                hardResetScrollRestorationPersistedState(storage)
+                return
             }
         }
 
-        let trimmed: string
         try {
-            const parsed = JSON.parse(value) as Record<string, unknown>
-            const keys = Object.keys(parsed)
-            const keepKeys = keys.length > TARGET_ENTRIES_AFTER_PRUNE
-                ? keys.slice(-TARGET_ENTRIES_AFTER_PRUNE)
-                : keys
-            const next: Record<string, unknown> = {}
-            for (const k of keepKeys) {
-                next[k] = parsed[k]
+            originalSetItem(key, value)
+        } catch (err) {
+            // Last-ditch: free scroll cache and retry once for unrelated keys.
+            hardResetScrollRestorationPersistedState(storage)
+            try {
+                originalSetItem(key, value)
+            } catch {
+                throw err
             }
-            trimmed = JSON.stringify(next)
-        } catch {
-            hardResetScrollRestorationPersistedState(storage)
-            return
-        }
-        try {
-            originalSetItem.call(storage, key, trimmed)
-        } catch {
-            hardResetScrollRestorationPersistedState(storage)
         }
     }
     storage.setItem = wrappedSetItem

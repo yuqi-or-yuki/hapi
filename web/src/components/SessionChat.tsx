@@ -40,6 +40,7 @@ import { deleteShareTransfer, getShareTransfer } from '@/lib/shareTransfer'
 import { getDraft } from '@/lib/composer-drafts'
 import { useTranslation } from '@/lib/use-translation'
 import { SessionHeader } from '@/components/SessionHeader'
+import { ZeroshotTimeline, buildZeroshotTimeline } from '@/components/ZeroshotTimeline'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
 import { TeamPanel } from '@/components/TeamPanel'
 import { usePlatform } from '@/hooks/usePlatform'
@@ -1033,12 +1034,29 @@ function SessionChatInner(props: SessionChatProps) {
         blocksByIdRef.current = reconciled.byId
     }, [reconciled.byId])
 
+    // Zeroshot sessions render their per-agent lifecycle in the grouped
+    // timeline panel (below), so strip the raw event cards from the thread
+    // itself — leaving just the task echo + outcome narration + composer.
+    // Non-zeroshot flavors pass reconciled.blocks straight through unchanged.
+    const isZeroshot = agentFlavor === 'zeroshot'
+    const threadBlocks = useMemo(
+        () => isZeroshot
+            ? reconciled.blocks.filter((b) => !(b.kind === 'tool-call'
+                && (b.tool.name === 'ZeroshotAgent' || b.tool.name === 'ZeroshotVerdict')))
+            : reconciled.blocks,
+        [isZeroshot, reconciled.blocks]
+    )
+    const zeroshotTimeline = useMemo(
+        () => isZeroshot ? buildZeroshotTimeline(reconciled.blocks) : null,
+        [isZeroshot, reconciled.blocks]
+    )
+
     const visibleBlocks = useMemo(
-        () => buildVisibleChatBlocks(reconciled.blocks, {
+        () => buildVisibleChatBlocks(threadBlocks, {
             hasMoreMessages: props.hasMoreMessages,
             previousGroups: visibleGroupsRef.current
         }),
-        [reconciled.blocks, props.hasMoreMessages]
+        [threadBlocks, props.hasMoreMessages]
     )
 
     useEffect(() => {
@@ -1355,6 +1373,13 @@ function SessionChatInner(props: SessionChatProps) {
                             : t('session.inactive.cannotResume')}
                     </div>
                 </div>
+            ) : null}
+
+            {zeroshotTimeline ? (
+                <ZeroshotTimeline
+                    timeline={zeroshotTimeline}
+                    overallStage={props.session.metadata?.zeroshotStage ?? undefined}
+                />
             ) : null}
 
             <AssistantRuntimeProvider runtime={runtime}>

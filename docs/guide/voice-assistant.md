@@ -108,6 +108,7 @@ Set `ELEVENLABS_API_KEY` in your environment and restart the hub.
 - Check browser permissions for microphone access
 - Ensure no other app is using the microphone
 - Try refreshing the page
+- **Accessing the hub over plain `http://` on anything other than `localhost`/`127.0.0.1` (e.g. a Tailscale IP, LAN IP, or tunnel hostname) is not a secure browser context** — the browser won't even show a permission prompt, since `navigator.mediaDevices` is unavailable. Serve over HTTPS instead (see [Self-hosted tunnels → Tailscale](./installation.md#self-hosted-tunnels) for a `tailscale serve` example).
 
 ### Voice not responding
 

@@ -18,6 +18,8 @@ export type ZeroshotClusterRecord = {
     pid?: number;
     createdAt?: number;
     issue?: string;
+    /** Non-null when the run failed; null/absent on the (state='stopped') success path. */
+    failureInfo?: unknown;
     [key: string]: unknown;
 };
 

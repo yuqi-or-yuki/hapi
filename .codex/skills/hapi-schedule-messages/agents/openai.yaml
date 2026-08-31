@@ -1,0 +1,4 @@
+interface:
+  display_name: "HAPI Scheduled Messages"
+  short_description: "Manage scheduled HAPI message jobs."
+  default_prompt: "Manage scheduled HAPI messages: list jobs, create delayed sends, update timing/text/clone behavior, or cancel pending jobs."

@@ -50,3 +50,11 @@ e2e-output/
 .xyz-harness
 .agents/
 .pi/
+ecosystem.config.cjs
+
+# Local runtime artifacts (fork-local, never committed)
+.claude/worktrees/
+.hapi-debates/
+hub/hapi.db
+hub/hapi.db-*
+hub/tools/

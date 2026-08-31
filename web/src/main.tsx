@@ -34,16 +34,32 @@ function getInitialPath(): string {
     return sessionId ? `/sessions/${sessionId}` : '/sessions'
 }
 
-async function bootstrap() {
-    // Clean up scroll restoration data written by older builds (can fill the 5 MB quota).
-    for (let i = localStorage.length - 1; i >= 0; i--) {
-        const key = localStorage.key(i)
-        if (key?.startsWith('tsr-scroll-restoration')) {
-            localStorage.removeItem(key)
+function wipeScrollRestorationKeys(storage: Storage | undefined): void {
+    if (!storage) return
+    try {
+        for (let i = storage.length - 1; i >= 0; i--) {
+            const key = storage.key(i)
+            if (key?.startsWith('tsr-scroll-restoration')) {
+                storage.removeItem(key)
+            }
+        }
+    } catch {
+        try {
+            storage.removeItem('tsr-scroll-restoration-v1_3')
+        } catch {
+            // ignore
         }
     }
+}
+
+async function bootstrap() {
+    // Clean up scroll restoration data that can fill browser storage quota and hard-block UI.
+    wipeScrollRestorationKeys(window.localStorage)
+    wipeScrollRestorationKeys(window.sessionStorage)
 
     installScrollRestorationGuard()
+    // Also guard localStorage in case older builds/routes wrote there.
+    installScrollRestorationGuard(window.localStorage)
     initializeFontScale()
 
     // Only load Telegram SDK in Telegram environment (with 3s timeout)

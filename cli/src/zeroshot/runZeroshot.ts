@@ -92,13 +92,34 @@ export async function runZeroshot(opts: {
         logger.debug('[zeroshot] Loop error:', error);
     } finally {
         const localFailure = zeroshotSession.localLaunchFailure;
-        if (localFailure?.exitReason === 'exit') {
-            lifecycle.setExitCode(1);
-            lifecycle.setArchiveReason(`Zeroshot run failed: ${localFailure.message.slice(0, 200)}`);
-            lifecycle.setSessionEndReason('error');
-        } else if (!crashed) {
-            lifecycle.setSessionEndReason('completed');
+        if (crashed || localFailure?.exitReason === 'exit') {
+            // A crash or a failed launch (e.g. Zeroshot not installed) → archive
+            // with an explanatory reason, matching every other backend's failure path.
+            if (localFailure?.exitReason === 'exit') {
+                lifecycle.setExitCode(1);
+                lifecycle.setArchiveReason(`Zeroshot run failed: ${localFailure.message.slice(0, 200)}`);
+                lifecycle.setSessionEndReason('error');
+            }
+            await lifecycle.cleanupAndExit();
+        } else {
+            // Normal completion: a Zeroshot run is a one-shot job, so unlike an
+            // interactive agent there's nothing to keep alive. But auto-archiving
+            // it (the default cleanup) drops the finished run into the archived
+            // pile, which reads as "my session vanished". Instead mark a clean,
+            // non-'archived' lifecycle state and end the session so it stays
+            // visible (inactive) with its full transcript + done/failed badge for
+            // review. handleSessionEnd only marks the session inactive; archiving
+            // comes solely from lifecycleState === 'archived', which we avoid here.
+            zeroshotSession.stopKeepAlive();
+            session.updateMetadata((m) => ({
+                ...m,
+                lifecycleState: 'finished',
+                lifecycleStateSince: Date.now()
+            }));
+            session.sendSessionDeath('completed');
+            await session.flush({ timeoutMs: 1000 });
+            session.close();
+            process.exit(0);
         }
-        await lifecycle.cleanupAndExit();
     }
 }
