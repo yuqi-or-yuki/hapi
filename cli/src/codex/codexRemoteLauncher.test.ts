@@ -33,7 +33,7 @@ const harness = vi.hoisted(() => ({
     resumeThreadParams: [] as Array<Record<string, unknown>>,
     startTurnThreadIds: [] as string[],
     startTurnParams: [] as Array<Record<string, unknown>>,
-    startTurnErrors: [] as Error[],
+    startTurnErrors: [] as unknown[],
     interruptedTurns: [] as Array<{ threadId: string; turnId: string }>,
     interruptErrors: [] as Error[],
     rollbackCalls: [] as Array<{ threadId: string; numTurns: number }>,
@@ -1797,7 +1797,20 @@ describe('codexRemoteLauncher', () => {
         });
         expect(sessionEvents).toContainEqual({
             type: 'message',
-            message: 'Process exited unexpectedly'
+            message: 'Process exited unexpectedly: collaborationMode value failed policy validation'
+        });
+    });
+
+    it('surfaces object-shaped Codex runtime errors instead of a generic exit', async () => {
+        harness.startTurnErrors.push({ message: 'cwd is not accessible' });
+        const { session, sessionEvents } = createSessionStub(['continue']);
+
+        const exitReason = await codexRemoteLauncher(session as never);
+
+        expect(exitReason).toBe('exit');
+        expect(sessionEvents).toContainEqual({
+            type: 'message',
+            message: 'Process exited unexpectedly: cwd is not accessible'
         });
     });
 

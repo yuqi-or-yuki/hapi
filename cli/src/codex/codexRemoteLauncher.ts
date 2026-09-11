@@ -382,6 +382,20 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             return error instanceof Error ? error.message : String(error);
         };
 
+        const unexpectedExitMessage = (error: unknown): string => {
+            const info = extractErrorInfo(error);
+            const record = asRecord(error);
+            const candidates = [
+                info.responseErrorText,
+                info.message !== 'Unknown error' ? info.message : null,
+                asString(record?.message),
+                asString(record?.error),
+                asString(record?.reason)
+            ];
+            const detail = candidates.find((candidate): candidate is string => Boolean(candidate?.trim()));
+            return detail ? `Process exited unexpectedly: ${detail}` : 'Process exited unexpectedly';
+        };
+
         let imageUploadChain: Promise<void> = Promise.resolve();
         const uploadCodexToolOutputImages = async (output: unknown): Promise<unknown> => {
             const uploadBlob = (session.client as unknown as {
@@ -4319,8 +4333,9 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
                     messageBuffer.addMessage(message, 'status');
                     session.sendSessionEvent({ type: 'message', message });
                 } else {
-                    messageBuffer.addMessage('Process exited unexpectedly', 'status');
-                    session.sendSessionEvent({ type: 'message', message: 'Process exited unexpectedly' });
+                    const message = unexpectedExitMessage(error);
+                    messageBuffer.addMessage(message, 'status');
+                    session.sendSessionEvent({ type: 'message', message });
                     this.currentTurnId = null;
                     this.currentThreadId = null;
                     hasThread = false;
