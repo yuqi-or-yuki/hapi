@@ -232,6 +232,13 @@ export function filterActiveSessionsOnly(sessions: SessionSummary[], selectedSes
     return sessions.filter(session => session.active || session.id === selectedSessionId)
 }
 
+export function filterArchivedSessions(sessions: SessionSummary[], selectedSessionId?: string | null): SessionSummary[] {
+    return sessions.filter(session => (
+        session.metadata?.lifecycleState !== 'archived'
+        || session.id === selectedSessionId
+    ))
+}
+
 // Paginated "Show N more": reveal one batch (step) at a time instead of expanding
 // every hidden session at once. Always advances by at least one and never exceeds
 // the total so the button reliably reaches a fully-expanded state.
@@ -1435,8 +1442,12 @@ export function SessionList(props: {
     const allSessions = useMemo(
         () => {
             const prepared = prepareSidebarSessions(props.sessions, selectedSessionId)
-            const activeOnly = hideArchivedSessions || showActiveSessionsOnly
-            return activeOnly ? filterActiveSessionsOnly(prepared, selectedSessionId) : prepared
+            const withoutArchived = hideArchivedSessions
+                ? filterArchivedSessions(prepared, selectedSessionId)
+                : prepared
+            return showActiveSessionsOnly
+                ? filterActiveSessionsOnly(withoutArchived, selectedSessionId)
+                : withoutArchived
         },
         [props.sessions, selectedSessionId, hideArchivedSessions, showActiveSessionsOnly]
     )

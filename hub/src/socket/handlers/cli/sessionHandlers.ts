@@ -3,7 +3,11 @@ import { z } from 'zod'
 import { randomUUID } from 'node:crypto'
 import type { CopilotAgentMode } from '@hapi/protocol'
 import type { AgentState, CodexCollaborationMode, Metadata, PermissionMode } from '@hapi/protocol/types'
-import { getReasoningStreamId, isRedundantGoalStatusEventContent } from '@hapi/protocol/messages'
+import {
+    getReasoningStreamId,
+    isClaudeChatVisibleContent,
+    isRedundantGoalStatusEventContent
+} from '@hapi/protocol/messages'
 import type { Store, StoredSession } from '../../../store'
 import type { SyncEvent } from '../../../sync/syncEngine'
 import { extractTodoWriteTodosFromMessageContent } from '../../../sync/todos'
@@ -129,7 +133,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         }
         const session = sessionAccess.value
 
-        if (isRedundantGoalStatusEventContent(content)) {
+        if (isRedundantGoalStatusEventContent(content) || !isClaudeChatVisibleContent(content)) {
             return
         }
 

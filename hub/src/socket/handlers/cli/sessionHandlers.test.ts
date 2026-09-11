@@ -53,6 +53,40 @@ function reasoningTextOf(message: { content: unknown }): string {
 }
 
 describe('cli session handlers', () => {
+    it('drops Claude tool_progress heartbeats before persistence and broadcast', () => {
+        const store = new Store(':memory:')
+        const session = store.sessions.getOrCreateSession('tool-progress-session', {}, null, 'default')
+        const socket = new FakeSocket()
+        const webEvents: unknown[] = []
+
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store,
+            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+            emitAccessError: () => {},
+            onWebappEvent: (event) => { webEvents.push(event) }
+        })
+
+        socket.trigger('message', {
+            sid: session.id,
+            message: {
+                role: 'agent',
+                content: {
+                    type: 'output',
+                    data: {
+                        type: 'tool_progress',
+                        tool_name: 'TaskOutput',
+                        elapsed_time_seconds: 240,
+                        heartbeat: true
+                    }
+                }
+            }
+        })
+
+        expect(store.messages.getAllMessages(session.id)).toEqual([])
+        expect(socket.roomEvents).toEqual([])
+        expect(webEvents).toEqual([])
+    })
+
     it('preserves immediate queued rows for cleared handoff transfer', () => {
         const store = new Store(':memory:')
         const session = store.sessions.getOrCreateSession('clear-end', {}, null, 'default')

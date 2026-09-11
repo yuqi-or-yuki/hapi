@@ -7,6 +7,7 @@ import {
 } from '@hapi/protocol/sessionExport'
 import type { AttachmentMetadata, DecryptedMessage, Session } from '@hapi/protocol/types'
 import {
+    isClaudeChatVisibleContent,
     isClaudeChatVisibleMessage,
     isRedundantGoalStatusEventContent,
     unwrapRoleWrappedRecordEnvelope
@@ -28,12 +29,25 @@ function messagePosition(message: StoredMessageForDelivery): MessagePosition {
     }
 }
 
+/** Max extra pages fetched while hunting for a visible message on a latest/
+ *  before request. 25 pages x 200 rows bounds the synchronous work at ~5000
+ *  row reads; beyond that the page-back continues client-driven via cursors. */
+const MAX_EMPTY_PAGE_BACKFILLS = 25
+
 function comparePosition(a: MessagePosition, b: MessagePosition): number {
     return a.at !== b.at ? a.at - b.at : a.seq - b.seq
 }
 
 function isWebVisibleStoredMessage(message: StoredMessageForDelivery): boolean {
-    return !isRedundantGoalStatusEventContent(message.content)
+    if (isRedundantGoalStatusEventContent(message.content)) {
+        return false
+    }
+
+    // Old CLI versions persisted Claude SDK-only events such as TaskOutput
+    // heartbeats. Filter them at delivery too, so upgrading the hub immediately
+    // cleans existing sessions and protects every client, not just the web
+    // normalizer. Current CLIs also drop these before upload.
+    return isClaudeChatVisibleContent(message.content)
 }
 
 function toDecryptedMessage(message: StoredMessageForDelivery): DecryptedMessage {
@@ -347,7 +361,13 @@ export class MessageService {
                 { at: oldestPositionAt, seq: oldestSeq }
             ).length > 0
 
-        while (messages.length === 0 && hasMore && oldestSeq !== null && oldestPositionAt !== null) {
+        // Page back until something visible turns up, but bounded: a session
+        // whose tail is thousands of hidden rows (loop heartbeats, goal-status
+        // events) must not walk its entire history inside one synchronous
+        // request. Past the cap we return an empty page with the cursor set —
+        // hasMore stays true, so clients simply request the next page.
+        let pageBackBudget = MAX_EMPTY_PAGE_BACKFILLS
+        while (messages.length === 0 && hasMore && oldestSeq !== null && oldestPositionAt !== null && pageBackBudget-- > 0) {
             before = { at: oldestPositionAt, seq: oldestSeq }
             pageRows = this.store.messages.getMessagesByPosition(sessionId, limit, before)
             queuedRows = []

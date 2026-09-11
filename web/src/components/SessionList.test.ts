@@ -4,6 +4,7 @@ import {
     deduplicateSessionsByAgentId,
     expandSelectedSessionCollapseOverrides,
     filterActiveSessionsOnly,
+    filterArchivedSessions,
     getSessionTimeRange,
     getNextSessionVisibleCount,
     getSessionDedupKey,
@@ -276,6 +277,42 @@ describe('shouldShowSessionInSidebar', () => {
         expect(shouldShowSessionInSidebar(stub)).toBe(false)
         expect(shouldShowSessionInSidebar(stub, 'stub')).toBe(true)
         expect(shouldShowSessionInSidebar({ ...stub, active: true })).toBe(true)
+    })
+})
+
+describe('session lifecycle filters', () => {
+    const active = makeSession({
+        id: 'active',
+        active: true,
+        metadata: { path: '/work/hapi', lifecycleState: 'running' }
+    })
+    const inactiveRunning = makeSession({
+        id: 'inactive-running',
+        metadata: { path: '/work/hapi', lifecycleState: 'running' }
+    })
+    const archived = makeSession({
+        id: 'archived',
+        metadata: { path: '/work/hapi', lifecycleState: 'archived' }
+    })
+
+    it('hide archived preserves inactive sessions that are still resumable', () => {
+        expect(filterArchivedSessions([active, inactiveRunning, archived]).map(session => session.id)).toEqual([
+            'active',
+            'inactive-running'
+        ])
+    })
+
+    it('active only continues to hide every inactive session', () => {
+        expect(filterActiveSessionsOnly([active, inactiveRunning, archived]).map(session => session.id)).toEqual([
+            'active'
+        ])
+    })
+
+    it('keeps a selected archived session visible', () => {
+        expect(filterArchivedSessions([active, archived], 'archived').map(session => session.id)).toEqual([
+            'active',
+            'archived'
+        ])
     })
 })
 

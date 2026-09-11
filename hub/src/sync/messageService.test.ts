@@ -309,6 +309,43 @@ describe('MessageService goal status filtering', () => {
     })
 })
 
+describe('MessageService Claude internal event filtering', () => {
+    it('hides persisted tool_progress heartbeats from message delivery', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'tool-progress-filter')
+        const heartbeat = {
+            role: 'agent',
+            content: {
+                type: 'output',
+                data: {
+                    type: 'tool_progress',
+                    tool_name: 'TaskOutput',
+                    elapsed_time_seconds: 240,
+                    heartbeat: true
+                }
+            }
+        }
+        const visible = {
+            role: 'agent',
+            content: {
+                type: 'output',
+                data: {
+                    type: 'assistant',
+                    message: { content: [{ type: 'text', text: 'Done' }] }
+                }
+            }
+        }
+
+        store.messages.addMessage(session.id, heartbeat)
+        store.messages.addMessage(session.id, visible)
+
+        const service = new MessageService(store, makeIo(() => {}), makePublisher() as any)
+
+        expect(service.getMessages(session.id).map(message => message.content)).toEqual([visible])
+        expect(service.getMessagesPage(session.id, { limit: 10, before: null }).messages.map(message => message.content)).toEqual([visible])
+    })
+})
+
 describe('MessageService message pagination', () => {
     function makeService(store: Store): MessageService {
         return new MessageService(store, makeIo(() => {}), makePublisher() as any)

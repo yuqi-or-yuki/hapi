@@ -61,6 +61,20 @@ export function isClaudeChatVisibleMessage(message: { type: unknown; subtype?: u
     return isClaudeChatVisibleSystemSubtype(message.subtype)
 }
 
+export function isClaudeChatVisibleContent(value: unknown): boolean {
+    const record = unwrapRoleWrappedRecordEnvelope(value)
+    if (record?.role !== 'agent' || !isObject(record.content) || record.content.type !== 'output') {
+        return true
+    }
+
+    const data = isObject(record.content.data) ? record.content.data : null
+    if (!data) {
+        return true
+    }
+
+    return isClaudeChatVisibleMessage({ type: data.type, subtype: data.subtype })
+}
+
 export function isRedundantGoalStatusMessageText(value: unknown): boolean {
     if (typeof value !== 'string') return false
     const message = value.trim()

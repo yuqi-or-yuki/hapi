@@ -124,6 +124,14 @@ export class Store {
         this.db.exec('PRAGMA synchronous = NORMAL')
         this.db.exec('PRAGMA foreign_keys = ON')
         this.db.exec('PRAGMA busy_timeout = 5000')
+        // The hub is single-threaded and store calls run on the event loop, so
+        // a cold read over a large session (multi-GB database, multi-MB message
+        // rows) otherwise degrades into one 4KB pread per page and stalls every
+        // request for seconds. Serve reads from an mmap'd view plus a page
+        // cache sized for real session tails instead of the 2MB default.
+        this.db.exec('PRAGMA mmap_size = 3221225472')
+        this.db.exec('PRAGMA cache_size = -262144')
+        this.db.exec('PRAGMA temp_store = MEMORY')
         this.initSchema()
 
         if (dbPath !== ':memory:' && !dbPath.startsWith('file::memory:')) {
