@@ -37,32 +37,12 @@ describe('resolveToolAutoApprovalDecision skill_lookup', () => {
     })
 })
 
-describe('resolveToolAutoApprovalDecision ping_peer', () => {
-    it.each([
-        'ping_peer',
-        'mcp__hapi__ping_peer',
-        'hapi_ping_peer',
-        'Ping Peer Session'
-    ])('does not auto-approve %s in default mode', (toolName) => {
-        expect(resolveToolAutoApprovalDecision('default', toolName, 'call-1')).toBeNull()
-    })
-
-    it.each([
-        'ping_peer',
-        'mcp__hapi__ping_peer',
-        'hapi_ping_peer',
-        'Ping Peer Session'
-    ])('does not auto-approve %s in read-only mode', (toolName) => {
-        expect(resolveToolAutoApprovalDecision('read-only', toolName, 'call-1')).toBeNull()
-    })
-
+describe('resolveToolAutoApprovalDecision inspect_peer', () => {
     it('still auto-approves unrelated read tools in read-only mode', () => {
         expect(resolveToolAutoApprovalDecision('read-only', 'Read', 'call-1')).toBe('approved')
         expect(resolveToolAutoApprovalDecision('read-only', 'grep', 'call-2')).toBe('approved')
     })
-})
 
-describe('resolveToolAutoApprovalDecision inspect_peer', () => {
     it.each([
         'inspect_peer',
         'mcp__hapi__inspect_peer',

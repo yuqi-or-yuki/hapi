@@ -25,10 +25,9 @@ import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR, DISPLAY_VIDEO
 import { resolveSkill } from "@/modules/common/skills";
 import {
     INSPECT_PEER_TOOL_DESCRIPTION,
-    PING_PEER_TOOL_DESCRIPTION,
     SESSION_ID_PREFIX_PARAM_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation'
-import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit, pingPeer } from "@/modules/pingPeer/pingPeer";
+import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit } from "@/modules/pingPeer/pingPeer";
 
 type StartHappyServerOptions = {
     emitTitleSummary?: boolean;
@@ -43,13 +42,12 @@ type StartHappyServerOptions = {
 const CLAUDE_MANUAL_APPROVAL_HAPI_TOOLS = new Set([
     'display_media',
     'display_video',
-    'ping_peer',
     'inspect_peer'
 ]);
 
 /**
  * Map HAPI MCP tool names to Claude `--allowedTools` entries.
- * Keeps `display_media` / `display_video` (arbitrary local-path readers), `ping_peer`, and
+ * Keeps `display_media` / `display_video` (arbitrary local-path readers) and
  * `inspect_peer` off the auto-allow list so they still prompt.
  * `list_peers` stays allowed (discovery shortlist only).
  */
@@ -108,11 +106,6 @@ function createHapiMcpServer(
     const displayMediaInputSchema: z.ZodTypeAny = z.object({
         path: z.string().describe('Local filesystem path of the media or file to send to the user'),
         title: z.string().trim().min(1).max(255).optional().describe('Optional display title or filename'),
-    });
-
-    const pingPeerInputSchema: z.ZodTypeAny = z.object({
-        sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
-        message: z.string().min(1).describe('Message text to deliver to the target session'),
     });
 
     const maxInlineMediaBytes = 25 * 1024 * 1024;
@@ -319,45 +312,6 @@ function createHapiMcpServer(
         }
     });
 
-    mcp.registerTool<any, any>('ping_peer', {
-        description: PING_PEER_TOOL_DESCRIPTION,
-        title: 'Ping Peer Session',
-        inputSchema: pingPeerInputSchema,
-    }, async (args: { sessionIdPrefix: string; message: string }) => {
-        logger.debug('[hapiMCP] ping_peer:', args.sessionIdPrefix);
-        try {
-            const result = await pingPeer({
-                sessionIdPrefix: args.sessionIdPrefix,
-                message: args.message,
-            });
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Delivered to ${result.sessionId}${result.resumed ? ' (resumed)' : ''} (${result.name})`,
-                    },
-                ],
-                isError: false,
-            };
-        } catch (error) {
-            const message = error instanceof PingPeerError
-                ? error.message
-                : error instanceof Error
-                    ? error.message
-                    : String(error);
-            logger.debug('[hapiMCP] ping_peer failed:', message);
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Failed to ping peer: ${message}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-    });
-
     mcp.registerTool<any, any>('inspect_peer', {
         description: INSPECT_PEER_TOOL_DESCRIPTION,
         title: 'Inspect Peer Session',
@@ -398,7 +352,7 @@ function createHapiMcpServer(
     });
 
     mcp.registerTool<any, any>('list_peers', {
-        description: 'List peer HAPI sessions on the same hub/namespace (id prefix, active, flavor, name). Uses this session\'s hub credentials - works from runner-spawned agents without being on the hub host. Prefer this over shelling `hapi ping-peer --list`. Then call inspect_peer / ping_peer with a listed id.',
+        description: 'List peer HAPI sessions on the same hub/namespace (id prefix, active, flavor, name). Uses this session\'s hub credentials - works from runner-spawned agents without being on the hub host. Then call inspect_peer with a listed id.',
         title: 'List Peer Sessions',
         inputSchema: listPeersInputSchema,
     }, async (args: { limit?: number }) => {
@@ -588,8 +542,8 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
 
     // claim_loop / claim_debate are fork-local HAPI bookkeeping tools.
     const toolNames = enableChangeTitle
-        ? ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer', 'claim_loop', 'claim_debate']
-        : ['display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer', 'claim_loop', 'claim_debate'];
+        ? ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'inspect_peer', 'claim_loop', 'claim_debate']
+        : ['display_image', 'display_video', 'display_media', 'list_peers', 'inspect_peer', 'claim_loop', 'claim_debate'];
     if (options.skillLookup) {
         toolNames.push('skill_lookup');
     }

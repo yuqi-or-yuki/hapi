@@ -1,7 +1,7 @@
 /**
  * HAPI MCP STDIO Bridge
  *
- * Minimal STDIO MCP server exposing HAPI tools such as `change_title`, `display_image`, `display_video`, `display_media`, `list_peers`, `ping_peer`, and `inspect_peer`.
+ * Minimal STDIO MCP server exposing HAPI tools such as `change_title`, `display_image`, `display_video`, `display_media`, `list_peers`, and `inspect_peer`.
  * On invocation it forwards the tool call to an existing HAPI HTTP MCP server
  * using the StreamableHTTPClientTransport.
  *
@@ -19,11 +19,10 @@ import { z } from 'zod';
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from '@/modules/common/displayImagePrompt';
 import {
   INSPECT_PEER_TOOL_DESCRIPTION,
-  PING_PEER_TOOL_DESCRIPTION,
   SESSION_ID_PREFIX_PARAM_DESCRIPTION,
 } from '@hapi/protocol/sessionCitation';
 
-const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'ping_peer', 'inspect_peer'];
+const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'inspect_peer'];
 
 function parseArgs(argv: string[]): { url: string | null; toolNames: Set<string> } {
   let url: string | null = null;
@@ -196,36 +195,6 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
       );
     }
 
-    const pingPeerInputSchema: z.ZodTypeAny = z.object({
-      sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
-      message: z.string().min(1).describe('Message text to deliver to the target session'),
-    });
-
-    if (toolNames.has('ping_peer')) {
-      server.registerTool<any, any>(
-        'ping_peer',
-        {
-          description: PING_PEER_TOOL_DESCRIPTION,
-          title: 'Ping Peer Session',
-          inputSchema: pingPeerInputSchema,
-        },
-        async (args: Record<string, unknown>) => {
-          try {
-            const client = await ensureHttpClient();
-            const response = await client.callTool({ name: 'ping_peer', arguments: args });
-            return response as any;
-          } catch (error) {
-            return {
-              content: [
-                { type: 'text' as const, text: `Failed to ping peer: ${error instanceof Error ? error.message : String(error)}` },
-              ],
-              isError: true,
-            };
-          }
-        }
-      );
-    }
-
     const inspectPeerInputSchema: z.ZodTypeAny = z.object({
       sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
       messageLimit: z.number().int().min(1).max(100).optional().describe(
@@ -268,7 +237,7 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
       server.registerTool<any, any>(
         'list_peers',
         {
-          description: 'List peer HAPI sessions on the same hub/namespace (id prefix, active, flavor, name). Uses this session\'s hub credentials - works from runner-spawned agents without being on the hub host. Prefer this over shelling `hapi ping-peer --list`. Then call inspect_peer / ping_peer with a listed id.',
+          description: 'List peer HAPI sessions on the same hub/namespace (id prefix, active, flavor, name). Uses this session\'s hub credentials - works from runner-spawned agents without being on the hub host. Then call inspect_peer with a listed id.',
           title: 'List Peer Sessions',
           inputSchema: listPeersInputSchema,
         },

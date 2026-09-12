@@ -26,7 +26,6 @@ export const TITLE_INSTRUCTION = trimIdent(`
     ${DISPLAY_MEDIA_PROMPT_CODEX}
     ${buildSessionCitationSteerInstruction({
         inspectTool: 'functions.hapi__inspect_peer',
-        pingTool: 'functions.hapi__ping_peer',
         listPeersTool: 'functions.hapi__list_peers',
     })}
 `);

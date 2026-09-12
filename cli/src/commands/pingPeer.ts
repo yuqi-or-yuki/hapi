@@ -31,7 +31,7 @@ ${chalk.bold('Usage:')}
   hapi ping-peer --list
 
 ${chalk.bold('Notes:')}
-  Do not reinvent JWT + curl for peer handoffs. Prefer this command or MCP ping_peer / list_peers.
+  Do not reinvent JWT + curl for peer handoffs. Prefer this command or MCP list_peers.
   Resolves by id prefix (8 chars OK). Same hub token/namespace as this CLI.
   Inactive sessions are resumed via POST /api/sessions/:id/resume, then messaged.
   When a user cites [title](/sessions/<id>) or Copy-reference

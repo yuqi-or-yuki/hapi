@@ -101,14 +101,12 @@ describe('buildSessionCitationSteerInstruction', () => {
     it('mentions both citation forms and forbids local FS search', () => {
         const text = buildSessionCitationSteerInstruction({
             inspectTool: 'mcp__hapi__inspect_peer',
-            pingTool: 'mcp__hapi__ping_peer',
             listPeersTool: 'mcp__hapi__list_peers',
         })
         expect(text).toContain('[title](/sessions/<id>)')
         expect(text).toContain('See session')
         expect(text).toContain('/sessions/<id>')
         expect(text).toContain('mcp__hapi__inspect_peer')
-        expect(text).toContain('mcp__hapi__ping_peer')
         expect(text).toContain('mcp__hapi__list_peers')
         expect(text.toLowerCase()).toMatch(/not.*(grep|glob|filesystem|local file)/i)
     })

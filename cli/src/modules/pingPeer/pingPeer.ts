@@ -2,7 +2,7 @@
  * Resume-if-inactive + wait-active + POST /api/sessions/:id/messages,
  * plus read-only inspectPeer (GET session + messages, never resume).
  *
- * Shared by `hapi ping-peer` / `hapi inspect-peer` and MCP `ping_peer` /
+ * Shared by `hapi ping-peer` / `hapi inspect-peer` and MCP
  * `inspect_peer`. Uses the same hub JWT flow as the web app
  * (`POST /api/auth` with CLI_API_TOKEN), scoped to the token's namespace.
  * Callers must not invent parallel auth or arbitrary hosts.
@@ -87,7 +87,7 @@ function defaultSleep(ms: number): Promise<void> {
 const AUTH_RECOVERY_HINT =
     'On a remote runner, set HAPI_API_URL to the runner hub, and set CLI_API_TOKEN ' +
     'or run `hapi auth login` to save the token. Inside a HAPI session prefer MCP ' +
-    '`list_peers` / `ping_peer` / `inspect_peer`, which use the session CLI credentials.'
+    '`list_peers` / `inspect_peer`, which use the session CLI credentials.'
 
 function resolveApiUrl(apiUrl?: string): string {
     const raw = (apiUrl ?? configuration.apiUrl).trim().replace(/\/+$/, '')
@@ -448,9 +448,9 @@ export function formatPeerSessionsList(
     })
     const omitted = sorted.length - rows.length
     if (options.hasMore) {
-        rows.push('  … more sessions available (narrow with inspect_peer / ping_peer by id)')
+        rows.push('  … more sessions available (narrow with inspect_peer by id)')
     } else if (omitted > 0) {
-        rows.push(`  … ${omitted} more (narrow with inspect_peer / ping_peer by id)`)
+        rows.push(`  … ${omitted} more (narrow with inspect_peer by id)`)
     }
     return rows.join('\n')
 }

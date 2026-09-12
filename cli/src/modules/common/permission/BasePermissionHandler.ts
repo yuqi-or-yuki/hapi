@@ -41,17 +41,14 @@ const AUTO_APPROVE_EXACT_TOOL_NAMES = new Set([
     // ACP permission requests often surface MCP tool title, not the snake_case name.
     'list peer sessions'
 ]);
-// ping_peer / inspect_peer intentionally omitted from always-approve: they can
-// resume+inject into another session or read peer histories, so permission
-// modes must still gate them. Treat both as write-like in read-only so ACP
-// titles such as "Ping Peer Session" / "Inspect Peer Session" also require
+// inspect_peer intentionally omitted from always-approve: it reads peer
+// histories, so permission modes must still gate it. Treat it as write-like in
+// read-only so ACP titles such as "Inspect Peer Session" also require
 // approval. list_peers is discovery-only and is auto-approved above.
 // claim_debate / claim_loop are fork-local HAPI bookkeeping tools with no
 // side effects outside the session, so they stay auto-approved.
 const AUTO_APPROVE_TOOL_ID_HINTS = ['change_title', 'claim_debate', 'claim_loop', 'save_memory'];
 const SENSITIVE_TOOL_NAME_HINTS = [
-    'ping_peer',
-    'ping peer',
     'inspect_peer',
     'inspect peer',
 ];

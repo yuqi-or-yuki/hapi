@@ -23,7 +23,6 @@ export const TITLE_INSTRUCTION = trimIdent(`
     ${HAPI_MCP_BRIDGE_PROMPT}
     ${buildSessionCitationSteerInstruction({
         inspectTool: 'hapi_inspect_peer',
-        pingTool: 'hapi_ping_peer',
         listPeersTool: 'hapi_list_peers',
     })}
     ${SKILL_LOOKUP_INSTRUCTION}
@@ -43,7 +42,6 @@ export const OPENCODE_NATIVE_TOOL_INSTRUCTION = trimIdent(`
     ${DISPLAY_MEDIA_PROMPT_HAPI_MCP}
     ${buildSessionCitationSteerInstruction({
         inspectTool: 'hapi_inspect_peer',
-        pingTool: 'hapi_ping_peer',
         listPeersTool: 'hapi_list_peers',
     })}
     ${SKILL_LOOKUP_INSTRUCTION}
