@@ -1324,7 +1324,7 @@ export function SessionList(props: {
     const { hideArchivedSessions } = useHideArchivedSessions()
     const { sessionPreviewLimit } = useSessionPreviewLimit()
     const { sessionListStatusMode } = useSessionListStatusMode()
-    const { showActiveSessionsOnly } = useShowActiveSessionsOnly()
+    const { showActiveSessionsOnly, setShowActiveSessionsOnly } = useShowActiveSessionsOnly()
     const showDetailedStatus = sessionListStatusMode === 'detailed'
     const [customStart, setCustomStart] = useState('')
     const [customEnd, setCustomEnd] = useState('')
@@ -1743,6 +1743,16 @@ export function SessionList(props: {
                     }}
                 />
             ) : null}
+
+            <label className="mx-3 mb-2 flex min-h-8 cursor-pointer items-center gap-2 text-xs text-[var(--app-hint)]">
+                <input
+                    type="checkbox"
+                    checked={showActiveSessionsOnly}
+                    onChange={(event) => setShowActiveSessionsOnly(event.target.checked)}
+                    className="h-4 w-4 accent-[var(--app-link)]"
+                />
+                {t('settings.display.activeSessionsOnly')}
+            </label>
 
             {props.sessions.length === 0 && (
                 <SessionsEmptyState

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 
 export const DEFAULT_SHOW_ACTIVE_SESSIONS_ONLY = false
+const CHANGE_EVENT = 'hapi-show-active-sessions-only-changed'
 
 function getShowActiveSessionsOnlyStorageKey(): string {
     return 'hapi-show-active-sessions-only'
@@ -72,8 +73,15 @@ export function useShowActiveSessionsOnly(): {
             setShowActiveSessionsOnlyState(parseShowActiveSessionsOnly(event.newValue))
         }
 
+        const onChange = (event: Event) => {
+            setShowActiveSessionsOnlyState((event as CustomEvent<boolean>).detail)
+        }
         window.addEventListener('storage', onStorage)
-        return () => window.removeEventListener('storage', onStorage)
+        window.addEventListener(CHANGE_EVENT, onChange)
+        return () => {
+            window.removeEventListener('storage', onStorage)
+            window.removeEventListener(CHANGE_EVENT, onChange)
+        }
     }, [])
 
     const setShowActiveSessionsOnly = useCallback((value: boolean) => {
@@ -83,6 +91,9 @@ export function useShowActiveSessionsOnly(): {
             safeRemoveItem(getShowActiveSessionsOnlyStorageKey())
         } else {
             safeSetItem(getShowActiveSessionsOnlyStorageKey(), String(value))
+        }
+        if (isBrowser()) {
+            window.dispatchEvent(new CustomEvent<boolean>(CHANGE_EVENT, { detail: value }))
         }
     }, [])
 
