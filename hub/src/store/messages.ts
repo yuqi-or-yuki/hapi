@@ -545,8 +545,12 @@ export function getUninvokedLocalMessages(
     options?: { deliverableOnly?: boolean }
 ): StoredMessage[] {
     const deliverableClause = options?.deliverableOnly ? " AND delivery_state = 'queued'" : ''
+    // INDEXED BY: the planner otherwise walks the whole session via
+    // idx_messages_session (tens of thousands of multi-MB rows for long
+    // sessions, on every latest-page request); the partial local_id index only
+    // holds user-sent rows, a tiny fraction of the session.
     const rows = db.prepare(
-        `SELECT * FROM messages WHERE session_id = ? AND invoked_at IS NULL AND local_id IS NOT NULL${deliverableClause} ORDER BY seq ASC`
+        `SELECT * FROM messages INDEXED BY idx_messages_local_id WHERE session_id = ? AND local_id IS NOT NULL AND invoked_at IS NULL${deliverableClause} ORDER BY seq ASC`
     ).all(sessionId) as DbMessageRow[]
     return rows.map(toStoredMessage)
 }
@@ -650,18 +654,43 @@ export function countFutureScheduledLocalMessages(
 ): number {
     const row = db.prepare(`
         SELECT COUNT(*) AS count
-        FROM messages
-        WHERE session_id = ?
+        FROM messages INDEXED BY idx_messages_scheduled_pending
+        WHERE scheduled_at IS NOT NULL
           AND invoked_at IS NULL
-          AND local_id IS NOT NULL
-          AND scheduled_at IS NOT NULL
           AND scheduled_at > ?
+          AND session_id = ?
+          AND local_id IS NOT NULL
           AND delivery_state = 'queued'
-    `).get(sessionId, now) as { count: number } | undefined
+    `).get(now, sessionId) as { count: number } | undefined
     return row?.count ?? 0
 }
 
 /** Batch variant for GET /sessions — one query for all session IDs in a namespace. */
+/**
+ * Pending (not yet invoked) scheduled rows due after `now`.
+ *
+ * Deliberately does NOT filter by session_id in SQL: with a `session_id IN (...)`
+ * predicate the planner picks idx_messages_session and walks every message row
+ * of every listed session (hundreds of thousands of multi-MB rows on a big hub
+ * DB, several seconds per call on the event loop). Without it the partial index
+ * idx_messages_scheduled_pending answers the query in microseconds because
+ * pending scheduled rows are always a tiny set; callers filter by session in JS.
+ */
+function listFutureScheduledPending(
+    db: Database,
+    now: number
+): { session_id: string; scheduled_at: number }[] {
+    return db.prepare(`
+        SELECT session_id, scheduled_at
+        FROM messages INDEXED BY idx_messages_scheduled_pending
+        WHERE scheduled_at IS NOT NULL
+          AND invoked_at IS NULL
+          AND scheduled_at > ?
+          AND local_id IS NOT NULL
+          AND delivery_state = 'queued'
+    `).all(now) as { session_id: string; scheduled_at: number }[]
+}
+
 export function countFutureScheduledBySessionIds(
     db: Database,
     sessionIds: string[],
@@ -672,21 +701,10 @@ export function countFutureScheduledBySessionIds(
         return counts
     }
 
-    const placeholders = sessionIds.map(() => '?').join(',')
-    const rows = db.prepare(`
-        SELECT session_id, COUNT(*) AS count
-        FROM messages
-        WHERE session_id IN (${placeholders})
-          AND invoked_at IS NULL
-          AND local_id IS NOT NULL
-          AND scheduled_at IS NOT NULL
-          AND scheduled_at > ?
-          AND delivery_state = 'queued'
-        GROUP BY session_id
-    `).all(...sessionIds, now) as { session_id: string; count: number }[]
-
-    for (const row of rows) {
-        counts.set(row.session_id, row.count)
+    const wanted = new Set(sessionIds)
+    for (const row of listFutureScheduledPending(db, now)) {
+        if (!wanted.has(row.session_id)) continue
+        counts.set(row.session_id, (counts.get(row.session_id) ?? 0) + 1)
     }
     return counts
 }
@@ -702,21 +720,13 @@ export function minFutureScheduledAtBySessionIds(
         return nextAt
     }
 
-    const placeholders = sessionIds.map(() => '?').join(',')
-    const rows = db.prepare(`
-        SELECT session_id, MIN(scheduled_at) AS next_at
-        FROM messages
-        WHERE session_id IN (${placeholders})
-          AND invoked_at IS NULL
-          AND local_id IS NOT NULL
-          AND scheduled_at IS NOT NULL
-          AND scheduled_at > ?
-          AND delivery_state = 'queued'
-        GROUP BY session_id
-    `).all(...sessionIds, now) as { session_id: string; next_at: number }[]
-
-    for (const row of rows) {
-        nextAt.set(row.session_id, row.next_at)
+    const wanted = new Set(sessionIds)
+    for (const row of listFutureScheduledPending(db, now)) {
+        if (!wanted.has(row.session_id)) continue
+        const current = nextAt.get(row.session_id)
+        if (current === undefined || row.scheduled_at < current) {
+            nextAt.set(row.session_id, row.scheduled_at)
+        }
     }
     return nextAt
 }

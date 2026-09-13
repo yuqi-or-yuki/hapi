@@ -270,41 +270,76 @@ async function computeLoopActiveIds(sessions: Session[]): Promise<Set<string>> {
     return result
 }
 
-// One badge scan at a time, and requests never wait longer than the timeout:
-// they fall back to the last completed snapshot (initially empty). If a scan
-// wedges on blocked file access, the in-flight guard stays set, so no further
-// scans pile onto the stuck I/O pool and the hub keeps serving instantly.
+// Badge scans touch the filesystem for every unique session path, which can
+// take seconds on a busy machine (or hang on a pending TCC prompt). They must
+// never sit on the request path: the list endpoint is polled constantly by the
+// web client and it shares the single event loop with everything else.
+//
+// Strategy: memoize the last completed snapshot keyed by the scanned input
+// (session ids + paths). A request with a matching, fresh snapshot returns it
+// immediately. A stale-but-matching snapshot is returned immediately too, while
+// a single background scan refreshes it. Only a request whose input has no
+// completed snapshot at all (first call, or the set of sessions changed) waits,
+// and even then never longer than BADGE_SCAN_TIMEOUT_MS.
 const BADGE_SCAN_TIMEOUT_MS = 1500
+const BADGE_SNAPSHOT_TTL_MS = 5000
 
 interface BadgeSnapshot {
     loopActiveIds: Set<string>
     debateActiveIds: Set<string>
 }
 
-let badgeSnapshot: BadgeSnapshot = { loopActiveIds: new Set(), debateActiveIds: new Set() }
+const EMPTY_BADGE_SNAPSHOT: BadgeSnapshot = { loopActiveIds: new Set(), debateActiveIds: new Set() }
+let badgeSnapshot: BadgeSnapshot = EMPTY_BADGE_SNAPSHOT
+let badgeSnapshotKey: string | null = null
+let badgeSnapshotAt = 0
 let badgeScanInFlight: Promise<void> | null = null
 let badgeScanTimedOut = false
 
+function badgeScanKey(sessions: Session[]): string {
+    return sessions
+        .map((s) => `${s.id}\u0000${s.metadata?.path ?? ''}`)
+        .sort()
+        .join('\u0001')
+}
+
+function startBadgeScan(sessions: Session[], key: string): Promise<void> {
+    const scan = (async () => {
+        const [loopActiveIds, debateActiveIds] = await Promise.all([
+            computeLoopActiveIds(sessions),
+            computeDebateActiveIds(sessions)
+        ])
+        badgeSnapshot = { loopActiveIds, debateActiveIds }
+        badgeSnapshotKey = key
+        badgeSnapshotAt = Date.now()
+    })()
+        .catch(() => {})
+        .then(() => {
+            badgeScanInFlight = null
+            badgeScanTimedOut = false
+        })
+    badgeScanInFlight = scan
+    return scan
+}
+
 async function currentBadgeIds(sessions: Session[]): Promise<BadgeSnapshot> {
-    if (!badgeScanInFlight) {
-        badgeScanInFlight = (async () => {
-            const [loopActiveIds, debateActiveIds] = await Promise.all([
-                computeLoopActiveIds(sessions),
-                computeDebateActiveIds(sessions)
-            ])
-            badgeSnapshot = { loopActiveIds, debateActiveIds }
-        })()
-            .catch(() => {})
-            .then(() => {
-                badgeScanInFlight = null
-                badgeScanTimedOut = false
-            })
-    } else if (badgeScanTimedOut) {
-        // The in-flight scan already blew its deadline once (blocked file access
-        // to a session directory?) — don't make every request re-wait for it.
+    const key = badgeScanKey(sessions)
+    const hasMatchingSnapshot = badgeSnapshotKey === key
+    const isFresh = hasMatchingSnapshot && Date.now() - badgeSnapshotAt < BADGE_SNAPSHOT_TTL_MS
+
+    if (isFresh) {
         return badgeSnapshot
     }
-    const scan = badgeScanInFlight
+    if (!badgeScanInFlight) {
+        startBadgeScan(sessions, key)
+    }
+    if (hasMatchingSnapshot || badgeScanTimedOut) {
+        // Serve the last snapshot (at most a few seconds stale) and let the
+        // background scan catch up; never block the request on file I/O.
+        return badgeSnapshot
+    }
+
+    const scan = badgeScanInFlight!
     const timedOut = await Promise.race([
         scan.then(() => false),
         new Promise<boolean>((resolve) => {
@@ -316,7 +351,7 @@ async function currentBadgeIds(sessions: Session[]): Promise<BadgeSnapshot> {
         badgeScanTimedOut = true
         console.warn('[sessions] badge scan exceeded timeout (blocked file access to a session directory?); serving cached badge state')
     }
-    return badgeSnapshot
+    return badgeSnapshotKey === key ? badgeSnapshot : EMPTY_BADGE_SNAPSHOT
 }
 
 export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, store?: Store): Hono<WebAppEnv> {

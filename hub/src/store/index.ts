@@ -129,7 +129,9 @@ export class Store {
         // rows) otherwise degrades into one 4KB pread per page and stalls every
         // request for seconds. Serve reads from an mmap'd view plus a page
         // cache sized for real session tails instead of the 2MB default.
-        this.db.exec('PRAGMA mmap_size = 3221225472')
+        // Must exceed the DB file size or pages past the window fall back to
+        // pread() page-by-page; virtual reservation only, costs nothing unused.
+        this.db.exec('PRAGMA mmap_size = 17179869184')
         this.db.exec('PRAGMA cache_size = -262144')
         this.db.exec('PRAGMA temp_store = MEMORY')
         this.initSchema()
@@ -270,8 +272,12 @@ export class Store {
         const target = this.db.prepare('SELECT namespace FROM sessions WHERE id = ?')
             .get(sessionId) as { namespace: string } | undefined
         if (!target) return false
-        const rows = this.db.prepare('SELECT metadata FROM sessions WHERE namespace = ? AND metadata IS NOT NULL')
-            .all(target.namespace) as Array<{ metadata: string }>
+        // Called on every CLI keepalive (2s per live session); prefilter in SQL so
+        // the namespace's metadata is not JSON-parsed row by row each time when
+        // no session has ever had a clear operation (the common case).
+        const rows = this.db.prepare(
+            "SELECT metadata FROM sessions WHERE namespace = ? AND metadata IS NOT NULL AND instr(metadata, 'opencodeClearOperation') > 0"
+        ).all(target.namespace) as Array<{ metadata: string }>
         return rows.some((row) => {
             try {
                 const operation = (JSON.parse(row.metadata) as {

@@ -56,6 +56,38 @@ export function shouldInvalidateSessionListForEvent(scope: SSEScope, eventType: 
 }
 
 /**
+ * Message-stream events arrive on the global connection for every session on
+ * the hub, and `messages-consumed` fires on every agent turn. The only
+ * SessionSummary fields they can move are the scheduled-queue ones, so a
+ * session with nothing scheduled has nothing in the list to refresh — skip the
+ * full `/api/sessions` refetch (and the hub-side work behind it) for those.
+ */
+export function messageStreamEventTouchesSessionList(
+    event: SyncEvent,
+    summary: Pick<SessionSummary, 'futureScheduledMessageCount' | 'scheduledDueAts' | 'nextScheduledAt'> | undefined
+): boolean {
+    switch (event.type) {
+        case 'message-received':
+            return event.message.scheduledAt != null
+        case 'scheduled-matured':
+            return true
+        case 'message-cancelled':
+        case 'messages-consumed':
+        case 'messages-indeterminate':
+        case 'messages-requeued':
+            if (!summary) {
+                // Unknown to the cached list: refetch to learn about it.
+                return true
+            }
+            return (summary.futureScheduledMessageCount ?? 0) > 0
+                || (summary.scheduledDueAts?.length ?? 0) > 0
+                || summary.nextScheduledAt != null
+        default:
+            return false
+    }
+}
+
+/**
  * @deprecated Prefer gating against SessionSummary watermarks. Kept for unit
  * tests of the old "detail required" rule; summary path no longer uses this
  * for metadata/agentState/todos (teamState is a summary no-op).
@@ -694,16 +726,11 @@ export function useSSE(options: {
             }
 
             if (scope === 'global' && MESSAGE_STREAM_EVENT_TYPES.has(event.type)) {
-                if (event.type === 'message-received' && event.message.scheduledAt != null) {
-                    queueSessionListInvalidation()
-                }
-                if (
-                    event.type === 'message-cancelled'
-                    || event.type === 'messages-consumed'
-                    || event.type === 'messages-indeterminate'
-                    || event.type === 'messages-requeued'
-                    || event.type === 'scheduled-matured'
-                ) {
+                const eventSessionId = 'sessionId' in event ? event.sessionId : undefined
+                const cachedSummary = queryClient
+                    .getQueryData<SessionsResponse>(queryKeys.sessions)
+                    ?.sessions.find((session) => session.id === eventSessionId)
+                if (messageStreamEventTouchesSessionList(event, cachedSummary)) {
                     queueSessionListInvalidation()
                 }
                 // The global `all` subscription also receives message-stream events.

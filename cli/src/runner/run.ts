@@ -116,6 +116,17 @@ export function releaseRecoveredSpawnDedupe(
   existingSessionIdByChildPid.delete(pid);
 }
 
+/** Resolves once runner.state.json names no live runner process (polled). */
+async function waitForExistingRunnerExit(pollIntervalMs = 5_000): Promise<'runner-gone'> {
+  while (true) {
+    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+    const state = await readRunnerState();
+    if (!state || !isProcessAlive(state.pid)) {
+      return 'runner-gone';
+    }
+  }
+}
+
 export async function startRunner(options: { workspaceRoots?: string[] } = {}): Promise<void> {
   // We don't have cleanup function at the time of server construction
   // Control flow is:
@@ -228,14 +239,33 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
   if (!isAuthorizedHandoff) {
     // Check if already running
     // Check if running runner version matches current CLI version
-    const runningRunnerVersionMatches = await isRunnerRunningCurrentlyInstalledHappyVersion();
-    if (!runningRunnerVersionMatches) {
-      logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
-      await stopRunner();
-    } else {
+    while (true) {
+      const runningRunnerVersionMatches = await isRunnerRunningCurrentlyInstalledHappyVersion();
+      if (!runningRunnerVersionMatches) {
+        logger.debug('[RUNNER RUN] Runner version mismatch detected, restarting runner with current CLI version');
+        await stopRunner();
+        break;
+      }
       logger.debug('[RUNNER RUN] Runner version matches, keeping existing runner');
-      console.log('Runner already running with matching version');
-      process.exit(0);
+      if (process.env.HAPI_RUNNER_STANDBY !== '1') {
+        console.log('Runner already running with matching version');
+        process.exit(0);
+      }
+      // HAPI_RUNNER_STANDBY=1: for KeepAlive supervisors (launchd, systemd
+      // Restart=always). The live runner is often no longer the supervisor's
+      // child after a version handoff, so an immediate exit 0 here made the
+      // supervisor boot a fresh CLI every throttle interval (~10s), forever.
+      // Stand by instead and take over the moment the live runner is gone.
+      console.log('Runner already running with matching version; standing by until it exits');
+      const outcome = await Promise.race([
+        waitForExistingRunnerExit(),
+        resolvesWhenShutdownRequested.then(() => 'shutdown' as const)
+      ]);
+      if (outcome === 'shutdown') {
+        logger.debug('[RUNNER RUN] Shutdown requested while standing by; exiting');
+        process.exit(0);
+      }
+      logger.debug('[RUNNER RUN] Existing runner exited; standby instance taking over');
     }
   }
 

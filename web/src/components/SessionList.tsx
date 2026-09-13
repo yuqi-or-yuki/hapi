@@ -1844,6 +1844,10 @@ export function SessionList(props: {
                                                 {/* Level 3: User groups + ungrouped sessions */}
                                                 <div className="collapsible-panel" data-open={!isCollapsed || undefined}>
                                                     <div className="collapsible-inner">
+                                                    {/* A collapsed project is hidden by CSS but every session row
+                                                        (with its action-menu hooks and dialogs) was still mounted;
+                                                        skip the rows entirely while collapsed. */}
+                                                    {isCollapsed ? null : (
                                                     <div className="flex flex-col ml-3 pl-1 pr-1 py-1">
                                                         {/* User groups */}
                                                         {projectUserGroups.map(ug => {
@@ -1992,6 +1996,7 @@ export function SessionList(props: {
                                                             </button>
                                                         ) : null}
                                                     </div>
+                                                    )}
                                                     </div>
                                                 </div>
                                             </div>

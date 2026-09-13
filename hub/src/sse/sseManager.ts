@@ -12,7 +12,7 @@ export type SSESubscription = {
 }
 
 type SSEConnection = SSESubscription & {
-    send: (event: SyncEvent, eventId?: string) => void | Promise<void>
+    send: (event: SyncEvent, eventId?: string, serialized?: string) => void | Promise<void>
     sendHeartbeat: () => void | Promise<void>
     /**
      * Non-null while a resumed connection is still writing its replay: live
@@ -71,7 +71,7 @@ export class SSEManager {
         visibility?: VisibilityState
         /** Last event id the client saw; enables replay instead of resync. */
         resumeFrom?: string | null
-        send: (event: SyncEvent, eventId?: string) => void | Promise<void>
+        send: (event: SyncEvent, eventId?: string, serialized?: string) => void | Promise<void>
         sendHeartbeat: () => void | Promise<void>
     }): SSESubscription & SSEResumeResult {
         const subscription: SSEConnection = {
@@ -185,9 +185,9 @@ export class SSEManager {
         return { resume: 'ok', replay }
     }
 
-    private recordEvent(event: SyncEvent): number {
+    private recordEvent(event: SyncEvent, serialized: string): number {
         const seq = this.nextSeq++
-        const bytes = JSON.stringify(event).length
+        const bytes = serialized.length
         this.eventBuffer.push({ seq, event, bytes })
         this.eventBufferBytes += bytes
         while (
@@ -249,7 +249,10 @@ export class SSEManager {
     }
 
     broadcast(event: SyncEvent): void {
-        const seq = this.recordEvent(event)
+        // Serialize once per event, not once for byte accounting plus once per
+        // subscribed connection (session-updated payloads carry full agent state).
+        const serialized = JSON.stringify(event)
+        const seq = this.recordEvent(event, serialized)
         for (const connection of this.connections.values()) {
             if (!this.shouldSend(connection, event)) {
                 continue
@@ -263,7 +266,7 @@ export class SSEManager {
                 continue
             }
 
-            void Promise.resolve(connection.send(event, eventId)).catch(() => {
+            void Promise.resolve(connection.send(event, eventId, serialized)).catch(() => {
                 this.unsubscribe(connection.id)
             })
         }

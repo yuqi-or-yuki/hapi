@@ -84,7 +84,9 @@ class Logger {
     maxArrayLength: number = 10,
   ): void {
     if (!process.env.DEBUG) {
-      this.debug(`In production, skipping message inspection`)
+      // Without this return every caller (one per agent stream event) still
+      // deep-cloned, truncated and serialized the object it claimed to skip.
+      return
     }
 
     // Some of our messages are huge, but we still want to show them in the logs

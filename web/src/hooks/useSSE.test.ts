@@ -11,6 +11,7 @@ import {
     isNewerVersionedPatch,
     isRenderIrrelevantPatch,
     isRenderIrrelevantSessionPatch,
+    messageStreamEventTouchesSessionList,
     shouldInvalidateSessionListForEvent,
     useSSE
 } from './useSSE'
@@ -281,6 +282,41 @@ describe('useSSE scope handling', () => {
 
     it('processes message stream events on full-scoped connections', () => {
         expect(isGlobalScopedMessageStreamEvent('full', 'message-received')).toBe(false)
+    })
+})
+
+describe('messageStreamEventTouchesSessionList', () => {
+    const consumed = {
+        type: 'messages-consumed' as const,
+        sessionId: 'session-1',
+        localIds: ['l-1'],
+        invokedAt: 1_000
+    } as Parameters<typeof messageStreamEventTouchesSessionList>[0]
+
+    it('skips the list refetch for a queue drain on a session with nothing scheduled', () => {
+        expect(messageStreamEventTouchesSessionList(consumed, makeSummary())).toBe(false)
+    })
+
+    it('refetches when the session has scheduled messages that the drain may have moved', () => {
+        expect(messageStreamEventTouchesSessionList(consumed, makeSummary({ futureScheduledMessageCount: 1 }))).toBe(true)
+        expect(messageStreamEventTouchesSessionList(consumed, makeSummary({ scheduledDueAts: [5_000] }))).toBe(true)
+        expect(messageStreamEventTouchesSessionList(consumed, makeSummary({ nextScheduledAt: 5_000 }))).toBe(true)
+    })
+
+    it('refetches for a session the cached list does not know yet', () => {
+        expect(messageStreamEventTouchesSessionList(consumed, undefined)).toBe(true)
+    })
+
+    it('always refetches on scheduled-matured and only for scheduled message-received', () => {
+        const matured = { type: 'scheduled-matured' as const, sessionId: 'session-1' } as Parameters<typeof messageStreamEventTouchesSessionList>[0]
+        expect(messageStreamEventTouchesSessionList(matured, makeSummary())).toBe(true)
+        const received = (scheduledAt: number | null) => ({
+            type: 'message-received' as const,
+            sessionId: 'session-1',
+            message: { id: 'm', seq: 1, createdAt: 1, content: null, scheduledAt }
+        }) as unknown as Parameters<typeof messageStreamEventTouchesSessionList>[0]
+        expect(messageStreamEventTouchesSessionList(received(null), makeSummary())).toBe(false)
+        expect(messageStreamEventTouchesSessionList(received(9_000), makeSummary())).toBe(true)
     })
 })
 

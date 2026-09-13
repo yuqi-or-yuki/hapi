@@ -240,6 +240,10 @@ describe('SessionList time filter', () => {
             />
         )
 
+        // Projects without an active or selected session start collapsed and
+        // render no rows until expanded.
+        fireEvent.click(screen.getByTitle('/work/recent'))
+        fireEvent.click(screen.getByTitle('/work/old'))
         expect(screen.getByRole('button', { name: /Recent session/ })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /Old session/ })).toBeInTheDocument()
 
@@ -312,6 +316,10 @@ describe('SessionList action menu parity', () => {
             />
         )
 
+        if (!active) {
+            // A project with only closed sessions starts collapsed (rows unmounted).
+            fireEvent.click(screen.getByTitle('/home/ubuntu'))
+        }
         fireEvent.contextMenu(screen.getByRole('button', { name: new RegExp(active ? 'Running session' : 'Closed session') }))
         fireEvent.click(screen.getByRole('menuitem', { name: 'Export conversation' }))
 
