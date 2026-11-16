@@ -92,6 +92,33 @@ describe('useVisibilityReporter', () => {
         })
     })
 
+    it('skips the initial report when the SSE connect URL already carried it', async () => {
+        const api = {
+            setVisibility: vi.fn().mockResolvedValue(undefined),
+        } as unknown as ApiClient
+
+        setVisibilityState('visible')
+        renderHook(() => useVisibilityReporter({ api, subscriptionId: 'sub-1', connectVisibility: 'visible' }))
+        expect(api.setVisibility).not.toHaveBeenCalled()
+
+        setVisibilityState('hidden')
+        await act(async () => {
+            document.dispatchEvent(new Event('visibilitychange'))
+        })
+        expect(api.setVisibility).toHaveBeenCalledTimes(1)
+        expect(api.setVisibility).toHaveBeenCalledWith({ subscriptionId: 'sub-1', visibility: 'hidden' })
+    })
+
+    it('reports when visibility changed between the connect URL and the handshake', () => {
+        const api = {
+            setVisibility: vi.fn().mockResolvedValue(undefined),
+        } as unknown as ApiClient
+
+        setVisibilityState('hidden')
+        renderHook(() => useVisibilityReporter({ api, subscriptionId: 'sub-1', connectVisibility: 'visible' }))
+        expect(api.setVisibility).toHaveBeenCalledWith({ subscriptionId: 'sub-1', visibility: 'hidden' })
+    })
+
     it('does not let a previous subscription unlock a new report', async () => {
         const oldReport = deferred<void>()
         const newReport = deferred<void>()

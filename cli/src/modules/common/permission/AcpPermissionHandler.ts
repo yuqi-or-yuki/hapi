@@ -9,6 +9,7 @@ import {
     type PendingPermissionRequest,
     type PermissionCompletion
 } from './BasePermissionHandler'
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests'
 
 interface PermissionResponseMessage {
     id: string
@@ -94,7 +95,7 @@ export class AcpPermissionHandler extends BasePermissionHandler<PermissionRespon
         const timestamp = Date.now()
         this.client.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [request.id]: {
                     tool: toolName,
@@ -104,7 +105,7 @@ export class AcpPermissionHandler extends BasePermissionHandler<PermissionRespon
                     status: 'approved',
                     decision
                 }
-            }
+            })
         }))
     }
 

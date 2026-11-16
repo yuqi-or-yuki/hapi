@@ -110,12 +110,8 @@ describe('startHappyServer skill_lookup', () => {
         expect(tools.tools.map((tool) => tool.name)).toEqual([
             'change_title',
             'display_image',
-            'claim_loop',
             'display_video',
-            'display_media',
-            'inspect_peer',
-            'list_peers',
-            'claim_debate'
+            'display_media'
         ])
     })
 
@@ -183,34 +179,27 @@ describe('startHappyServer skill_lookup', () => {
         await mcp.connect(new StreamableHTTPClientTransport(new URL(server.url)))
         const tools = await mcp.listTools()
 
-        expect(server.toolNames).toEqual(['display_image', 'display_video', 'display_media', 'list_peers', 'inspect_peer', 'claim_loop', 'claim_debate'])
+        expect(server.toolNames).toEqual(['display_image', 'display_video', 'display_media'])
         expect(tools.tools.map((tool) => tool.name)).toEqual([
             'display_image',
-            'claim_loop',
             'display_video',
-            'display_media',
-            'inspect_peer',
-            'list_peers',
-            'claim_debate'
+            'display_media'
         ])
     })
 
 })
 
 describe('toClaudeAllowedHapiMcpTools', () => {
-    it('keeps local-path and peer tools registered but out of Claude --allowedTools', () => {
+    it('keeps local-path tools registered but out of Claude --allowedTools', () => {
         expect(toClaudeAllowedHapiMcpTools([
             'change_title',
             'display_image',
             'display_video',
             'display_media',
-            'list_peers',
-            'inspect_peer',
             'skill_lookup'
         ])).toEqual([
             'mcp__hapi__change_title',
             'mcp__hapi__display_image',
-            'mcp__hapi__list_peers',
             'mcp__hapi__skill_lookup'
         ])
         expect(toClaudeAllowedHapiMcpTools(['display_video'])).not.toContain('mcp__hapi__display_video')

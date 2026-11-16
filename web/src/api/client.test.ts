@@ -227,17 +227,6 @@ describe('ApiClient error mapping', () => {
         expect(init).toMatchObject({ method: 'POST' })
     })
 
-    it('requests usage buckets in the viewer IANA time zone', async () => {
-        fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }))
-
-        const api = new ApiClient('test-token')
-        await api.getUsageSummary('7d', 'America/New_York')
-
-        expect(fetchMock.mock.calls[0]?.[0]).toBe(
-            '/api/usage/summary?range=7d&timeZone=America%2FNew_York'
-        )
-    })
-
     it('lets fetch set the multipart boundary for transcription uploads', async () => {
         fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ text: 'hello' }), { status: 200 }))
 

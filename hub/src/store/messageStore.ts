@@ -56,8 +56,28 @@ export class MessageStore {
         return addMessage(this.db, sessionId, content, localId, scheduledAt, createdAt)
     }
 
-    deleteLiveReasoningSnapshots(sessionId: string, streamId: string, keepMessageId?: string): number {
-        return deleteLiveReasoningSnapshots(this.db, sessionId, streamId, keepMessageId)
+    /** Last live snapshot row per reasoning stream. A stream re-sends a growing
+     *  snapshot every few hundred ms; remembering the previous row turns each
+     *  replacement into one DELETE by id instead of decoding the session tail. */
+    private readonly liveReasoningSnapshots = new Map<string, string>()
+
+    deleteLiveReasoningSnapshots(sessionId: string, streamId: string, keepMessageId?: string, keepIsLive: boolean = false): number {
+        const key = `${sessionId}\u0000${streamId}`
+        const previousId = this.liveReasoningSnapshots.get(key)
+        // The settled message that closes a stream always takes the scan path
+        // (once per stream) so it also sweeps any snapshot the fast path missed.
+        const removed = previousId === undefined || !keepIsLive
+            ? deleteLiveReasoningSnapshots(this.db, sessionId, streamId, keepMessageId)
+            : previousId === keepMessageId
+                ? 0
+                : Number(this.db.prepare('DELETE FROM messages WHERE session_id = ? AND id = ?').run(sessionId, previousId).changes)
+        if (keepIsLive && keepMessageId) {
+            if (this.liveReasoningSnapshots.size >= 2000) this.liveReasoningSnapshots.clear()
+            this.liveReasoningSnapshots.set(key, keepMessageId)
+        } else {
+            this.liveReasoningSnapshots.delete(key)
+        }
+        return removed
     }
 
     addImportedMessage(sessionId: string, content: unknown, localId: string, createdAt: number): { message: StoredMessage; inserted: boolean } {

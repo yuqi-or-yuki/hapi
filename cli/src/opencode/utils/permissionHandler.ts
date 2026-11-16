@@ -9,6 +9,7 @@ import {
     type PendingPermissionRequest,
     type PermissionCompletion
 } from '@/modules/common/permission/BasePermissionHandler';
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests';
 
 interface PermissionResponseMessage {
     id: string;
@@ -117,7 +118,7 @@ export class OpencodePermissionHandler extends BasePermissionHandler<PermissionR
 
         this.client.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [request.id]: {
                     tool: toolName,
@@ -127,7 +128,7 @@ export class OpencodePermissionHandler extends BasePermissionHandler<PermissionR
                     status: 'approved',
                     decision
                 }
-            }
+            })
         }));
 
         logger.debug(`[Opencode] Auto-approved ${toolName} (${request.id}) mode=${decision}`);
@@ -145,7 +146,7 @@ export class OpencodePermissionHandler extends BasePermissionHandler<PermissionR
         const status = outcome.outcome === 'selected' ? 'denied' : 'canceled';
         this.client.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [request.id]: {
                     tool: toolName,
@@ -156,7 +157,7 @@ export class OpencodePermissionHandler extends BasePermissionHandler<PermissionR
                     reason: 'Plan mode blocks tool execution',
                     decision: status === 'denied' ? 'denied' : 'abort'
                 }
-            }
+            })
         }));
 
         logger.debug(`[Opencode] Denied ${toolName} (${request.id}) in plan mode`);

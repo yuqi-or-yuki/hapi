@@ -77,11 +77,9 @@ export type SessionSummary = {
     model: string | null
     modelReasoningEffort?: string | null
     effort: string | null
-    /** Fork-local badge/schedule enrichment. Computed server-side in the
+    /** Fork-local schedule enrichment. Computed server-side in the
      *  /sessions HTTP route only, so anything building a SessionSummary from
-     *  a raw Session (SSE patches, fixtures, tests) legitimately omits them. */
-    loopActive?: boolean
-    debateActive?: boolean
+     *  a raw Session (SSE patches, fixtures, tests) legitimately omits it. */
     scheduledDueAts?: number[]
 }
 
@@ -238,8 +236,6 @@ export function toSessionSummary(session: Session): SessionSummary {
         model: session.model,
         modelReasoningEffort: session.modelReasoningEffort,
         effort: session.effort,
-        loopActive: false,    // computed server-side in the HTTP route; false here as safe default
-        debateActive: false,  // computed server-side in the HTTP route; false here as safe default
         scheduledDueAts: []   // computed server-side in the HTTP route; empty here as safe default
     }
 }

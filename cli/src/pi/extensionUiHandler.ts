@@ -5,6 +5,7 @@ import { createNativeSessionTitleMetadataSync } from '@/agent/nativeSessionTitle
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
 import { logger } from '@/ui/logger';
 import type { PiExtensionUiRequest, PiExtensionUiResponse } from './types';
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests';
 
 const PiPermissionResponseSchema = z.object({
     id: z.string().min(1),
@@ -284,7 +285,7 @@ export class PiExtensionUiHandler {
             return {
                 ...currentState,
                 requests: remaining,
-                completedRequests: {
+                completedRequests: capCompletedRequests({
                     ...currentState.completedRequests,
                     [id]: {
                         tool,
@@ -296,7 +297,7 @@ export class PiExtensionUiHandler {
                         decision: permission.decision ?? (approved ? 'approved' : 'denied'),
                         ...(answers ? { answers } : {}),
                     },
-                },
+                }),
             } satisfies AgentState;
         });
         this.options.session.sendAgentMessage({

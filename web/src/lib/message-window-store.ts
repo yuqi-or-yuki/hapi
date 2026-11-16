@@ -1084,11 +1084,15 @@ export function clearMessageWindow(sessionId: string): void {
     clearPersistedState(sessionId)
     const previous = states.get(sessionId)
     if (!previous) return
-    setState(sessionId, {
+    // Keep sends that have not been echoed by the hub yet: wiping them here
+    // makes a just-sent message vanish until (or unless) a tail sync returns it.
+    const inFlight = previous.messages.filter((message) => optimisticMessage(message) && message.status === 'sending')
+    const cleared: InternalState = {
         ...createState(sessionId),
         syncGeneration: previous.syncGeneration + 1,
         olderGeneration: previous.olderGeneration + 1
-    }, true)
+    }
+    setState(sessionId, inFlight.length > 0 ? buildState(cleared, { messages: inFlight }) : cleared, true)
 }
 
 export function seedMessageWindowFromSession(fromSessionId: string, toSessionId: string): void {

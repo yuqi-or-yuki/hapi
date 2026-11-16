@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 import type { CopilotAgentMode } from '@hapi/protocol'
 import type { AgentState, CodexCollaborationMode, Metadata, PermissionMode } from '@hapi/protocol/types'
 import {
+    getLiveReasoningStreamId,
     getReasoningStreamId,
     isClaudeChatVisibleContent,
     isRedundantGoalStatusEventContent
@@ -11,12 +12,11 @@ import {
 import type { Store, StoredSession } from '../../../store'
 import type { SyncEvent } from '../../../sync/syncEngine'
 import { extractTodoWriteTodosFromMessageContent } from '../../../sync/todos'
-import { extractTeamStateFromMessageContent, applyTeamStateDelta } from '../../../sync/teams'
 import { extractBackgroundTaskDelta } from '../../../sync/backgroundTasks'
 import { shouldRecordSessionActivity } from '../../../sync/sessionActivity'
 import type { CliSocketWithData } from '../../socketTypes'
 import type { SessionEndReason } from '@hapi/protocol'
-import type { AccessErrorReason, AccessResult } from './types'
+import type { AccessErrorReason, AccessResult, SessionAccess } from './types'
 
 type SessionAlivePayload = {
     sid: string
@@ -43,7 +43,7 @@ type SessionReadyPayload = {
     time: number
 }
 
-type ResolveSessionAccess = (sessionId: string) => AccessResult<StoredSession>
+type ResolveSessionAccess = (sessionId: string) => AccessResult<SessionAccess>
 
 type EmitAccessError = (scope: 'session' | 'machine', id: string, reason: AccessErrorReason) => void
 
@@ -149,7 +149,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
         // also sweeps up its own leftovers.
         const reasoningStreamId = getReasoningStreamId(content)
         if (reasoningStreamId) {
-            store.messages.deleteLiveReasoningSnapshots(sid, reasoningStreamId, msg.id)
+            store.messages.deleteLiveReasoningSnapshots(sid, reasoningStreamId, msg.id, getLiveReasoningStreamId(content) !== null)
         }
 
         if (shouldRecordSessionActivity(content)) {
@@ -168,31 +168,6 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
                         todos: {
                             version: stored?.todosUpdatedAt ?? msg.createdAt,
                             value: todos
-                        },
-                        updatedAt: stored?.updatedAt ?? msg.createdAt
-                    }
-                })
-            }
-        }
-
-        const teamDelta = extractTeamStateFromMessageContent(content)
-        if (teamDelta) {
-            const existingSession = store.sessions.getSession(sid)
-            const existingTeamState = existingSession?.teamState as import('@hapi/protocol/types').TeamState | null | undefined
-            const newTeamState = applyTeamStateDelta(existingTeamState ?? null, teamDelta)
-            const updated = store.sessions.setSessionTeamState(sid, newTeamState, msg.createdAt, session.namespace)
-            if (updated) {
-                const stored = store.sessions.getSession(sid)
-                // Versioned clear: value null = TeamDelete. Consumers gate on
-                // version (store team_state_updated_at) so dual SSE cannot
-                // resurrect a deleted team from a lagged older event.
-                onWebappEvent?.({
-                    type: 'session-updated',
-                    sessionId: sid,
-                    data: {
-                        teamState: {
-                            version: stored?.teamStateUpdatedAt ?? msg.createdAt,
-                            value: newTeamState
                         },
                         updatedAt: stored?.updatedAt ?? msg.createdAt
                     }
@@ -253,7 +228,7 @@ export function registerSessionHandlers(socket: CliSocketWithData, deps: Session
 
         const result = store.sessions.updateSessionMetadata(
             sid,
-            preserveHubOwnedMetadata(metadata, sessionAccess.value.metadata),
+            preserveHubOwnedMetadata(metadata, store.sessions.getSession(sid)?.metadata ?? null),
             expectedVersion,
             sessionAccess.value.namespace
         )

@@ -169,9 +169,14 @@ function contentForDeferredDelivery(content: unknown): unknown {
     }
 }
 
+/** Minimum gap between re-emits of one unacked mature scheduled message to an attached CLI. */
+const SCHEDULED_MATURE_REEMIT_BACKOFF_MS = 30_000
+
 export class MessageService {
     /** One scheduled-matured SSE per localId per hub process (cleared on cancel/consume paths here). */
     private readonly scheduledMatureNotifiedLocalIds = new Set<string>()
+    /** Message id -> last time a mature scheduled row was emitted to an attached CLI socket. */
+    private readonly scheduledMatureLastEmitAt = new Map<string, number>()
     private readonly activeIndeterminateRetries = new Set<string>()
 
     constructor(
@@ -1057,9 +1062,12 @@ export class MessageService {
      *
      * Finds all scheduled messages whose scheduled_at <= now and emits them to
      * the CLI via socket.io.  Does NOT call markMessagesInvoked — the CLI ack
-     * (messages-consumed) handles that.  This means a message is re-emitted on
-     * each tick until the CLI acks it, which is the correct behaviour for hub
-     * restart scenarios (pitfall #2 guard).
+     * (messages-consumed) handles that.  An unacked message is therefore
+     * re-emitted until the CLI acks it, which is the correct behaviour for hub
+     * restart scenarios (pitfall #2 guard).  Once an emit reached an attached
+     * CLI socket, re-emits of that row back off to one per
+     * SCHEDULED_MATURE_REEMIT_BACKOFF_MS; while no CLI is attached every tick
+     * still emits, so first delivery after attach is never delayed.
      *
      * Race window with cancel: this tick widens the cancel race to 5 s for
      * scheduled messages (vs near-zero for immediate-queued ones).  If the CLI
@@ -1079,6 +1087,10 @@ export class MessageService {
                 deliveryGateBySession.set(msg.sessionId, deliveryGated)
             }
             if (skipSessionIds?.has(msg.sessionId) || deliveryGated) {
+                continue
+            }
+            const lastEmitAt = this.scheduledMatureLastEmitAt.get(msg.id)
+            if (lastEmitAt !== undefined && now >= lastEmitAt && now - lastEmitAt < SCHEDULED_MATURE_REEMIT_BACKOFF_MS) {
                 continue
             }
             const localId = msg.localId
@@ -1102,9 +1114,20 @@ export class MessageService {
                     }
                 }
             }
-            this.io.of('/cli').to(`session:${msg.sessionId}`).emit('update', update)
+            const roomName = `session:${msg.sessionId}`
+            const cliNamespace = this.io.of('/cli')
+            cliNamespace.to(roomName).emit('update', update)
+            if ((cliNamespace.adapter?.rooms?.get(roomName)?.size ?? 0) > 0) {
+                this.scheduledMatureLastEmitAt.set(msg.id, now)
+            }
             // NOTE: do NOT call markMessagesInvoked here (pitfall #2).
             // CLI ack (messages-consumed) will handle invoked_at stamping.
+        }
+        if (this.scheduledMatureLastEmitAt.size > 0) {
+            const matureIds = new Set(mature.map((msg) => msg.id))
+            for (const id of this.scheduledMatureLastEmitAt.keys()) {
+                if (!matureIds.has(id)) this.scheduledMatureLastEmitAt.delete(id)
+            }
         }
         for (const sessionId of maturedSessionIds) {
             this.publisher.emit({ type: 'scheduled-matured', sessionId })

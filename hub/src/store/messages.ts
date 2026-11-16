@@ -6,8 +6,6 @@ import { getLiveReasoningStreamId } from '@hapi/protocol/messages'
 
 import type { StoredMessage } from './types'
 import { safeJsonParse } from './json'
-import { extractSkillInvocations } from './skillUsageDetection'
-import { recordSkillUsage } from './skillUsageStore'
 import { decodeMessageContent, encodeMessageContent, truncateOversizedMessageContent } from './contentCodec'
 
 type DbMessageRow = {
@@ -143,7 +141,8 @@ export function addMessage(
     const msgSeq = msgSeqRow.nextSeq
 
     const id = randomUUID()
-    const encoded = encodeMessageContent(truncateOversizedMessageContent(content))
+    const storedContent = truncateOversizedMessageContent(content)
+    const encoded = encodeMessageContent(storedContent)
 
     // Messages without a localId have no ack path (markMessagesInvoked matches by localId).
     // Treat them as already-invoked at insert time so they land in the thread normally instead
@@ -174,19 +173,19 @@ export function addMessage(
 
         const positionAt = invokedAt ?? stampedAt
         if (previousHead && positionAt < previousHead.at) bumpMessageEpoch(db, sessionId)
-        const row = db.prepare('SELECT * FROM messages WHERE id = ?').get(id) as DbMessageRow | undefined
-        if (!row) throw new Error('Failed to create message')
 
-        const skills = extractSkillInvocations(content, JSON.stringify(content))
-        if (skills.length > 0) {
-            const sessionRow = db.prepare('SELECT namespace FROM sessions WHERE id = ?').get(sessionId) as { namespace: string } | undefined
-            const namespace = sessionRow?.namespace ?? 'default'
-            for (const skill of skills) {
-                recordSkillUsage(db, namespace, skill, now)
-            }
+        // Built from what was just written: reading the row back would
+        // decompress and re-parse the payload on the hub's only thread.
+        return {
+            id,
+            sessionId,
+            content: storedContent,
+            createdAt: stampedAt,
+            seq: msgSeq,
+            localId: localId ?? null,
+            invokedAt,
+            scheduledAt: scheduledAt ?? null
         }
-
-        return toStoredMessage(row)
     })()
 }
 
@@ -548,9 +547,12 @@ export function getUninvokedLocalMessages(
     // INDEXED BY: the planner otherwise walks the whole session via
     // idx_messages_session (tens of thousands of multi-MB rows for long
     // sessions, on every latest-page request); the partial local_id index only
-    // holds user-sent rows, a tiny fraction of the session.
+    // holds user-sent rows, a tiny fraction of the session. With deliverableOnly
+    // the even smaller idx_messages_queued_pending (uninvoked queued rows only)
+    // applies, which keeps the CLI replay path off table rows entirely.
+    const index = options?.deliverableOnly ? 'idx_messages_queued_pending' : 'idx_messages_local_id'
     const rows = db.prepare(
-        `SELECT * FROM messages INDEXED BY idx_messages_local_id WHERE session_id = ? AND local_id IS NOT NULL AND invoked_at IS NULL${deliverableClause} ORDER BY seq ASC`
+        `SELECT * FROM messages INDEXED BY ${index} WHERE session_id = ? AND local_id IS NOT NULL AND invoked_at IS NULL${deliverableClause} ORDER BY seq ASC`
     ).all(sessionId) as DbMessageRow[]
     return rows.map(toStoredMessage)
 }
@@ -620,7 +622,13 @@ export function getImmediateQueuedLocalMessages(
     sessionId: string
 ): StoredMessage[] {
     const rows = db.prepare(`
-        SELECT * FROM messages
+        -- INDEXED BY: this runs on every CLI keepalive/attach for every live session.
+        -- idx_messages_queued_pending only holds uninvoked queued rows (normally
+        -- none), so the lookup touches one or two index pages and no table rows.
+        -- Any plan that walks the session's rows (idx_messages_session, or even
+        -- idx_messages_local_id + a rowid lookup per user row) pins the main thread
+        -- when the OS page cache is cold under memory pressure.
+        SELECT * FROM messages INDEXED BY idx_messages_queued_pending
         WHERE session_id = ?
           AND invoked_at IS NULL
           AND local_id IS NOT NULL
@@ -955,7 +963,8 @@ export function markUninvokedImmediateMessages(
     invokedAt: number
 ): string[] {
     const rows = db.prepare(`
-        SELECT local_id FROM messages
+        -- INDEXED BY: see getImmediateQueuedLocalMessages (keepalive hot path).
+        SELECT local_id FROM messages INDEXED BY idx_messages_queued_pending
         WHERE session_id = ?
           AND local_id IS NOT NULL
           AND scheduled_at IS NULL
@@ -966,7 +975,7 @@ export function markUninvokedImmediateMessages(
     if (rows.length === 0) return []
 
     db.prepare(`
-        UPDATE messages
+        UPDATE messages INDEXED BY idx_messages_queued_pending
         SET invoked_at = ?
         WHERE session_id = ?
           AND local_id IS NOT NULL

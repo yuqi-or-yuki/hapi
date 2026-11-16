@@ -1,7 +1,7 @@
 import type { Store, ScheduledMessageRow } from '../store'
 import type { Session, SyncEngine } from '../sync/syncEngine'
 
-const POLL_MS = 5_000
+const POLL_MS = 30_000
 const NON_RECURRING_SKIP_DELAY_MS = 60_000
 
 export class ScheduledMessageService {

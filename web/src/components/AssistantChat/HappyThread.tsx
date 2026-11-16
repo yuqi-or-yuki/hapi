@@ -549,8 +549,9 @@ export function HappyThread(props: {
         queryKey: queryKeys.hubSettings,
         queryFn: async () => props.api.getHubSettings(),
         enabled: Boolean(props.api),
-        staleTime: 30_000,
-        refetchInterval: 30_000,
+        // One boolean that only changes from the settings page (which writes
+        // this cache directly) — never worth a per-chat poll.
+        staleTime: Infinity,
         retry: false,
     })
     const showSessionSummaryInChat = hubSettingsQuery.data?.sessionSummaryInChat === true

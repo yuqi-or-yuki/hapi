@@ -153,8 +153,6 @@ type DbSessionRow = {
     service_tier: string | null
     todos: string | null
     todos_updated_at: number | null
-    team_state: string | null
-    team_state_updated_at: number | null
     active: number
     active_at: number | null
     seq: number
@@ -180,8 +178,6 @@ function toStoredSession(row: DbSessionRow): StoredSession {
         serviceTier: row.service_tier,
         todos: safeJsonParse(row.todos),
         todosUpdatedAt: row.todos_updated_at,
-        teamState: safeJsonParse(row.team_state),
-        teamStateUpdatedAt: row.team_state_updated_at,
         active: row.active === 1,
         activeAt: row.active_at,
         seq: row.seq
@@ -427,38 +423,6 @@ export function replaceSessionTodos(
     }
 }
 
-export function setSessionTeamState(
-    db: Database,
-    id: string,
-    teamState: unknown,
-    updatedAt: number,
-    namespace: string
-): boolean {
-    try {
-        const json = teamState === null || teamState === undefined ? null : JSON.stringify(teamState)
-        const result = db.prepare(`
-            UPDATE sessions
-            SET team_state = @team_state,
-                team_state_updated_at = @team_state_updated_at,
-                updated_at = CASE WHEN updated_at > @updated_at THEN updated_at ELSE @updated_at END,
-                seq = seq + 1
-            WHERE id = @id
-              AND namespace = @namespace
-              AND (team_state_updated_at IS NULL OR team_state_updated_at < @team_state_updated_at)
-        `).run({
-            id,
-            team_state: json,
-            team_state_updated_at: updatedAt,
-            updated_at: updatedAt,
-            namespace
-        })
-
-        return result.changes === 1
-    } catch {
-        return false
-    }
-}
-
 export function setSessionModel(
     db: Database,
     id: string,
@@ -680,6 +644,13 @@ export function getSessionByNamespace(db: Database, id: string, namespace: strin
         'SELECT * FROM sessions WHERE id = ? AND namespace = ?'
     ).get(id, namespace) as DbSessionRow | undefined
     return row ? toStoredSession(row) : null
+}
+
+/** Namespace only: an indexed lookup that never touches the JSON columns.
+ *  Per-event access checks use this instead of loading the whole row. */
+export function getSessionNamespace(db: Database, id: string): string | null {
+    const row = db.query('SELECT namespace FROM sessions WHERE id = ?').get(id) as { namespace: string } | null
+    return row?.namespace ?? null
 }
 
 export function getSessions(db: Database): StoredSession[] {

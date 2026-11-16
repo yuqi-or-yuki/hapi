@@ -14,6 +14,7 @@ import {
     type PendingPermissionRequest,
     type PermissionCompletion
 } from "@/modules/common/permission/BasePermissionHandler";
+import { capCompletedRequests } from "@/modules/common/permission/completedRequests";
 
 interface PermissionResponse {
     id: string;
@@ -80,7 +81,7 @@ export class CodexPermissionHandler extends BasePermissionHandler<PermissionResp
 
         this.client.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [id]: {
                     tool: toolName,
@@ -90,7 +91,7 @@ export class CodexPermissionHandler extends BasePermissionHandler<PermissionResp
                     status: 'approved',
                     decision
                 }
-            }
+            })
         }));
 
         logger.debug(`[Codex] Auto-approved ${toolName} (${id}) with decision=${decision}`);

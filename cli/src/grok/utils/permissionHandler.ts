@@ -9,6 +9,7 @@ import {
     type PendingPermissionRequest,
     type PermissionCompletion
 } from '@/modules/common/permission/BasePermissionHandler'
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests'
 
 interface PermissionResponseMessage {
     id: string
@@ -106,7 +107,7 @@ export class GrokPermissionHandler extends BasePermissionHandler<PermissionRespo
         await this.backend.respondToPermission(request.sessionId, request, mapDecisionToOutcome(request, decision))
         this.client.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [request.id]: {
                     tool: toolName,
@@ -116,7 +117,7 @@ export class GrokPermissionHandler extends BasePermissionHandler<PermissionRespo
                     status: 'approved',
                     decision
                 }
-            }
+            })
         }))
     }
 
@@ -131,7 +132,7 @@ export class GrokPermissionHandler extends BasePermissionHandler<PermissionRespo
         const timestamp = Date.now()
         this.client.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [request.id]: {
                     tool: toolName,
@@ -142,7 +143,7 @@ export class GrokPermissionHandler extends BasePermissionHandler<PermissionRespo
                     reason: 'Plan mode blocks tool execution',
                     decision: status === 'denied' ? 'denied' : 'abort'
                 }
-            }
+            })
         }))
     }
 

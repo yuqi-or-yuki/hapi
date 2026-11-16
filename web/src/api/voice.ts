@@ -226,7 +226,29 @@ function isVoiceBackendType(value: string): value is VoiceBackendType {
     return value === 'elevenlabs' || value === 'gemini-live' || value === 'qwen-realtime'
 }
 
-export async function fetchVoiceBackend(api: ApiClient): Promise<VoiceBackendResponse> {
+// One detection per page load, shared by every chat mount. `api` identity is
+// stable for a logged-in page (see useAuth), so it is the cache key.
+const voiceBackendCache = new WeakMap<ApiClient, Promise<VoiceBackendResponse>>()
+
+/** Always hits the hub and refreshes the shared cache (voice settings page). */
+export function fetchVoiceBackend(api: ApiClient): Promise<VoiceBackendResponse> {
+    const request = requestVoiceBackend(api)
+    voiceBackendCache.set(api, request)
+    request.catch(() => {
+        // Failed detections are not cached: the next mount retries.
+        if (voiceBackendCache.get(api) === request) {
+            voiceBackendCache.delete(api)
+        }
+    })
+    return request
+}
+
+/** Hub voice backend, fetched at most once per page load. */
+export function fetchVoiceBackendCached(api: ApiClient): Promise<VoiceBackendResponse> {
+    return voiceBackendCache.get(api) ?? fetchVoiceBackend(api)
+}
+
+async function requestVoiceBackend(api: ApiClient): Promise<VoiceBackendResponse> {
     const result = await api.fetchVoiceBackend()
     const { backend } = result
     if (backend !== null && !isVoiceBackendType(backend)) {

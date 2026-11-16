@@ -38,7 +38,6 @@ import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStat
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
 import { useSkills } from '@/hooks/queries/useSkills'
-import { useSkillUsage } from '@/hooks/queries/useSkillUsage'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
@@ -77,7 +76,6 @@ import SettingsVoiceAdvancedPage from '@/routes/settings/voice-advanced'
 import SettingsMachinesPage from '@/routes/settings/machines'
 import SettingsAboutPage from '@/routes/settings/about'
 import SettingsStoragePage from '@/routes/settings/storage'
-import SettingsUsagePage from '@/routes/settings/usage'
 import SharePage from '@/routes/share'
 import { retargetSharePendingTransfer, setSharePendingTransfer } from '@/lib/sharePendingState'
 import { deleteShareTransfer, parseShareSearch } from '@/lib/shareTransfer'
@@ -242,28 +240,6 @@ function PlayIcon(props: { className?: string }) {
             className={props.className}
         >
             <path d="M8 5v14l11-7z" />
-        </svg>
-    )
-}
-
-function ChartIcon(props: { className?: string }) {
-    return (
-        <svg
-            xmlns="http://www.w3.org/2000/svg"
-            width="20"
-            height="20"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            className={props.className}
-        >
-            <path d="M3 3v18h18" />
-            <path d="M7 16V9" />
-            <path d="M12 16V5" />
-            <path d="M17 16v-4" />
         </svg>
     )
 }
@@ -879,15 +855,6 @@ function SessionsPage() {
                                 fight 5+ fixed-width items for space and wrap onto multiple lines. */}
                             <button
                                 type="button"
-                                onClick={() => navigate({ to: '/dashboard' })}
-                                className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
-                                title="Open dashboard"
-                            >
-                                <ChartIcon className="h-4 w-4" />
-                                Dashboard
-                            </button>
-                            <button
-                                type="button"
                                 onClick={() => navigate({ to: '/scheduled-jobs' })}
                                 className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-[var(--app-border)] px-2.5 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
                                 title="Open scheduled jobs"
@@ -940,7 +907,6 @@ function SessionsPage() {
                                 onClose={() => setIsMoreMenuOpen(false)}
                                 triggerRef={moreButtonRef}
                                 items={[
-                                    { key: 'dashboard', icon: <ChartIcon className="h-4 w-4" />, label: 'Dashboard', onClick: () => navigate({ to: '/dashboard' }) },
                                     { key: 'jobs', icon: <CalendarClockIcon className="h-4 w-4" />, label: 'Scheduled jobs', onClick: () => navigate({ to: '/scheduled-jobs' }) },
                                     { key: 'codex-sync', icon: <CodexImportIcon className="h-4 w-4" />, label: t('codexSync.tooltip'), onClick: () => void openCodexImportDialog() },
                                     { key: 'browse', icon: <FolderOpenIcon className="h-4 w-4" />, label: t('browse.nav'), onClick: () => navigate({ to: '/browse' }) },
@@ -1065,164 +1031,6 @@ function SessionsPage() {
             </div>
             </div>
         </>
-    )
-}
-
-
-function normalizeMs(value: number | null | undefined): number | null {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return null
-    return value < 1_000_000_000_000 ? value * 1000 : value
-}
-
-function getSessionStartedAt(session: SessionSummary): number | null {
-    return normalizeMs(session.activeAt) ?? normalizeMs(session.updatedAt)
-}
-
-function getSessionEndedAt(session: SessionSummary, now: number): number | null {
-    if (session.active) return now
-    return normalizeMs(session.updatedAt)
-}
-
-function formatShortDateTime(ms: number): string {
-    return new Date(ms).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric' })
-}
-
-function formatAgentFlavor(session: SessionSummary): string {
-    const flavor = (session.metadata?.flavor ?? 'claude').trim().toLowerCase()
-    if (flavor === 'claude') return 'Claude Code'
-    if (flavor === 'codex') return 'Codex'
-    if (flavor === 'gemini') return 'Gemini'
-    if (flavor === 'opencode') return 'OpenCode'
-    if (flavor === 'cursor') return 'Cursor'
-    return flavor ? flavor[0].toUpperCase() + flavor.slice(1) : 'Unknown'
-}
-
-function formatModelFamily(session: SessionSummary): string {
-    const model = session.model?.trim()
-    if (!model) return `${formatAgentFlavor(session)} auto`
-    const normalized = model.toLowerCase()
-    if (normalized.includes('fable')) return 'Claude Fable 5'
-    if (normalized.includes('opus')) return `Claude ${model}`
-    if (normalized.includes('sonnet')) return `Claude ${model}`
-    if (normalized.includes('haiku')) return `Claude ${model}`
-    if (normalized.includes('gpt') || normalized.includes('codex')) return model
-    return model
-}
-
-function formatReasoning(session: SessionSummary): string {
-    const modelReasoningEffort = session.modelReasoningEffort?.trim()
-    if (modelReasoningEffort) return modelReasoningEffort
-    const effort = session.effort?.trim()
-    if (effort) return effort
-    return 'default'
-}
-
-function buildConcurrencySeries(sessions: SessionSummary[], now: number): Array<{ t: number; count: number }> {
-    const events: Array<{ t: number; delta: number }> = []
-    for (const session of sessions) {
-        const start = getSessionStartedAt(session)
-        const end = getSessionEndedAt(session, now)
-        if (start == null || end == null || end < start) continue
-        events.push({ t: start, delta: 1 })
-        events.push({ t: end, delta: -1 })
-    }
-    events.sort((a, b) => a.t - b.t || b.delta - a.delta)
-    if (events.length === 0) return []
-
-    const series: Array<{ t: number; count: number }> = []
-    let count = 0
-    let i = 0
-    while (i < events.length) {
-        const t = events[i]!.t
-        let delta = 0
-        while (i < events.length && events[i]!.t === t) {
-            delta += events[i]!.delta
-            i += 1
-        }
-        count = Math.max(0, count + delta)
-        series.push({ t, count })
-    }
-    return series
-}
-
-function getDashboardStats(sessions: SessionSummary[]) {
-    const now = Date.now()
-    const series = buildConcurrencySeries(sessions, now)
-    const maxConcurrent = series.reduce((max, point) => Math.max(max, point.count), 0)
-    const activeNow = sessions.filter(s => s.active && s.thinking).length
-    const flavorCounts = new Map<string, number>()
-    const modelCounts = new Map<string, number>()
-    const reasoningCounts = new Map<string, number>()
-    const comboCounts = new Map<string, number>()
-    for (const session of sessions) {
-        const flavor = formatAgentFlavor(session)
-        const model = formatModelFamily(session)
-        const reasoning = formatReasoning(session)
-        flavorCounts.set(flavor, (flavorCounts.get(flavor) ?? 0) + 1)
-        modelCounts.set(model, (modelCounts.get(model) ?? 0) + 1)
-        reasoningCounts.set(reasoning, (reasoningCounts.get(reasoning) ?? 0) + 1)
-        comboCounts.set(`${model} · ${reasoning}`, (comboCounts.get(`${model} · ${reasoning}`) ?? 0) + 1)
-    }
-    return { now, series, maxConcurrent, activeNow, flavorCounts, modelCounts, reasoningCounts, comboCounts }
-}
-
-function ConcurrencyChart(props: { series: Array<{ t: number; count: number }> }) {
-    if (props.series.length === 0) {
-        return <div className="rounded-xl border border-[var(--app-border)] p-6 text-sm text-[var(--app-hint)]">No session timing data yet.</div>
-    }
-    const width = 720
-    const height = 260
-    const pad = { left: 36, right: 12, top: 16, bottom: 34 }
-    const minT = props.series[0]!.t
-    const maxT = props.series[props.series.length - 1]!.t
-    const maxC = Math.max(1, ...props.series.map(p => p.count))
-    const x = (t: number) => pad.left + ((t - minT) / Math.max(1, maxT - minT)) * (width - pad.left - pad.right)
-    const y = (c: number) => height - pad.bottom - (c / maxC) * (height - pad.top - pad.bottom)
-    const path = props.series.map((point, index) => `${index === 0 ? 'M' : 'L'} ${x(point.t).toFixed(1)} ${y(point.count).toFixed(1)}`).join(' ')
-    const area = `${path} L ${x(maxT).toFixed(1)} ${height - pad.bottom} L ${x(minT).toFixed(1)} ${height - pad.bottom} Z`
-    const yTicks = Array.from({ length: maxC + 1 }, (_, i) => i).filter(i => i === 0 || i === maxC || i % Math.max(1, Math.ceil(maxC / 4)) === 0)
-
-    return (
-        <div className="overflow-hidden rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)]">
-            <svg viewBox={`0 0 ${width} ${height}`} className="h-72 w-full">
-                {yTicks.map(tick => (
-                    <g key={tick}>
-                        <line x1={pad.left} x2={width - pad.right} y1={y(tick)} y2={y(tick)} stroke="var(--app-border)" strokeDasharray="4 4" />
-                        <text x={pad.left - 8} y={y(tick) + 4} textAnchor="end" className="fill-[var(--app-hint)] text-[10px]">{tick}</text>
-                    </g>
-                ))}
-                <path d={area} className="fill-blue-500/10" />
-                <path d={path} className="fill-none stroke-blue-500" strokeWidth="3" strokeLinejoin="round" strokeLinecap="round" />
-                <line x1={pad.left} x2={width - pad.right} y1={height - pad.bottom} y2={height - pad.bottom} stroke="var(--app-border)" />
-                <text x={pad.left} y={height - 10} className="fill-[var(--app-hint)] text-[10px]">{formatShortDateTime(minT)}</text>
-                <text x={width - pad.right} y={height - 10} textAnchor="end" className="fill-[var(--app-hint)] text-[10px]">{formatShortDateTime(maxT)}</text>
-            </svg>
-        </div>
-    )
-}
-
-function CountBars(props: { title: string; counts: Map<string, number> }) {
-    const entries = [...props.counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    const max = Math.max(1, ...entries.map(([, count]) => count))
-    const total = entries.reduce((sum, [, count]) => sum + count, 0)
-    return (
-        <div className="rounded-xl border border-[var(--app-border)] p-3">
-            <div className="mb-3 text-sm font-semibold text-[var(--app-fg)]">{props.title}</div>
-            {entries.length === 0 ? <div className="text-sm text-[var(--app-hint)]">No data yet.</div> : null}
-            <div className="space-y-2">
-                {entries.map(([label, count]) => (
-                    <div key={label}>
-                        <div className="mb-1 flex items-center justify-between gap-3 text-xs">
-                            <span className="truncate text-[var(--app-fg)]">{label}</span>
-                            <span className="shrink-0 tabular-nums text-[var(--app-hint)]">{count} · {Math.round((count / Math.max(1, total)) * 100)}%</span>
-                        </div>
-                        <div className="h-2 overflow-hidden rounded-full bg-[var(--app-subtle-bg)]">
-                            <div className="h-full rounded-full bg-blue-500" style={{ width: `${(count / max) * 100}%` }} />
-                        </div>
-                    </div>
-                ))}
-            </div>
-        </div>
     )
 }
 
@@ -1461,91 +1269,6 @@ function ScheduledJobsPage() {
     )
 }
 
-function DashboardPage() {
-    const { api } = useAppContext()
-    const goBack = useAppGoBack()
-    const { sessions, isLoading, error } = useSessions(api)
-    const stats = useMemo(() => getDashboardStats(sessions), [sessions])
-    const { skills: skillUsage } = useSkillUsage(api)
-    const skillUsageCounts = useMemo(() => {
-        const counts = new Map<string, number>()
-        for (const skill of skillUsage) {
-            counts.set(skill.skillName, skill.count)
-        }
-        return counts
-    }, [skillUsage])
-
-    return (
-        <div className="flex h-full min-h-0 flex-col bg-[var(--app-bg)]">
-            <div className="flex items-center gap-2 border-b border-[var(--app-border)] p-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
-                <button
-                    type="button"
-                    onClick={goBack}
-                    className="flex h-8 w-8 items-center justify-center rounded-full text-[var(--app-hint)] transition-colors hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)]"
-                >
-                    <BackIcon />
-                </button>
-                <div className="min-w-0 flex-1">
-                    <div className="font-semibold text-[var(--app-fg)]">Dashboard</div>
-                    <div className="text-xs text-[var(--app-hint)]">Agent parallelism and usage mix.</div>
-                </div>
-            </div>
-            <div className="app-scroll-y flex-1 min-h-0 p-4">
-                <div className="mx-auto flex w-full max-w-5xl flex-col gap-4">
-                    {error ? <div className="rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600">{error}</div> : null}
-                    {isLoading ? <LoadingState label="Loading dashboard…" className="text-sm" /> : null}
-
-                    <div className="grid gap-3 sm:grid-cols-3">
-                        <div className="rounded-xl border border-[var(--app-border)] p-3">
-                            <div className="text-xs text-[var(--app-hint)]">Running now</div>
-                            <div className="mt-1 text-2xl font-semibold text-[var(--app-fg)]">{stats.activeNow}</div>
-                        </div>
-                        <div className="rounded-xl border border-[var(--app-border)] p-3">
-                            <div className="text-xs text-[var(--app-hint)]">Peak parallel agents</div>
-                            <div className="mt-1 text-2xl font-semibold text-[var(--app-fg)]">{stats.maxConcurrent}</div>
-                        </div>
-                        <div className="rounded-xl border border-[var(--app-border)] p-3">
-                            <div className="text-xs text-[var(--app-hint)]">Sessions counted</div>
-                            <div className="mt-1 text-2xl font-semibold text-[var(--app-fg)]">{sessions.length}</div>
-                        </div>
-                    </div>
-
-                    <section className="rounded-2xl border border-[var(--app-border)] p-4">
-                        <div className="mb-3">
-                            <h2 className="text-base font-semibold text-[var(--app-fg)]">Parallel agents over time</h2>
-                            <p className="text-sm text-[var(--app-hint)]">Counts a session from start/active time until it finishes; active sessions end at now.</p>
-                        </div>
-                        <ConcurrencyChart series={stats.series} />
-                    </section>
-
-                    <section className="rounded-2xl border border-[var(--app-border)] p-4">
-                        <div className="mb-3">
-                            <h2 className="text-base font-semibold text-[var(--app-fg)]">Agent usage mix</h2>
-                            <p className="text-sm text-[var(--app-hint)]">Distribution by agent type and reasoning/model effort.</p>
-                        </div>
-                        <div className="grid gap-3 lg:grid-cols-4">
-                            <CountBars title="Agent type" counts={stats.flavorCounts} />
-                            <CountBars title="Model" counts={stats.modelCounts} />
-                            <CountBars title="Reasoning" counts={stats.reasoningCounts} />
-                            <CountBars title="Model × reasoning" counts={stats.comboCounts} />
-                        </div>
-                    </section>
-
-                    <section className="rounded-2xl border border-[var(--app-border)] p-4">
-                        <div className="mb-3">
-                            <h2 className="text-base font-semibold text-[var(--app-fg)]">Skill usage</h2>
-                            <p className="text-sm text-[var(--app-hint)]">How often each skill/slash command gets invoked, by you or the agent, tracked from now on.</p>
-                        </div>
-                        <div className="grid gap-3 lg:grid-cols-2">
-                            <CountBars title="Skills" counts={skillUsageCounts} />
-                        </div>
-                    </section>
-                </div>
-            </div>
-        </div>
-    )
-}
-
 function SessionsIndexPage() {
     return null
 }
@@ -1747,6 +1470,9 @@ function SessionPage() {
         }
         : null
 
+    // Ceiling for an inactive-session resume before the send flow gives up and
+    // restores the text (prevents a stuck resolve-guard swallowing later sends).
+    const RESUME_TIMEOUT_MS = 30_000
     const resolvedSessionRef = useRef<{ source: string; target: Promise<string> } | null>(null)
     // Clear when the session id or active flag changes so a same-id resume
     // that later archives again cannot reuse a stale in-flight/cached resume.
@@ -1757,10 +1483,6 @@ function SessionPage() {
         if (!api || !session || session.active) {
             return { sessionId: currentSessionId, resumed: false }
         }
-        const cached = resolvedSessionRef.current
-        if (cached?.source === currentSessionId) {
-            return { sessionId: await cached.target, resumed: true }
-        }
         if (!inactiveSessionCanResume(session, messages.length, cursorChatStoreStatus?.onDisk)) {
             throw new ApiError(
                 t('chat.sendError.sessionInactive'),
@@ -1768,10 +1490,33 @@ function SessionPage() {
                 'session_inactive',
             )
         }
-        try {
-            const target = api.resumeSession(currentSessionId, { permissionMode: session.permissionMode ?? undefined })
+        const cached = resolvedSessionRef.current
+        const target = cached?.source === currentSessionId
+            ? cached.target
+            : api.resumeSession(currentSessionId, { permissionMode: session.permissionMode ?? undefined })
+        if (cached?.source !== currentSessionId) {
             resolvedSessionRef.current = { source: currentSessionId, target }
-            return { sessionId: await target, resumed: true }
+        }
+        // A resume can stall indefinitely when the machine is under memory
+        // pressure and the spawn is slow. The send flow holds a resolve-guard
+        // across this await; a hung resume never releases it, so every later
+        // send is silently swallowed (composer clears, nothing posts) until the
+        // route remounts -- the "only sends after I switch sessions" bug. Bound
+        // the wait so the promise always settles: on timeout we reject, which
+        // clears the cache, restores the composer text and shows an error
+        // instead of losing the message.
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined
+        try {
+            const sessionId = await Promise.race([
+                target,
+                new Promise<never>((_, reject) => {
+                    timeoutHandle = setTimeout(
+                        () => reject(new ApiError(t('resume.failed.title'), 504, 'resume_timeout')),
+                        RESUME_TIMEOUT_MS,
+                    )
+                }),
+            ])
+            return { sessionId, resumed: true }
         } catch (error) {
             if (resolvedSessionRef.current?.source === currentSessionId) {
                 resolvedSessionRef.current = null
@@ -1788,6 +1533,10 @@ function SessionPage() {
                 409,
                 'session_inactive',
             )
+        } finally {
+            if (timeoutHandle) {
+                clearTimeout(timeoutHandle)
+            }
         }
     }, [api, session, messages.length, cursorChatStoreStatus?.onDisk, t, addToast])
 
@@ -2490,12 +2239,6 @@ const settingsStorageRoute = createRoute({
     component: SettingsStoragePage,
 })
 
-const settingsUsageRoute = createRoute({
-    getParentRoute: () => settingsRoute,
-    path: 'usage',
-    component: SettingsUsagePage,
-})
-
 // Web Share Target landing route. Service worker (`web/src/sw.ts`)
 // intercepts the manifest's `POST /share` and 303-redirects here with an
 // IDB transfer id. `error=ingest` is set when the SW failed to write IDB.
@@ -2506,12 +2249,6 @@ const shareRoute = createRoute({
     path: '/share',
     validateSearch: (search: Record<string, unknown>) => parseShareSearch(search),
     component: SharePage,
-})
-
-const dashboardRoute = createRoute({
-    getParentRoute: () => rootRoute,
-    path: '/dashboard',
-    component: DashboardPage,
 })
 
 const scheduledJobsRoute = createRoute({
@@ -2532,7 +2269,6 @@ export const routeTree = rootRoute.addChildren([
         ]),
     ]),
     browseRoute,
-    dashboardRoute,
     scheduledJobsRoute,
     settingsRoute.addChildren([
         settingsIndexRoute,
@@ -2544,7 +2280,6 @@ export const routeTree = rootRoute.addChildren([
         settingsVoiceAdvancedRoute,
         settingsMachinesRoute,
         settingsStorageRoute,
-        settingsUsageRoute,
         settingsAboutRoute,
     ]),
     shareRoute,

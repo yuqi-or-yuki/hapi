@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { SSE_MAX_PENDING_BYTES, SSE_MAX_PENDING_EVENTS } from './sseWriter'
 import type { SyncEvent } from '../sync/syncEngine'
 import type { VisibilityState } from '../visibility/visibilityTracker'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
@@ -20,6 +21,8 @@ type SSEConnection = SSESubscription & {
      * their original order. `drainPending` flushes and clears it.
      */
     pending: Array<{ event: SyncEvent; eventId: string }> | null
+    pendingBytes: number
+    close?: () => void
 }
 
 export type SSEResumeResult = {
@@ -73,6 +76,7 @@ export class SSEManager {
         resumeFrom?: string | null
         send: (event: SyncEvent, eventId?: string, serialized?: string) => void | Promise<void>
         sendHeartbeat: () => void | Promise<void>
+        close?: () => void
     }): SSESubscription & SSEResumeResult {
         const subscription: SSEConnection = {
             id: options.id,
@@ -82,7 +86,9 @@ export class SSEManager {
             machineId: options.machineId ?? null,
             send: options.send,
             sendHeartbeat: options.sendHeartbeat,
-            pending: null
+            pending: null,
+            pendingBytes: 0,
+            close: options.close
         }
 
         const { resume, replay } = this.resolveResume(subscription, options.resumeFrom ?? null)
@@ -120,8 +126,9 @@ export class SSEManager {
         if (!connection) {
             return
         }
-        while (connection.pending) {
+        while (connection.pending && this.connections.get(id) === connection) {
             const batch = connection.pending.splice(0)
+            connection.pendingBytes = 0
             if (batch.length === 0) {
                 // No await between this check and the assignment, so no
                 // broadcast can slip into the queue and be dropped.
@@ -129,6 +136,7 @@ export class SSEManager {
                 break
             }
             for (const item of batch) {
+                if (this.connections.get(id) !== connection) return
                 try {
                     await connection.send(item.event, item.eventId)
                 } catch {
@@ -187,12 +195,12 @@ export class SSEManager {
 
     private recordEvent(event: SyncEvent, serialized: string): number {
         const seq = this.nextSeq++
-        const bytes = serialized.length
+        const bytes = Buffer.byteLength(serialized, 'utf8')
         this.eventBuffer.push({ seq, event, bytes })
         this.eventBufferBytes += bytes
         while (
             this.eventBuffer.length > EVENT_BUFFER_CAPACITY
-            || (this.eventBufferBytes > EVENT_BUFFER_MAX_BYTES && this.eventBuffer.length > 1)
+            || this.eventBufferBytes > EVENT_BUFFER_MAX_BYTES
         ) {
             const evicted = this.eventBuffer.shift()
             if (evicted) {
@@ -203,7 +211,13 @@ export class SSEManager {
     }
 
     unsubscribe(id: string): void {
+        const connection = this.connections.get(id)
         this.connections.delete(id)
+        if (connection) {
+            connection.pending = null
+            connection.pendingBytes = 0
+            connection.close?.()
+        }
         this.visibilityTracker.removeConnection(id)
         if (this.connections.size === 0) {
             this.stopHeartbeat()
@@ -262,7 +276,14 @@ export class SSEManager {
             // the receiving namespace so the cursor stays bound to it.
             const eventId = this.eventIdFor(seq, connection.namespace)
             if (connection.pending) {
+                const bytes = Buffer.byteLength(serialized, 'utf8')
+                if (connection.pending.length >= SSE_MAX_PENDING_EVENTS
+                    || connection.pendingBytes + bytes > SSE_MAX_PENDING_BYTES) {
+                    this.unsubscribe(connection.id)
+                    continue
+                }
                 connection.pending.push({ event, eventId })
+                connection.pendingBytes += bytes
                 continue
             }
 
@@ -275,9 +296,8 @@ export class SSEManager {
     stop(): void {
         this.stopHeartbeat()
         for (const id of this.connections.keys()) {
-            this.visibilityTracker.removeConnection(id)
+            this.unsubscribe(id)
         }
-        this.connections.clear()
     }
 
     private ensureHeartbeat(): void {

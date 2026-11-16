@@ -61,7 +61,6 @@ import {
     type RpcUploadFileResponse
 } from './rpcGateway'
 import { SessionCache } from './sessionCache'
-import { ingestNotifySummaryFromMessage } from './workGraphNotifyIngest'
 
 type PiResumeAttempt = NonNullable<NonNullable<Session['metadata']>['piResumeAttempt']>
 type PtyResumeAttempt = NonNullable<NonNullable<Session['metadata']>['ptyResumeAttempt']>
@@ -200,11 +199,6 @@ export class SyncEngine {
     private readonly opencodeClearTails = new Map<string, Promise<ClearOpencodeSessionResult>>()
     /** Serialize fork/rewind per session so concurrent native rollbacks cannot stack. */
     private readonly historyActionsInFlight = new Set<string>()
-    /**
-     * Hub owner id for accountable work-graph principals (A2A P1/P3).
-     * Defaults to "1" for unit tests; startHub overwrites with getOrCreateOwnerId().
-     */
-    private hubOwnerUserId: string = '1'
 
     constructor(
         private readonly store: Store,
@@ -225,10 +219,6 @@ export class SyncEngine {
         this.rpcGateway = new RpcGateway(io, rpcRegistry)
         this.reloadAll()
         this.inactivityTimer = setInterval(() => this.expireInactive(), 5_000)
-    }
-
-    setHubOwnerUserId(ownerUserId: string | number): void {
-        this.hubOwnerUserId = String(ownerUserId)
     }
 
     stop(): void {
@@ -422,7 +412,7 @@ export class SyncEngine {
     handleRealtimeEvent(event: SyncEvent): void {
         if (event.type === 'session-updated' && event.sessionId) {
             // Closes the second half of #884: when a CLI handler emits a
-            // structured patch (todos / teamState / metadata / agentState),
+            // structured patch (todos / metadata / agentState),
             // apply it in place and forward the patch as-is. This skips both
             // the DB re-read AND the full-Session SSE broadcast that the
             // legacy no-data path went through. Web clients hit
@@ -487,31 +477,7 @@ export class SyncEngine {
             }
         }
 
-        // Emit chat updates before ledger capture so SSE is not blocked on
-        // synchronous SQLite ingest (cold review m5).
         this.eventPublisher.emit(event)
-
-        if (event.type === 'message-received' && event.sessionId && 'message' in event && event.message) {
-            // A2A P3: well-formed AGENT_NOTIFY_SUMMARY → work-graph work_ad.
-            // Capture is independent of chat display settings (#1462/#1464).
-            const session = this.getSession(event.sessionId)
-            if (session) {
-                try {
-                    ingestNotifySummaryFromMessage({
-                        store: this.store,
-                        namespace: session.namespace,
-                        sessionId: session.id,
-                        messageId: event.message.id,
-                        content: event.message.content,
-                        ts: event.message.createdAt,
-                        ownerUserId: this.hubOwnerUserId,
-                        flavor: session.metadata?.flavor ?? null
-                    })
-                } catch (error) {
-                    console.error('[work-graph] notify ingest failed', error)
-                }
-            }
-        }
     }
 
     handleSessionAlive(payload: {
@@ -528,8 +494,16 @@ export class SyncEngine {
     }): void {
         this.sessionCache.handleSessionAlive(payload)
         this.messageService.replayImmediateQueuedMessages(payload.sid)
-        this.triggerDedupIfNeeded(payload.sid)
+        // Keepalives arrive every couple of seconds per session; a duplicate
+        // scan over every cached session does not need to run that often.
+        const lastDedupAt = this.lastKeepaliveDedupAt.get(payload.sid) ?? 0
+        if (payload.time - lastDedupAt >= 30_000 || payload.time < lastDedupAt) {
+            this.lastKeepaliveDedupAt.set(payload.sid, payload.time)
+            this.triggerDedupIfNeeded(payload.sid)
+        }
     }
+
+    private readonly lastKeepaliveDedupAt = new Map<string, number>()
 
     handleSessionReady(payload: { sid: string; time: number }): void {
         this.sessionReadyIds.add(payload.sid)

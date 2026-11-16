@@ -1463,6 +1463,30 @@ describe('MessageService.releaseMatureScheduledMessages', () => {
         return { io, cliEmitted }
     }
 
+    it('backs off re-emits to an attached CLI until the ack arrives', () => {
+        const store = makeStore()
+        const session = makeSession(store, 'release-backoff')
+        const cliEmitted: unknown[] = []
+        const io = {
+            of: () => ({
+                to: () => ({ emit: (_event: string, data: unknown) => { cliEmitted.push(data) } }),
+                adapter: { rooms: { get: () => new Set(['socket-1']) } }
+            })
+        } as unknown as Server
+
+        const now = Date.now()
+        store.messages.addMessage(session.id, { role: 'user', content: { type: 'text', text: 'hi' } }, 'local-backoff', now - 1000)
+
+        const service = new MessageService(store, io, makePublisher() as any)
+        service.releaseMatureScheduledMessages(now)
+        service.releaseMatureScheduledMessages(now + 5_000)
+        service.releaseMatureScheduledMessages(now + 25_000)
+        expect(cliEmitted).toHaveLength(1)
+
+        service.releaseMatureScheduledMessages(now + 30_000)
+        expect(cliEmitted).toHaveLength(2)
+    })
+
     it('emits mature messages to /cli', async () => {
         const store = makeStore()
         const session = makeSession(store, 'release-emit')

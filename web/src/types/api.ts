@@ -116,7 +116,6 @@ export type HubHealthResponse = {
     status: string
     protocolVersion: number
     capabilities?: {
-        workGraph?: boolean
         titleSuggestion?: boolean
     }
 }
@@ -170,14 +169,6 @@ export type ScheduledMessageHistory = {
 
 export type ScheduledMessagesResponse = { scheduledMessages: ScheduledMessage[] }
 export type ScheduledMessageResponse = { scheduledMessage: ScheduledMessage }
-
-export type SkillUsage = {
-    skillName: string
-    count: number
-    lastUsedAt: number
-}
-
-export type SkillUsageResponse = { skills: SkillUsage[] }
 
 export type FileSearchItem = {
     fileName: string

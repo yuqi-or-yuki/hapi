@@ -19,7 +19,7 @@ Source: `hub/src/web/server.ts`.
 
 | Method & path | Request | Response |
 |---|---|---|
-| `GET /health` (no auth) | — | `{status: 'ok', protocolVersion: number, capabilities: {workGraph?, titleSuggestion?}}` — additive capabilities, ignore unknown keys |
+| `GET /health` (no auth) | — | `{status: 'ok', protocolVersion: number, capabilities: {titleSuggestion?}}` — additive capabilities, ignore unknown keys |
 
 ### Sessions — list & detail
 
@@ -196,13 +196,12 @@ Source: `hub/src/web/routes/voice.ts`.
 
 The realtime-token, voice-assistant token, and WebSocket-proxy endpoints under `/api/voice/*` belong to the live voice assistant — out of scope for v1.
 
-### Usage & storage (owner-only)
+### Storage (owner-only)
 
-Source: `hub/src/web/routes/usage.ts`, `hub/src/web/routes/storage.ts`. Both `403` unless namespace is `default` ([Auth → Namespaces](./auth.md#namespaces)).
+Source: `hub/src/web/routes/storage.ts`. `403` unless namespace is `default` ([Auth → Namespaces](./auth.md#namespaces)).
 
 | Method & path | Request | Response |
 |---|---|---|
-| `GET /api/usage/summary` | Query: `range=7d\|30d\|all` (default 7d), `timeZone` (IANA, validated) | `UsageSummaryResponse` `{range, totals, daily[], byAgent[], byModel[], updatedAt}` |
 | `GET /api/storage/sqlite` | — | `{path, databaseBytes, walBytes, shmBytes, totalBytes}` |
 
 ### Devices (FCM push)
@@ -244,7 +243,6 @@ These exist on the hub but v1 native clients must not implement or call them:
 |------|-------|------------------|
 | Codex Desktop import | `/api/codex/*` (`hub/src/web/routes/codexDesktop.ts`) | Desktop-import tooling |
 | Pi session import | `/api/pi/*`, `/api/sessions/:id/pi-*` (`hub/src/web/routes/piSessions.ts`, `sessions.ts`) | Import tooling (the `pi-models` catalog above is the one exception) |
-| Work graph | `/api/work-graph/*` (`hub/src/web/routes/workGraph.ts`) | Web-only feature |
 | Web Push | `/api/push/*` (`hub/src/web/routes/push.ts`) | Browser Push API; natives use `/api/devices` (FCM) |
 | Hub settings write | `PUT /api/hub-settings` | Owner-only hub administration |
 | Telegram | `POST /api/bind` | Telegram Mini App binding only |

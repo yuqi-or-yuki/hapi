@@ -425,10 +425,11 @@ function AppInner() {
             // cached data on remount.  See tiann/hapi#884.
             queryClient.invalidateQueries({ queryKey: ['session'] })
         ]
-        const refreshMessages = (selectedSessionId && api)
-            ? syncTailMessages(api, selectedSessionId)
-            : Promise.resolve()
-        Promise.all([...invalidations, refreshMessages])
+        // No message tail sync here: the selected session's own SSE connection
+        // reconciles its message window on every non-resumed connect
+        // (handleSessionSseConnect). Syncing from the global connection too
+        // doubled the tail GETs on each page load / full reconnect.
+        Promise.all(invalidations)
             .catch((error) => {
                 console.error('Failed to invalidate queries on SSE connect:', error)
             })
@@ -438,7 +439,7 @@ function AppInner() {
                     endSync()
                 }
             })
-    }, [api, queryClient, selectedSessionId, startSync, endSync, reportSseConnect])
+    }, [queryClient, startSync, endSync, reportSseConnect])
 
     const handleSseDisconnect = useCallback((reason: string) => {
         // Only show reconnecting banner if we've already connected once
@@ -545,7 +546,7 @@ function AppInner() {
     const sseEnabled = Boolean(api && token)
     const showReconnectingBanner = sseDisconnected && !isSyncing
 
-    const { subscriptionId: globalSubscriptionId } = useSSE({
+    const { subscriptionId: globalSubscriptionId, connectVisibility: globalConnectVisibility } = useSSE({
         enabled: sseEnabled,
         token: token ?? '',
         baseUrl,
@@ -558,7 +559,7 @@ function AppInner() {
         onSessionFinished: handleSessionFinished
     })
 
-    const { subscriptionId: sessionSubscriptionId } = useSSE({
+    const { subscriptionId: sessionSubscriptionId, connectVisibility: sessionConnectVisibility } = useSSE({
         enabled: sseEnabled && Boolean(sessionEventSubscription),
         token: token ?? '',
         baseUrl,
@@ -571,12 +572,14 @@ function AppInner() {
     useVisibilityReporter({
         api,
         subscriptionId: globalSubscriptionId,
+        connectVisibility: globalConnectVisibility,
         enabled: sseEnabled
     })
 
     useVisibilityReporter({
         api,
         subscriptionId: sessionSubscriptionId,
+        connectVisibility: sessionConnectVisibility,
         enabled: sseEnabled && Boolean(sessionEventSubscription)
     })
 

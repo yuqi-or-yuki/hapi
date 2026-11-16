@@ -3,7 +3,7 @@ import { renderHook, act, waitFor } from '@testing-library/react'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { useSendMessage, type SendMessageAcceptance } from './useSendMessage'
-import { ApiError, type ApiClient } from '@/api/client'
+import { ApiError, SendTimeoutError, type ApiClient } from '@/api/client'
 
 vi.mock('@/lib/message-window-store', () => ({
     appendOptimisticMessage: vi.fn(),
@@ -452,6 +452,35 @@ describe('useSendMessage', () => {
             const info = onError.mock.calls[0][0] as { sessionId: string; text: string }
             expect(info.sessionId).toBe('session-resolved')
             expect(info.text).toBe('hi from resumed')
+        })
+
+        it('timed-out text send: keeps the failed row so retry reuses the localId (no duplicate prompt)', async () => {
+            // The hub may still have stored a send that timed out client-side.
+            // Restoring the text would let a resend go out under a new localId.
+            const onError = vi.fn()
+            const api = createMockApi(async () => {
+                throw new SendTimeoutError()
+            })
+
+            const { removeOptimisticMessage, updateMessageStatus } = await import('@/lib/message-window-store')
+            const removeMock = vi.mocked(removeOptimisticMessage)
+            const updateMock = vi.mocked(updateMessageStatus)
+            removeMock.mockClear()
+
+            const { result } = renderHook(
+                () => useSendMessage(api, 'session-A', { onError }),
+                { wrapper: createWrapper() },
+            )
+
+            act(() => {
+                result.current.sendMessage('slow hub')
+            })
+
+            await waitFor(() => {
+                expect(updateMock).toHaveBeenCalledWith('session-A', 'local-id-1', 'failed')
+            })
+            expect(onError).not.toHaveBeenCalled()
+            expect(removeMock).not.toHaveBeenCalled()
         })
 
         it('attachment send: keeps the failed row in the thread and skips composer-restore', async () => {

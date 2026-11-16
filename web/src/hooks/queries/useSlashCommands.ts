@@ -48,7 +48,6 @@ export function useSlashCommands(
         // is refetched when the user opens the menu with "/" rather than on a
         // 30s timer that runs for as long as the session is open.
         staleTime: 5 * 60_000,
-        refetchOnWindowFocus: true,
         gcTime: 30 * 60 * 1000,
         retry: false, // Don't retry RPC failures
     })

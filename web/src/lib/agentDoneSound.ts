@@ -48,12 +48,50 @@ export function normalizeAgentDoneRing(value: unknown): AgentDoneRing {
         : 'microwave'
 }
 
+// Keep the number of audio render threads bounded even when background-tab
+// timers are throttled. A fresh context per notification can accumulate before
+// its delayed close runs; one context also avoids repeated audio-device setup.
+let ringContext: AudioContext | null = null
+let stopRing: (() => void) | null = null
+let idleTimer: number | undefined
+
+function clearRing(): void {
+    window.clearTimeout(idleTimer)
+    idleTimer = undefined
+    stopRing?.()
+    stopRing = null
+}
+
+function releaseRingContext(): void {
+    clearRing()
+    const ctx = ringContext
+    ringContext = null
+    if (ctx && ctx.state !== 'closed') void ctx.close().catch(() => {})
+}
+
 export function playAgentDoneRing(ring: AgentDoneRing): void {
     const AudioContextCtor = window.AudioContext ?? (window as WindowWithWebkitAudio).webkitAudioContext
     if (!AudioContextCtor) return
 
-    const ctx = new AudioContextCtor()
+    clearRing()
+    if (!ringContext || ringContext.state === 'closed') {
+        ringContext = new AudioContextCtor()
+        window.removeEventListener('pagehide', releaseRingContext)
+        window.addEventListener('pagehide', releaseRingContext, { once: true })
+    }
+    const ctx = ringContext
+    // Safari may create a suspended context, or it may have been suspended
+    // after the previous ring. Invoke resume while still in the user gesture.
+    void ctx.resume().catch(() => {})
     const master = ctx.createGain()
+    const nodes: AudioNode[] = [master]
+    const oscillators: OscillatorNode[] = []
+    stopRing = () => {
+        for (const osc of oscillators) {
+            try { osc.stop() } catch { /* Already stopped. */ }
+        }
+        for (const node of nodes) node.disconnect()
+    }
     const pattern = RING_PATTERNS[ring]
     const maxEnd = Math.max(...pattern.map(tone => tone.start + tone.duration), 0.8)
 
@@ -66,6 +104,8 @@ export function playAgentDoneRing(ring: AgentDoneRing): void {
         if (tone.frequency <= 0) continue
         const osc = ctx.createOscillator()
         const gain = ctx.createGain()
+        oscillators.push(osc)
+        nodes.push(osc, gain)
         osc.type = tone.type ?? 'sine'
         osc.frequency.setValueAtTime(tone.frequency, ctx.currentTime + tone.start)
         gain.gain.setValueAtTime(0.0001, ctx.currentTime + tone.start)
@@ -77,7 +117,8 @@ export function playAgentDoneRing(ring: AgentDoneRing): void {
         osc.stop(ctx.currentTime + tone.start + tone.duration + 0.03)
     }
 
-    window.setTimeout(() => {
-        void ctx.close().catch(() => {})
+    idleTimer = window.setTimeout(() => {
+        clearRing()
+        void ctx.suspend().catch(() => {})
     }, Math.ceil((maxEnd + 0.7) * 1000))
 }

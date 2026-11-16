@@ -12,6 +12,7 @@ import {
     registerGeneratedImage,
 } from '@/modules/common/generatedImages';
 import type { InlineMediaSource } from '@/modules/common/inlineMediaSource';
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests';
 
 type PendingExtensionRequest = {
     tool: string;
@@ -146,7 +147,7 @@ export class CursorExtensionAdapter {
             return {
                 ...currentState,
                 requests: remaining,
-                completedRequests: {
+                completedRequests: capCompletedRequests({
                     ...currentState.completedRequests,
                     [response.id]: {
                         tool: pending.tool,
@@ -156,7 +157,7 @@ export class CursorExtensionAdapter {
                         status,
                         decision
                     }
-                }
+                })
             } satisfies AgentState;
         });
     }
@@ -261,7 +262,7 @@ export class CursorExtensionAdapter {
                 return {
                     ...currentState,
                     requests: remaining,
-                    completedRequests: {
+                    completedRequests: capCompletedRequests({
                         ...currentState.completedRequests,
                         [id]: {
                             tool: pending.tool,
@@ -272,7 +273,7 @@ export class CursorExtensionAdapter {
                             reason,
                             decision: 'abort'
                         }
-                    }
+                    })
                 } satisfies AgentState;
             });
         }

@@ -26,7 +26,6 @@ Source of truth: `hub/src/web/server.ts` (`/health` route), `shared/src/version.
   "status": "ok",
   "protocolVersion": 1,
   "capabilities": {
-    "workGraph": true,
     "titleSuggestion": false
   }
 }

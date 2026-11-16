@@ -121,10 +121,6 @@ See `src/web/routes/` for all endpoints.
 - `POST /api/machines/:id/list-directory` - Browse runner-scoped directories.
 - `POST /api/machines/:id/paths/exists` - Check if path exists.
 
-### Usage (`src/web/routes/usage.ts`)
-
-- `GET /api/usage/summary` - Get cache-aware token usage for the owner namespace (`range=7d|30d|all`).
-
 ### Git/Files (`src/web/routes/git.ts`)
 
 - `GET /api/sessions/:id/git-status` - Git status.
@@ -137,6 +133,13 @@ See `src/web/routes/` for all endpoints.
 
 - `GET /api/events` - SSE stream for live updates.
 - `POST /api/visibility` - Report client visibility state.
+
+SSE connections bound outstanding writes and replay backlogs to 256 events /
+2 MiB (one larger live event may be in flight alone). A write stalled for 15
+seconds closes that connection, releasing its queued payloads. Clients reconnect
+using event replay, or resync through REST when their cursor has fallen outside
+the replay buffer. Oversized events are delivered live but excluded from the
+2 MiB replay buffer.
 
 ### Voice (`src/web/routes/voice.ts`)
 

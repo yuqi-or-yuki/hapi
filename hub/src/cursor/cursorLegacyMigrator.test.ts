@@ -191,9 +191,7 @@ function makeHarness(): Harness {
                 collaborationMode: null,
                 agentState: null,
                 todos: null,
-                todosUpdatedAt: null,
-                teamState: null,
-                teamStateUpdatedAt: null
+                todosUpdatedAt: null
             } as unknown as Session
             return { ...base, ...overrides, metadata }
         }

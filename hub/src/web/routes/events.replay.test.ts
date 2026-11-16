@@ -181,3 +181,39 @@ describe('GET /api/events replay', () => {
         expect(manager.hasSubscription(subscriptionId!)).toBe(false)
     })
 })
+
+
+describe('GET /api/events stalled clients', () => {
+    for (const encoding of [undefined, 'gzip']) {
+        it(`disconnects an unread ${encoding ?? 'plain'} stream and lets the client resync`, async () => {
+            const manager = new SSEManager(0, new VisibilityTracker())
+            const app = buildApp(manager)
+            const response = await app.request('/api/events?all=true', {
+                headers: encoding ? { 'Accept-Encoding': encoding } : {}
+            })
+            const body = encoding ? response.body!.pipeThrough(new DecompressionStream('gzip')) : response.body!
+            const reader = body.getReader()
+            const first = await reader.read()
+            const frame = new TextDecoder().decode(first.value)
+            const data = JSON.parse(frame.split('data: ')[1]!.trim()) as { data: { subscriptionId: string } }
+            const subscriptionId = data.data.subscriptionId
+            expect(manager.hasSubscription(subscriptionId)).toBe(true)
+            await Bun.sleep(10)
+            for (let i = 0; i < 1000; i++) {
+                manager.broadcast({
+                    type: 'message-received', namespace: 'ns-test', sessionId: 's1',
+                    message: { id: String(i), localId: null, seq: i, createdAt: 1, content: 'x'.repeat(64 * 1024) }
+                })
+                if (i % 100 === 0) await Bun.sleep(0)
+            }
+            await Bun.sleep(10)
+            expect(manager.hasSubscription(subscriptionId)).toBe(false)
+            await reader.cancel()
+            const fresh = await openStream(app, '')
+            const frames = await collectFrames(fresh, 1)
+            expect(frames[0]?.data.type).toBe('connection-changed')
+            expect((frames[0]?.data.data as { resume: string }).resume).toBe('gap')
+            manager.stop()
+        })
+    }
+})

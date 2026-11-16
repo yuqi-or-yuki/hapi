@@ -141,67 +141,6 @@ describe('SessionCache.applySessionPatch', () => {
         expect(cache.applySessionPatch(created.id, {})).toBe(false)
     })
 
-    it('clears cached teamState when a null teamState patch lands (TeamDelete)', () => {
-        // PR #897 review (HAPI Bot, 2026-06-13 Major): TeamDelete events
-        // drive applyTeamStateDelta to return null; the emit-site sends
-        // { teamState: null } as the explicit clear signal. Without
-        // hasOwnProperty-discrimination, `if (patch.teamState !== undefined)`
-        // skipped the clear path and left the hub cache holding stale
-        // pre-delete TeamState — sidebar / NotificationHub / dedup all
-        // would serve stale data until the next full refresh.
-        const store = new Store(':memory:')
-        const events: SyncEvent[] = []
-        const cache = new SessionCache(store, createPublisher(events))
-
-        const created = cache.getOrCreateSession(
-            'teamstate-clear-session',
-            { path: '/tmp', host: 'h' },
-            null,
-            'default'
-        )
-        // Seed cached teamState (the pre-delete state).
-        const seedApplied = cache.applySessionPatch(created.id, {
-            teamState: { version: 10, value: { teamName: 'crew', members: [{ name: 'a' }] } }
-        })
-        expect(seedApplied).toBe(true)
-        expect(cache.getSession(created.id)?.teamState?.teamName).toBe('crew')
-
-        // TeamDelete: null teamState value must clear the cache.
-        const cleared = cache.applySessionPatch(created.id, { teamState: { version: 11, value: null } })
-        expect(cleared).toBe(true)
-        expect(cache.getSession(created.id)?.teamState).toBeUndefined()
-    })
-
-    it('leaves teamState untouched when the patch does not carry the key', () => {
-        // Guard the hasOwnProperty discriminator against a refactor back to
-        // `if (patch.teamState !== undefined)` — a todos-only patch must
-        // NOT clear teamState, which a naive `?? undefined` assignment on
-        // the unconditional branch would do.
-        const store = new Store(':memory:')
-        const events: SyncEvent[] = []
-        const cache = new SessionCache(store, createPublisher(events))
-
-        const created = cache.getOrCreateSession(
-            'teamstate-untouched-session',
-            { path: '/tmp', host: 'h' },
-            null,
-            'default'
-        )
-        cache.applySessionPatch(created.id, {
-            teamState: { version: 10, value: { teamName: 'crew', members: [{ name: 'a' }] } }
-        })
-        expect(cache.getSession(created.id)?.teamState?.teamName).toBe('crew')
-
-        const todosOnly = cache.applySessionPatch(created.id, {
-            todos: {
-                version: 20,
-                value: [{ content: 'one', status: 'pending' as const, priority: 'medium' as const, id: '1' }]
-            }
-        })
-        expect(todosOnly).toBe(true)
-        expect(cache.getSession(created.id)?.teamState?.teamName).toBe('crew')
-    })
-
     it('refuses cross-namespace patches even if the session exists', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []
@@ -216,5 +155,19 @@ describe('SessionCache.applySessionPatch', () => {
 
         const applied = cache.applySessionPatch(created.id, { todos: { version: 1, value: [] } }, 'tenant-b')
         expect(applied).toBe(false)
+    })
+})
+
+describe('SessionCache.reloadAll', () => {
+    it('hydrates the cache from stored rows without publishing events', () => {
+        const store = new Store(':memory:')
+        const stored = store.sessions.getOrCreateSession('boot-session', { path: '/tmp', host: 'h' }, null, 'default')
+        const events: SyncEvent[] = []
+        const cache = new SessionCache(store, createPublisher(events))
+
+        cache.reloadAll()
+
+        expect(cache.getSession(stored.id)?.metadata?.path).toBe('/tmp')
+        expect(events).toEqual([])
     })
 })

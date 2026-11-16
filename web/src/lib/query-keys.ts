@@ -5,7 +5,6 @@ export const queryKeys = {
     machines: ['machines'] as const,
     sqliteStorage: ['sqlite-storage'] as const,
     hubSettings: ['hub-settings'] as const,
-    usageSummary: (range: string, timeZone: string) => ['usage-summary', range, timeZone] as const,
     machineCodexModels: (machineId: string) => ['machine-codex-models', machineId] as const,
     machineClaudeModels: (machineId: string) => ['machine-claude-models', machineId] as const,
     sessionClaudeModels: (sessionId: string) => ['session-claude-models', sessionId] as const,
@@ -37,7 +36,6 @@ export const queryKeys = {
     machineAgyModels: (machineId: string) => ['machine-agy-models', machineId] as const,
     machinePiModels: (machineId: string) => ['machine-pi-models', machineId] as const,
     skills: (sessionId: string) => ['skills', sessionId] as const,
-    skillUsage: ['skill-usage'] as const,
     sessionGroups: ['session-groups'] as const,
     scratchlist: (sessionId: string) => ['scratchlist', sessionId] as const,
 }

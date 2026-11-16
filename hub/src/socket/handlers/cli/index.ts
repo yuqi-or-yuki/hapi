@@ -4,7 +4,7 @@ import type { RpcRegistry } from '../../rpcRegistry'
 import type { SyncEvent } from '../../../sync/syncEngine'
 import type { TerminalRegistry } from '../../terminalRegistry'
 import type { CliSocketWithData, SocketServer } from '../../socketTypes'
-import type { AccessErrorReason, AccessResult } from './types'
+import type { AccessErrorReason, AccessResult, SessionAccess } from './types'
 import { registerMachineHandlers } from './machineHandlers'
 import { registerRpcHandlers } from './rpcHandlers'
 import { registerSessionHandlers } from './sessionHandlers'
@@ -58,18 +58,20 @@ export function registerCliHandlers(socket: CliSocketWithData, deps: CliHandlers
     const terminalNamespace = io.of('/terminal')
     const namespace = typeof socket.data.namespace === 'string' ? socket.data.namespace : null
 
-    const resolveSessionAccess = (sessionId: string): AccessResult<StoredSession> => {
+    const resolveSessionAccess = (sessionId: string): AccessResult<SessionAccess> => {
         if (!namespace) {
             return { ok: false, reason: 'namespace-missing' }
         }
-        const session = store.sessions.getSessionByNamespace(sessionId, namespace)
-        if (session) {
-            return { ok: true, value: session }
+        // Runs on every keepalive and message: read the namespace alone
+        // rather than parsing the session's metadata/agentState JSON.
+        const owner = store.sessions.getSessionNamespace(sessionId)
+        if (owner === null) {
+            return { ok: false, reason: 'not-found' }
         }
-        if (store.sessions.getSession(sessionId)) {
+        if (owner !== namespace) {
             return { ok: false, reason: 'access-denied' }
         }
-        return { ok: false, reason: 'not-found' }
+        return { ok: true, value: { id: sessionId, namespace } }
     }
 
     const resolveMachineAccess = (machineId: string): AccessResult<StoredMachine> => {

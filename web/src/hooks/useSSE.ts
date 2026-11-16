@@ -131,6 +131,11 @@ const RECONNECT_JITTER_MS = 500
 // the relay, so widen the ceiling once the fast retries have clearly failed.
 const RECONNECT_SLOW_AFTER_ATTEMPTS = 8
 const RECONNECT_SLOW_MAX_DELAY_MS = 300_000
+// The backoff is only forgiven once a connection has stayed up this long. A
+// link that opens and immediately drops (flaky relay, hub restarting, proxy
+// cutting idle streams) would otherwise reset to "attempt 0" on every open and
+// reconnect instantly forever, each cycle costing a handshake plus a resync.
+export const RECONNECT_HEALTHY_RESET_MS = 30_000
 const INVALIDATION_BATCH_MS = 16
 
 function sortSessionSummaries(left: SessionSummary, right: SessionSummary): number {
@@ -291,7 +296,11 @@ export function useSSE(options: {
     onError?: (error: unknown) => void
     onToast?: (event: ToastEvent) => void
     onSessionFinished?: (event: { sessionId: string; allClear: boolean }) => void
-}): { subscriptionId: string | null } {
+}): {
+    subscriptionId: string | null
+    /** Visibility sent in the connect URL of the current subscription. */
+    connectVisibility: VisibilityState | null
+} {
     const queryClient = useQueryClient()
     const onEventRef = useRef(options.onEvent)
     const onConnectRef = useRef(options.onConnect)
@@ -319,6 +328,7 @@ export function useSSE(options: {
     // the hub replay against the wrong filter set, hence the key check.
     const lastEventCursorRef = useRef<{ key: string; id: string } | null>(null)
     const lastActivityAtRef = useRef(0)
+    const connectVisibilityRef = useRef<VisibilityState | null>(null)
     const [reconnectNonce, setReconnectNonce] = useState(0)
     const [subscriptionId, setSubscriptionId] = useState<string | null>(null)
 
@@ -371,21 +381,31 @@ export function useSSE(options: {
             }
             reconnectAttemptRef.current = 0
             reconnectDeferredRef.current = false
+            connectVisibilityRef.current = null
             setSubscriptionId(null)
             return
         }
 
         setSubscriptionId(null)
+        const connectVisibility = getVisibilityState()
+        connectVisibilityRef.current = connectVisibility
         const resumeCursor = lastEventCursorRef.current?.key === subscriptionKey
             ? lastEventCursorRef.current.id
             : null
         const url = buildEventsUrl(options.baseUrl, options.token, {
             ...subscription,
             sessionId: subscription.sessionId ?? undefined
-        }, getVisibilityState(), resumeCursor)
+        }, connectVisibility, resumeCursor)
         const eventSource = new EventSource(url)
         let disconnectNotified = false
         let reconnectRequested = false
+        let healthyResetTimer: ReturnType<typeof setTimeout> | null = null
+        const clearHealthyResetTimer = () => {
+            if (healthyResetTimer) {
+                clearTimeout(healthyResetTimer)
+                healthyResetTimer = null
+            }
+        }
         eventSourceRef.current = eventSource
         lastActivityAtRef.current = Date.now()
 
@@ -422,6 +442,8 @@ export function useSSE(options: {
             }, exponentialDelay + jitter)
         }
 
+        let openedAt: number | null = null
+
         const notifyDisconnect = (reason: string) => {
             if (disconnectNotified) {
                 return
@@ -435,6 +457,14 @@ export function useSSE(options: {
                 return
             }
             reconnectRequested = true
+            clearHealthyResetTimer()
+            // Timers do not run while a phone suspends the page, so judge
+            // "stayed healthy" by wall clock too, and never let a resume from
+            // the background climb the backoff: that is not a flapping link.
+            if (reason === 'visibility-recovery'
+                || (openedAt !== null && Date.now() - openedAt >= RECONNECT_HEALTHY_RESET_MS)) {
+                reconnectAttemptRef.current = 0
+            }
             notifyDisconnect(reason)
             eventSource.close()
             if (eventSourceRef.current === eventSource) {
@@ -526,7 +556,10 @@ export function useSSE(options: {
                 const summary = {
                     ...toSessionSummary(session),
                     futureScheduledMessageCount: existing?.futureScheduledMessageCount ?? 0,
-                    nextScheduledAt: existing?.nextScheduledAt ?? null
+                    nextScheduledAt: existing?.nextScheduledAt ?? null,
+                    // Only the list route computes this; keep it rather than
+                    // wiping the schedule chip on every full-session event.
+                    scheduledDueAts: existing?.scheduledDueAts ?? []
                 }
                 const nextSessions = previous.sessions.slice()
                 if (existingIndex >= 0) {
@@ -574,9 +607,7 @@ export function useSSE(options: {
                     modelReasoningEffort: Object.prototype.hasOwnProperty.call(patch, 'modelReasoningEffort')
                         ? patch.modelReasoningEffort ?? null
                         : current.modelReasoningEffort,
-                    effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort,
-                    loopActive: Object.prototype.hasOwnProperty.call(patch, 'loopActive') ? (patch as { loopActive?: boolean }).loopActive ?? current.loopActive : current.loopActive,
-                    debateActive: Object.prototype.hasOwnProperty.call(patch, 'debateActive') ? (patch as { debateActive?: boolean }).debateActive ?? current.debateActive : current.debateActive
+                    effort: Object.prototype.hasOwnProperty.call(patch, 'effort') ? patch.effort ?? null : current.effort
                 }
 
                 // Gate versioned fields against THIS summary's watermarks —
@@ -890,7 +921,17 @@ export function useSSE(options: {
                 clearTimeout(reconnectTimerRef.current)
                 reconnectTimerRef.current = null
             }
-            reconnectAttemptRef.current = 0
+            // Not reset here: see RECONNECT_HEALTHY_RESET_MS. Any teardown of
+            // this source (requestReconnect / effect cleanup) cancels the timer,
+            // so an open-then-drop cycle keeps climbing the backoff.
+            clearHealthyResetTimer()
+            openedAt = Date.now()
+            healthyResetTimer = setTimeout(() => {
+                healthyResetTimer = null
+                if (eventSourceRef.current === eventSource) {
+                    reconnectAttemptRef.current = 0
+                }
+            }, RECONNECT_HEALTHY_RESET_MS)
             reconnectDeferredRef.current = false
             disconnectNotified = false
             lastActivityAtRef.current = Date.now()
@@ -950,6 +991,7 @@ export function useSSE(options: {
         return () => {
             clearInterval(watchdogTimer)
             clearTimeout(connectDeadlineTimer)
+            clearHealthyResetTimer()
             document.removeEventListener('visibilitychange', onVisibilityChange)
             if (invalidationTimerRef.current) {
                 clearTimeout(invalidationTimerRef.current)
@@ -970,5 +1012,8 @@ export function useSSE(options: {
         }
     }, [options.baseUrl, options.enabled, options.scope, options.token, scope, subscriptionKey, queryClient, reconnectNonce])
 
-    return { subscriptionId }
+    return {
+        subscriptionId,
+        connectVisibility: subscriptionId ? connectVisibilityRef.current : null
+    }
 }

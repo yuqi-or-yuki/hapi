@@ -13,10 +13,7 @@ import { FcmStore } from './fcmStore'
 import { ScratchlistStore } from './scratchlistStore'
 import { SessionStore } from './sessionStore'
 import { ScheduledMessageStore } from './scheduledMessageStore'
-import { SkillUsageStore } from './skillUsageStore'
 import { UserStore } from './userStore'
-import { UsageStore } from './usageStore'
-import { WorkGraphStore } from './workGraphStore'
 
 export type {
     NativeDevicePlatform,
@@ -41,16 +38,7 @@ export { ScratchlistStore } from './scratchlistStore'
 export { SessionStore } from './sessionStore'
 export { ScheduledMessageStore } from './scheduledMessageStore'
 export type { ScheduledMessageHistoryRow, ScheduledMessageRow, ScheduledMessageStatus } from './scheduledMessageStore'
-export { SkillUsageStore } from './skillUsageStore'
-export type { SkillUsageRow } from './skillUsageStore'
 export { UserStore } from './userStore'
-export { UsageStore } from './usageStore'
-export { WorkGraphStore } from './workGraphStore'
-export {
-    WorkGraphNotFoundError,
-    WorkGraphPrincipalError,
-    WorkGraphValidationError
-} from './workGraph'
 
 export const SCHEMA_VERSION: number = 26
 const REQUIRED_TABLES = [
@@ -85,11 +73,8 @@ export class Store {
     readonly blobs: BlobStore
     readonly preferences: PreferencesStore
     readonly scheduledMessages: ScheduledMessageStore
-    readonly skillUsage: SkillUsageStore
     readonly fcm: FcmStore
     readonly scratchlist: ScratchlistStore
-    readonly usage: UsageStore
-    readonly workGraph: WorkGraphStore
 
     /**
      * Filesystem path of the underlying SQLite database, or ':memory:' for
@@ -153,11 +138,8 @@ export class Store {
         this.blobs = new BlobStore(this.db)
         this.preferences = new PreferencesStore(this.db)
         this.scheduledMessages = new ScheduledMessageStore(this.db)
-        this.skillUsage = new SkillUsageStore(this.db)
         this.fcm = new FcmStore(this.db)
         this.scratchlist = new ScratchlistStore(this.db)
-        this.usage = new UsageStore(this.db)
-        this.workGraph = new WorkGraphStore(this.db)
     }
 
     /**
@@ -272,18 +254,22 @@ export class Store {
         const target = this.db.prepare('SELECT namespace FROM sessions WHERE id = ?')
             .get(sessionId) as { namespace: string } | undefined
         if (!target) return false
-        // Called on every CLI keepalive (2s per live session); prefilter in SQL so
-        // the namespace's metadata is not JSON-parsed row by row each time when
-        // no session has ever had a clear operation (the common case).
-        const rows = this.db.prepare(
-            "SELECT metadata FROM sessions WHERE namespace = ? AND metadata IS NOT NULL AND instr(metadata, 'opencodeClearOperation') > 0"
-        ).all(target.namespace) as Array<{ metadata: string }>
+        // Called on every CLI keepalive (2s per live session). Must not scan the
+        // sessions table: instr()/LIKE over metadata reads every row's overflow
+        // pages, which froze the hub for minutes on a cold page cache. The
+        // json_extract expression below matches idx_sessions_opencode_clear_replacement
+        // exactly, so this is an index lookup that touches only candidate rows.
+        const rows = this.db.prepare(`
+            SELECT metadata FROM sessions
+            WHERE json_extract(metadata, '$.opencodeClearOperation.replacementSessionId') = ?
+              AND namespace = ?
+        `).all(sessionId, target.namespace) as Array<{ metadata: string }>
         return rows.some((row) => {
             try {
                 const operation = (JSON.parse(row.metadata) as {
-                    opencodeClearOperation?: { replacementSessionId?: string; state?: string }
+                    opencodeClearOperation?: { state?: string }
                 }).opencodeClearOperation
-                return operation?.replacementSessionId === sessionId
+                return operation !== undefined
                     && operation.state !== 'completed'
                     && operation.state !== 'aborted'
             } catch {
@@ -418,6 +404,10 @@ export class Store {
                 if (!step) throw this.buildSchemaMismatchError(currentVersion)
                 step()
             }
+            // Hot-path queries name these indexes with INDEXED BY; an upgraded
+            // database must have them before the first keepalive arrives.
+            this.ensureSessionOpenCodeClearIndex()
+            this.ensureMessagesQueuedPendingIndex()
             this.setUserVersion(SCHEMA_VERSION)
             return
         }
@@ -430,6 +420,8 @@ export class Store {
         this.ensureSkillUsageSchema()
         this.ensureMessageScheduledAtColumn()
         this.ensureSessionServiceTierColumn()
+        this.ensureSessionOpenCodeClearIndex()
+        this.ensureMessagesQueuedPendingIndex()
         this.assertRequiredTablesPresent()
     }
 
@@ -462,6 +454,8 @@ export class Store {
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_tag ON sessions(tag);
             CREATE INDEX IF NOT EXISTS idx_sessions_tag_namespace ON sessions(tag, namespace);
+            CREATE INDEX IF NOT EXISTS idx_sessions_opencode_clear_replacement
+                ON sessions(json_extract(metadata, '$.opencodeClearOperation.replacementSessionId'));
 
             CREATE TABLE IF NOT EXISTS machines (
                 id TEXT PRIMARY KEY,
@@ -497,6 +491,9 @@ export class Store {
             CREATE INDEX IF NOT EXISTS idx_messages_scheduled_pending
                 ON messages(scheduled_at)
                 WHERE scheduled_at IS NOT NULL AND invoked_at IS NULL;
+            CREATE INDEX IF NOT EXISTS idx_messages_queued_pending
+                ON messages(session_id, seq)
+                WHERE invoked_at IS NULL AND delivery_state = 'queued';
 
             CREATE TABLE IF NOT EXISTS message_epochs (
                 session_id TEXT PRIMARY KEY,
@@ -902,6 +899,34 @@ export class Store {
             CREATE INDEX IF NOT EXISTS idx_messages_scheduled_pending
                 ON messages(scheduled_at)
                 WHERE scheduled_at IS NOT NULL AND invoked_at IS NULL
+        `)
+    }
+
+    /**
+     * Expression index backing isOpenCodeClearDeliveryGated (hot path: every CLI
+     * keepalive). Existing databases skip createSchema, so ensure it here too.
+     */
+    private ensureSessionOpenCodeClearIndex(): void {
+        if (this.getSessionColumnNames().size === 0) return
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_sessions_opencode_clear_replacement
+                ON sessions(json_extract(metadata, '$.opencodeClearOperation.replacementSessionId'))
+        `)
+    }
+
+    /**
+     * Partial index for the per-keepalive "anything queued for this session?"
+     * lookups (getImmediateQueuedLocalMessages & co). Holds only uninvoked queued
+     * rows, so those lookups never touch table rows even on a cold page cache.
+     * Existing databases skip createSchema, so ensure it here (needs delivery_state).
+     */
+    private ensureMessagesQueuedPendingIndex(): void {
+        const columns = this.getMessageColumnNames()
+        if (columns.size === 0 || !columns.has('delivery_state')) return
+        this.db.exec(`
+            CREATE INDEX IF NOT EXISTS idx_messages_queued_pending
+                ON messages(session_id, seq)
+                WHERE invoked_at IS NULL AND delivery_state = 'queued'
         `)
     }
 

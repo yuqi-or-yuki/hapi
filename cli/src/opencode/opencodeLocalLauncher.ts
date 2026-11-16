@@ -17,6 +17,7 @@ import { configuration } from '@/configuration';
 import type { PermissionCompletion } from '@/modules/common/permission/BasePermissionHandler';
 import { hashObject } from '@/utils/deterministicJson';
 import { BaseLocalLauncher } from '@/modules/common/launcher/BaseLocalLauncher';
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests';
 
 type OpencodeLocalLauncherOptions = {
     hookServer: OpencodeHookServer;
@@ -543,7 +544,7 @@ export async function opencodeLocalLauncher(
                 return {
                     ...currentState,
                     requests: nextRequests,
-                    completedRequests: {
+                    completedRequests: capCompletedRequests({
                         ...currentState.completedRequests,
                         [id]: {
                             ...request,
@@ -553,7 +554,7 @@ export async function opencodeLocalLauncher(
                             reason,
                             allowTools
                         }
-                    }
+                    })
                 };
             });
             return;

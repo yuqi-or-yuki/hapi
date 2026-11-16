@@ -8,11 +8,11 @@ import {
 import type { StoredSession } from '../../../store'
 import type { TerminalRegistry } from '../../terminalRegistry'
 import type { CliSocketWithData, SocketServer } from '../../socketTypes'
-import type { AccessErrorReason, AccessResult } from './types'
+import type { AccessErrorReason, AccessResult, SessionAccess } from './types'
 import { appendAgentTerminalOutput, clearAgentTerminalBuffer } from '../../agentTerminalBuffer'
 import { appendUserTerminalOutput } from '../../userTerminalBuffer'
 
-type ResolveSessionAccess = (sessionId: string) => AccessResult<StoredSession>
+type ResolveSessionAccess = (sessionId: string) => AccessResult<SessionAccess>
 
 type EmitAccessError = (scope: 'session' | 'machine', id: string, reason: AccessErrorReason) => void
 

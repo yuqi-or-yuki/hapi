@@ -39,6 +39,25 @@ function resolveMode(
     return modes[0] ?? 'standard'
 }
 
+type TranscriptionProvidersResponse = { providers: TranscriptionProviderInfo[] }
+
+// The composer mounts this hook on every chat open; the configured providers
+// only change from the voice settings page, which forces a refresh.
+const transcriptionProvidersCache = new WeakMap<ApiClient, Promise<TranscriptionProvidersResponse>>()
+
+function loadTranscriptionProviders(api: ApiClient, force: boolean): Promise<TranscriptionProvidersResponse> {
+    const cached = force ? undefined : transcriptionProvidersCache.get(api)
+    if (cached) return cached
+    const request = api.fetchTranscriptionProviders()
+    transcriptionProvidersCache.set(api, request)
+    request.catch(() => {
+        if (transcriptionProvidersCache.get(api) === request) {
+            transcriptionProvidersCache.delete(api)
+        }
+    })
+    return request
+}
+
 export function useVoiceInputPreferences(api: ApiClient | null) {
     const [voiceMode, setVoiceModeState] = useState<VoiceMode>(readVoiceMode)
     const [providers, setProviders] = useState<TranscriptionProviderInfo[]>([])
@@ -49,8 +68,8 @@ export function useVoiceInputPreferences(api: ApiClient | null) {
         if (!api) return
         let cancelled = false
         const browserLocal = hasBrowserLocalSpeechSupport()
-        const load = () => {
-            api.fetchTranscriptionProviders().then(({ providers: configured }) => {
+        const load = (force = false) => {
+            loadTranscriptionProviders(api, force).then(({ providers: configured }) => {
                 if (cancelled) return
                 const available = browserLocal
                     ? [...configured, BROWSER_LOCAL_TRANSCRIPTION_PROVIDER]
@@ -64,7 +83,7 @@ export function useVoiceInputPreferences(api: ApiClient | null) {
             })
         }
         load()
-        const onRefresh = () => load()
+        const onRefresh = () => load(true)
         window.addEventListener('hapi-transcription-providers-refresh', onRefresh)
         return () => {
             cancelled = true

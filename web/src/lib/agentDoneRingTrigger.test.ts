@@ -22,8 +22,6 @@ function session(overrides: Partial<SessionSummary>): SessionSummary {
         backgroundTaskCount: 0,
         futureScheduledMessageCount: 0,
         nextScheduledAt: null,
-        loopActive: false,
-        debateActive: false,
         scheduledDueAts: [],
         ...overrides
     }

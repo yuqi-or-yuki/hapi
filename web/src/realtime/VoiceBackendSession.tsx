@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from 'react'
 import { RealtimeVoiceSession } from './RealtimeVoiceSession'
 import type { RealtimeVoiceSessionProps } from './RealtimeVoiceSession'
-import { fetchVoiceBackend } from '@/api/voice'
+import { fetchVoiceBackendCached } from '@/api/voice'
 import { resolveSelectedVoiceBackend } from '@/lib/voicePickerPreferences'
 import type { ApiClient } from '@/api/client'
 import type { VoiceBackendType } from '@hapi/protocol/voice'
@@ -21,7 +21,7 @@ export type VoiceBackendSessionProps = RealtimeVoiceSessionProps & {
 
 /**
  * Selects voice session from user preference (when multiple backends configured) or hub default.
- * Queries GET /voice/backend once on mount and renders the appropriate component.
+ * Reads GET /voice/backend (fetched once per page load, shared across mounts) and renders the appropriate component.
  * Only signals readiness after the selected backend has mounted and registered its session.
  */
 export function VoiceBackendSession(props: VoiceBackendSessionProps) {
@@ -30,7 +30,7 @@ export function VoiceBackendSession(props: VoiceBackendSessionProps) {
     useEffect(() => {
         let cancelled = false
         setBackend(null)
-        fetchVoiceBackend(props.api).then((resp) => {
+        fetchVoiceBackendCached(props.api).then((resp) => {
             if (!cancelled) {
                 setBackend(resolveSelectedVoiceBackend(resp.backends, resp.backend))
             }

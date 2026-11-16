@@ -105,12 +105,6 @@ export async function buildHapiMcpBridge(
             approval_mode: 'approve'
         };
     }
-    // Discovery shortlist only - same trust as skill_lookup / change_title.
-    tools.list_peers = {
-        approval_mode: 'approve'
-    };
-    // inspect_peer is registered on the HTTP MCP server / stdio bridge, but
-    // is not auto-approved: it reads another session's history.
     if (options.skillLookup) {
         tools.skill_lookup = {
             approval_mode: 'approve'

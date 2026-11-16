@@ -44,12 +44,9 @@ describe('buildSessionReferencePath', () => {
 })
 
 describe('buildSessionReferenceText', () => {
-    it('includes a citation prompt with title, relative path, and inspect_peer steer', () => {
+    it('includes a citation prompt with title, relative path, and hub-path note', () => {
         expect(buildSessionReferenceText('upstream issue/pr discovery', 'abc-def')).toBe(
             `See session "upstream issue/pr discovery" (/sessions/abc-def) for context.${SESSION_REFERENCE_STEER_SUFFIX}`
-        )
-        expect(buildSessionReferenceText('upstream issue/pr discovery', 'abc-def')).toContain(
-            'inspect_peer'
         )
     })
 

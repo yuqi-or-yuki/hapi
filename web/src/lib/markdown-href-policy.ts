@@ -28,7 +28,6 @@ const STATIC_SPA_PATHS = new Set([
     '/settings/machines',
     '/settings/about',
     '/settings/storage',
-    '/settings/usage',
 ])
 
 // /sessions/<id> plus known children only (files | file | terminal).

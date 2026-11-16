@@ -14,6 +14,13 @@ function getVisibilityState(): VisibilityState {
 export function useVisibilityReporter(options: {
     api: ApiClient | null
     subscriptionId: string | null
+    /**
+     * Visibility the hub already has for this subscription (sent as
+     * `?visibility=` on the SSE connect URL, which registers the connection in
+     * the hub's VisibilityTracker). When it still matches the document state
+     * the initial POST is redundant and skipped; only real changes are reported.
+     */
+    connectVisibility?: VisibilityState | null
     enabled?: boolean
 }): void {
     const lastStateRef = useRef<VisibilityState | null>(null)
@@ -46,7 +53,7 @@ export function useVisibilityReporter(options: {
         const subscriptionId = options.subscriptionId
         if (lastSubscriptionRef.current !== subscriptionId) {
             lastSubscriptionRef.current = subscriptionId
-            lastStateRef.current = null
+            lastStateRef.current = options.connectVisibility ?? null
             pendingStateRef.current = null
             clearRetry()
         }
@@ -129,5 +136,6 @@ export function useVisibilityReporter(options: {
             clearRetry()
             inFlightRef.current = false
         }
-    }, [options.api, options.enabled, options.subscriptionId])
+    // connectVisibility is read only when subscriptionId changes; it is not a dependency.
+    }, [options.api, options.enabled, options.subscriptionId]) // eslint-disable-line react-hooks/exhaustive-deps
 }

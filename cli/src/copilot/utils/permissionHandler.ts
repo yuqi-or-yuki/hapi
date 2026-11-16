@@ -9,6 +9,7 @@ import {
     type PendingPermissionRequest,
     type PermissionCompletion
 } from '@/modules/common/permission/BasePermissionHandler';
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests';
 
 interface PermissionResponseMessage {
     id: string;
@@ -120,7 +121,7 @@ export class CopilotPermissionHandler extends BasePermissionHandler<PermissionRe
 
         this.client.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [request.id]: {
                     tool: toolName,
@@ -130,7 +131,7 @@ export class CopilotPermissionHandler extends BasePermissionHandler<PermissionRe
                     status: 'approved',
                     decision
                 }
-            }
+            })
         }));
 
         logger.debug(`[Copilot] Auto-approved ${toolName} (${request.id}) mode=${decision}`);

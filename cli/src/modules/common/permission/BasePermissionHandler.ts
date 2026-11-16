@@ -1,6 +1,7 @@
 import type { AgentState } from "@/api/types";
 import type { PermissionMode } from "@hapi/protocol/types";
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods';
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests';
 
 type RpcHandlerManagerLike = {
     registerHandler<TRequest = unknown, TResponse = unknown>(
@@ -19,8 +20,6 @@ export type AutoApprovalRuleSet = {
 
 const AUTO_APPROVE_TOOL_NAME_HINTS = [
     'change_title',
-    'claim_debate',
-    'claim_loop',
     'happy__change_title',
     'hapi_change_title',  // OpenCode MCP tool pattern
     'geminireasoning',
@@ -32,34 +31,16 @@ const AUTO_APPROVE_EXACT_TOOL_NAMES = new Set([
     'skill_lookup',
     'hapi_skill_lookup',
     'happy__skill_lookup',
-    'mcp__hapi__skill_lookup',
-    // Discovery shortlist only (id/active/flavor/name) - same as ping-peer --list.
-    'list_peers',
-    'hapi_list_peers',
-    'happy__list_peers',
-    'mcp__hapi__list_peers',
-    // ACP permission requests often surface MCP tool title, not the snake_case name.
-    'list peer sessions'
+    'mcp__hapi__skill_lookup'
 ]);
-// inspect_peer intentionally omitted from always-approve: it reads peer
-// histories, so permission modes must still gate it. Treat it as write-like in
-// read-only so ACP titles such as "Inspect Peer Session" also require
-// approval. list_peers is discovery-only and is auto-approved above.
-// claim_debate / claim_loop are fork-local HAPI bookkeeping tools with no
-// side effects outside the session, so they stay auto-approved.
-const AUTO_APPROVE_TOOL_ID_HINTS = ['change_title', 'claim_debate', 'claim_loop', 'save_memory'];
-const SENSITIVE_TOOL_NAME_HINTS = [
-    'inspect_peer',
-    'inspect peer',
-];
+const AUTO_APPROVE_TOOL_ID_HINTS = ['change_title', 'save_memory'];
 const AUTO_APPROVE_WRITE_TOOL_HINTS = [
     'write',
     'edit',
     'create',
     'delete',
     'patch',
-    'fs-edit',
-    ...SENSITIVE_TOOL_NAME_HINTS
+    'fs-edit'
 ];
 
 export function resolveToolAutoApprovalDecision(
@@ -203,7 +184,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
             return {
                 ...currentState,
                 requests: nextRequests,
-                completedRequests: {
+                completedRequests: capCompletedRequests({
                     ...currentState.completedRequests,
                     [id]: {
                         ...request,
@@ -215,7 +196,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
                         allowTools: completion.allowTools,
                         answers: completion.answers
                     }
-                }
+                })
             };
         });
     }
@@ -251,7 +232,7 @@ export abstract class BasePermissionHandler<TResponse extends { id: string }, TR
             return {
                 ...currentState,
                 requests: nextRequests,
-                completedRequests
+                completedRequests: capCompletedRequests(completedRequests)
             };
         });
     }

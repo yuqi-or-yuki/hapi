@@ -41,6 +41,46 @@ export function getToolGroupTiming(tools: ToolCallBlock[], now: number): {
     return { startedAt, completedAt, durationMs, running }
 }
 
+/** Ticks once a second while `active`; keeps the re-render inside the caller. */
+function useTickingNow(active: boolean, resetKey: number | null): number {
+    const [now, setNow] = useState(() => Date.now())
+
+    useEffect(() => {
+        if (!active) return
+        setNow(Date.now())
+        const id = setInterval(() => setNow(Date.now()), TIMING_INTERVAL_MS)
+        return () => clearInterval(id)
+    }, [active, resetKey])
+
+    return now
+}
+
+// The elapsed timers live in these leaves so a running tool re-renders one
+// label per second instead of the whole group (rows, markdown, dialog).
+function ToolGroupTimingSummary(props: { tools: ToolCallBlock[]; running: boolean; startedAt: number | null }) {
+    const now = useTickingNow(props.running, props.startedAt)
+    const timing = getToolGroupTiming(props.tools, now)
+    return (
+        <ToolTimingSummary
+            startedAt={timing.startedAt}
+            completedAt={timing.completedAt}
+            durationMs={timing.durationMs}
+            typography="group"
+        />
+    )
+}
+
+function ToolRowDuration(props: { tool: ToolCallBlock['tool'] }) {
+    const now = useTickingNow(props.tool.state === 'running', props.tool.startedAt ?? props.tool.createdAt)
+    const { durationMs } = getToolTimingDetails(props.tool, now)
+    if (durationMs == null) return null
+    return (
+        <span className="font-mono text-xs text-[var(--app-hint)]">
+            {formatDuration(durationMs)}
+        </span>
+    )
+}
+
 function DetailsIcon(props: { open: boolean }) {
     return (
         <svg className={cn('h-4 w-4 transition-transform duration-200', props.open ? 'rotate-90' : null)} viewBox="0 0 16 16" fill="none" data-state={props.open ? 'open' : 'closed'}>
@@ -197,16 +237,10 @@ export function ToolGroupCard(props: {
     const [selectedToolId, setSelectedToolId] = useState<string | null>(null)
     const [isHydratingHistory, setIsHydratingHistory] = useState(false)
     const [historyExhausted, setHistoryExhausted] = useState(false)
-    const [now, setNow] = useState(() => Date.now())
     const hydrationRunRef = useRef(0)
-    const groupTiming = getToolGroupTiming(props.block.tools, now)
-
-    useEffect(() => {
-        if (!groupTiming.running) return
-        setNow(Date.now())
-        const id = setInterval(() => setNow(Date.now()), TIMING_INTERVAL_MS)
-        return () => clearInterval(id)
-    }, [groupTiming.running, groupTiming.startedAt])
+    // Only the time-independent fields are read here; elapsed time ticks in
+    // ToolGroupTimingSummary / ToolRowDuration.
+    const groupTiming = getToolGroupTiming(props.block.tools, 0)
 
     useEffect(() => {
         hydrationRunRef.current += 1
@@ -333,11 +367,10 @@ export function ToolGroupCard(props: {
                                     {primaryTitle}
                                 </CardTitle>
                             </div>
-                            <ToolTimingSummary
+                            <ToolGroupTimingSummary
+                                tools={props.block.tools}
+                                running={groupTiming.running}
                                 startedAt={groupTiming.startedAt}
-                                completedAt={groupTiming.completedAt}
-                                durationMs={groupTiming.durationMs}
-                                typography="group"
                             />
                         </div>
 
@@ -405,7 +438,6 @@ export function ToolGroupCard(props: {
                         {props.block.presentationMode === 'codex-exploration' ? (
                             <CodexExplorationRows tools={props.block.tools} onSelect={setSelectedToolId} />
                         ) : props.block.tools.map((tool) => {
-                            const timing = getToolTimingDetails(tool.tool, now)
                             return (
                                 <button
                                     key={tool.id}
@@ -418,11 +450,7 @@ export function ToolGroupCard(props: {
                                     </span>
                                     <RowLabel block={tool} metadata={props.metadata} />
                                     <div className="flex shrink-0 items-center gap-2">
-                                        {timing.durationMs != null ? (
-                                            <span className="font-mono text-xs text-[var(--app-hint)]">
-                                                {formatDuration(timing.durationMs)}
-                                            </span>
-                                        ) : null}
+                                        <ToolRowDuration tool={tool.tool} />
                                         <RowStatusBadge block={tool} />
                                     </div>
                                 </button>

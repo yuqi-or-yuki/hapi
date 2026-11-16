@@ -6,7 +6,6 @@
  */
 
 import { trimIdent } from '@/utils/trimIdent';
-import { buildSessionCitationSteerInstruction } from '@hapi/protocol/sessionCitation';
 import { HAPI_MCP_BRIDGE_PROMPT } from '@/modules/common/hapiMcpBridgePrompt';
 import {
     DISPLAY_IMAGE_PROMPT_HAPI_MCP,
@@ -21,10 +20,6 @@ import { withSessionSummaryInstruction } from '@/modules/common/sessionSummaryIn
  */
 export const TITLE_INSTRUCTION = trimIdent(`
     ${HAPI_MCP_BRIDGE_PROMPT}
-    ${buildSessionCitationSteerInstruction({
-        inspectTool: 'hapi_inspect_peer',
-        listPeersTool: 'hapi_list_peers',
-    })}
     ${SKILL_LOOKUP_INSTRUCTION}
 `);
 
@@ -40,10 +35,6 @@ export const OPENCODE_NATIVE_TOOL_INSTRUCTION = trimIdent(`
     ${DISPLAY_IMAGE_PROMPT_HAPI_MCP}
     ${DISPLAY_VIDEO_PROMPT_HAPI_MCP}
     ${DISPLAY_MEDIA_PROMPT_HAPI_MCP}
-    ${buildSessionCitationSteerInstruction({
-        inspectTool: 'hapi_inspect_peer',
-        listPeersTool: 'hapi_list_peers',
-    })}
     ${SKILL_LOOKUP_INSTRUCTION}
 `);
 

@@ -7,8 +7,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { createServer, type IncomingMessage } from "node:http";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { AddressInfo } from "node:net";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { z } from "zod";
 import { logger } from "@/ui/logger";
 import { ApiSessionClient } from "@/api/apiSession";
@@ -23,11 +21,6 @@ import {
 import type { InlineMediaSource } from "@/modules/common/inlineMediaSource";
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from "@/modules/common/displayImagePrompt";
 import { resolveSkill } from "@/modules/common/skills";
-import {
-    INSPECT_PEER_TOOL_DESCRIPTION,
-    SESSION_ID_PREFIX_PARAM_DESCRIPTION,
-} from '@hapi/protocol/sessionCitation'
-import { PingPeerError, formatInspectPeerReport, formatPeerSessionsList, inspectPeer, listPeerSessions, peerListFetchLimit } from "@/modules/pingPeer/pingPeer";
 
 type StartHappyServerOptions = {
     emitTitleSummary?: boolean;
@@ -41,15 +34,13 @@ type StartHappyServerOptions = {
 /** Registered on the MCP server, but never pre-approved via Claude --allowedTools. */
 const CLAUDE_MANUAL_APPROVAL_HAPI_TOOLS = new Set([
     'display_media',
-    'display_video',
-    'inspect_peer'
+    'display_video'
 ]);
 
 /**
  * Map HAPI MCP tool names to Claude `--allowedTools` entries.
- * Keeps `display_media` / `display_video` (arbitrary local-path readers) and
- * `inspect_peer` off the auto-allow list so they still prompt.
- * `list_peers` stays allowed (discovery shortlist only).
+ * Keeps `display_media` / `display_video` (arbitrary local-path readers)
+ * off the auto-allow list so they still prompt.
  */
 export function toClaudeAllowedHapiMcpTools(toolNames: string[]): string[] {
     return toolNames
@@ -109,19 +100,6 @@ function createHapiMcpServer(
     });
 
     const maxInlineMediaBytes = 25 * 1024 * 1024;
-
-    const inspectPeerInputSchema: z.ZodTypeAny = z.object({
-        sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
-        messageLimit: z.number().int().min(1).max(100).optional().describe(
-            'Recent message page size (default 30, max 100). Text snippets only.'
-        ),
-    });
-
-    const listPeersInputSchema: z.ZodTypeAny = z.object({
-        limit: z.number().int().min(1).max(100).optional().describe(
-            'Max sessions to return (default 30, max 100). Newest updatedAt first.'
-        ),
-    });
 
     async function displayInlineMedia(
         args: { path: string; title?: string },
@@ -229,32 +207,6 @@ function createHapiMcpServer(
         }
     });
 
-    const claimLoopInputSchema: z.ZodTypeAny = z.object({
-        directory: z.string().describe('Absolute path to the directory where the loop was started'),
-    });
-
-    mcp.registerTool<any, any>('claim_loop', {
-        description: 'Record that the current HAPI session owns the claudeloop running in the given directory. Call this immediately after starting claudeloop.',
-        title: 'Claim Loop Session',
-        inputSchema: claimLoopInputSchema,
-    }, async (args: { directory: string }) => {
-        try {
-            const loopLogsDir = join(args.directory, '.loop-logs')
-            mkdirSync(loopLogsDir, { recursive: true })
-            writeFileSync(join(loopLogsDir, 'hapi-session-id'), client.sessionId)
-            logger.debug(`[hapiMCP] claimed loop for session ${client.sessionId} in ${args.directory}`)
-            return {
-                content: [{ type: 'text' as const, text: `Loop claimed for session ${client.sessionId}` }],
-                isError: false,
-            }
-        } catch (error) {
-            return {
-                content: [{ type: 'text' as const, text: `Failed to claim loop: ${String(error)}` }],
-                isError: true,
-            }
-        }
-    });
-
     mcp.registerTool<any, any>('display_video', {
         description: `Display a local mp4 or webm file inline in the current HAPI chat session. ${DISPLAY_VIDEO_PROMPT_CURSOR}`,
         title: 'Display Video',
@@ -309,115 +261,6 @@ function createHapiMcpServer(
                 content: [{ type: 'text' as const, text: `Failed to display media: ${message}` }],
                 isError: true,
             };
-        }
-    });
-
-    mcp.registerTool<any, any>('inspect_peer', {
-        description: INSPECT_PEER_TOOL_DESCRIPTION,
-        title: 'Inspect Peer Session',
-        inputSchema: inspectPeerInputSchema,
-    }, async (args: { sessionIdPrefix: string; messageLimit?: number }) => {
-        logger.debug('[hapiMCP] inspect_peer:', args.sessionIdPrefix);
-        try {
-            const result = await inspectPeer({
-                sessionIdPrefix: args.sessionIdPrefix,
-                messageLimit: args.messageLimit,
-            });
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: formatInspectPeerReport(result),
-                    },
-                ],
-                isError: false,
-            };
-        } catch (error) {
-            const message = error instanceof PingPeerError
-                ? error.message
-                : error instanceof Error
-                    ? error.message
-                    : String(error);
-            logger.debug('[hapiMCP] inspect_peer failed:', message);
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Failed to inspect peer: ${message}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-    });
-
-    mcp.registerTool<any, any>('list_peers', {
-        description: 'List peer HAPI sessions on the same hub/namespace (id prefix, active, flavor, name). Uses this session\'s hub credentials - works from runner-spawned agents without being on the hub host. Then call inspect_peer with a listed id.',
-        title: 'List Peer Sessions',
-        inputSchema: listPeersInputSchema,
-    }, async (args: { limit?: number }) => {
-        logger.debug('[hapiMCP] list_peers');
-        try {
-            const limit = args.limit ?? 30;
-            const sessions = await listPeerSessions({
-                limit: peerListFetchLimit(limit, { excludeCaller: true }),
-            });
-            const peers = sessions.filter((session) => session.id !== client.sessionId);
-            const hasMore = peers.length > limit;
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: formatPeerSessionsList(peers, {
-                            maxRows: limit,
-                            hasMore,
-                        }),
-                    },
-                ],
-                isError: false,
-            };
-        } catch (error) {
-            const message = error instanceof PingPeerError
-                ? error.message
-                : error instanceof Error
-                    ? error.message
-                    : String(error);
-            logger.debug('[hapiMCP] list_peers failed:', message);
-            return {
-                content: [
-                    {
-                        type: 'text' as const,
-                        text: `Failed to list peers: ${message}`,
-                    },
-                ],
-                isError: true,
-            };
-        }
-    });
-
-
-    const claimDebateInputSchema: z.ZodTypeAny = z.object({
-        directory: z.string().describe('Absolute path to the .hapi-debates/<run-id> directory for the debate'),
-    });
-
-    mcp.registerTool<any, any>('claim_debate', {
-        description: 'Record that the current HAPI session owns/manages the hapi-debate running in the given debate run directory. Call this immediately after starting hapi-debate.',
-        title: 'Claim Debate Session',
-        inputSchema: claimDebateInputSchema,
-    }, async (args: { directory: string }) => {
-        try {
-            mkdirSync(args.directory, { recursive: true })
-            writeFileSync(join(args.directory, 'hapi-session-id'), client.sessionId)
-            logger.debug(`[hapiMCP] claimed debate for session ${client.sessionId} in ${args.directory}`)
-            return {
-                content: [{ type: 'text' as const, text: `Debate claimed for session ${client.sessionId}` }],
-                isError: false,
-            }
-        } catch (error) {
-            return {
-                content: [{ type: 'text' as const, text: `Failed to claim debate: ${String(error)}` }],
-                isError: true,
-            }
         }
     });
 
@@ -540,10 +383,9 @@ export async function startHappyServer(client: ApiSessionClient, options: StartH
         hapiMcpUrl: mcpUrl,
     }));
 
-    // claim_loop / claim_debate are fork-local HAPI bookkeeping tools.
     const toolNames = enableChangeTitle
-        ? ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'inspect_peer', 'claim_loop', 'claim_debate']
-        : ['display_image', 'display_video', 'display_media', 'list_peers', 'inspect_peer', 'claim_loop', 'claim_debate'];
+        ? ['change_title', 'display_image', 'display_video', 'display_media']
+        : ['display_image', 'display_video', 'display_media'];
     if (options.skillLookup) {
         toolNames.push('skill_lookup');
     }

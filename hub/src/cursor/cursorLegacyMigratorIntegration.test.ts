@@ -129,9 +129,7 @@ describeIntegration('CursorLegacyMigrator INTEGRATION (real agent acp)', () => {
             collaborationMode: null,
             agentState: null,
             todos: null,
-            todosUpdatedAt: null,
-            teamState: null,
-            teamStateUpdatedAt: null
+            todosUpdatedAt: null
         } as unknown as Session
 
         const out = await migrator.migrateOne(session, {})
@@ -203,9 +201,7 @@ describeIntegration('CursorLegacyMigrator INTEGRATION (real agent acp)', () => {
             collaborationMode: null,
             agentState: null,
             todos: null,
-            todosUpdatedAt: null,
-            teamState: null,
-            teamStateUpdatedAt: null
+            todosUpdatedAt: null
         } as unknown as Session
 
         const out = await migrator.migrateOne(session, { skipVerify: true })
@@ -265,9 +261,7 @@ describeIntegration('CursorLegacyMigrator INTEGRATION (real agent acp)', () => {
             collaborationMode: null,
             agentState: null,
             todos: null,
-            todosUpdatedAt: null,
-            teamState: null,
-            teamStateUpdatedAt: null
+            todosUpdatedAt: null
         } as unknown as Session
         const out = await migrator.migrateOne(session, {})
         expect(out.ok).toBe(false)

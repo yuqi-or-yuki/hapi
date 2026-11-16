@@ -6,7 +6,7 @@ import type { ApiClient } from '@/api/client'
 const fetchVoiceBackendMock = vi.fn()
 
 vi.mock('@/api/voice', () => ({
-    fetchVoiceBackend: (api: ApiClient) => fetchVoiceBackendMock(api),
+    fetchVoiceBackendCached: (api: ApiClient) => fetchVoiceBackendMock(api),
 }))
 
 vi.mock('@/realtime/RealtimeVoiceSession', () => ({

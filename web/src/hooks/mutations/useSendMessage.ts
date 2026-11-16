@@ -1,6 +1,6 @@
 import { useMutation } from '@tanstack/react-query'
 import { useRef, useState } from 'react'
-import type { ApiClient } from '@/api/client'
+import { SendTimeoutError, type ApiClient } from '@/api/client'
 import type { AttachmentMetadata, DecryptedMessage } from '@/types/api'
 import { makeClientSideId } from '@/lib/messages'
 import {
@@ -249,7 +249,10 @@ export function useSendMessage(
             // with no retry surface for it.  Keep the row as `failed` so
             // the in-thread retry button can re-fire the send (with
             // attachments) via retryMessage.
-            if (input.attachments && input.attachments.length > 0) {
+            // A timed-out send may still have reached the hub. Restoring the
+            // text would let a resend go out under a new localId and deliver
+            // the prompt twice; the failed bubble retries with the same one.
+            if ((input.attachments && input.attachments.length > 0) || error instanceof SendTimeoutError) {
                 updateMessageStatus(input.sessionId, input.localId, 'failed')
                 haptic.notification('error')
                 return

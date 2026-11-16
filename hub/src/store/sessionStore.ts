@@ -6,6 +6,7 @@ import {
     getOrCreateSession,
     getSession,
     getSessionByNamespace,
+    getSessionNamespace,
     getSessions,
     getSessionsByNamespace,
     setSessionEffort,
@@ -16,7 +17,6 @@ import {
     setSessionPinned,
     setSessionPinMode,
     type SessionPinMode,
-    setSessionTeamState,
     setSessionTodos,
     replaceSessionTodos,
     touchSessionUpdatedAt,
@@ -75,10 +75,6 @@ export class SessionStore {
         return replaceSessionTodos(this.db, id, todos, namespace)
     }
 
-    setSessionTeamState(id: string, teamState: unknown, updatedAt: number, namespace: string): boolean {
-        return setSessionTeamState(this.db, id, teamState, updatedAt, namespace)
-    }
-
     setSessionModel(id: string, model: string | null, namespace: string, options?: { touchUpdatedAt?: boolean }): boolean {
         return setSessionModel(this.db, id, model, namespace, options)
     }
@@ -118,6 +114,10 @@ export class SessionStore {
 
     getSession(id: string): StoredSession | null {
         return getSession(this.db, id)
+    }
+
+    getSessionNamespace(id: string): string | null {
+        return getSessionNamespace(this.db, id)
     }
 
     getSessionByNamespace(id: string, namespace: string): StoredSession | null {

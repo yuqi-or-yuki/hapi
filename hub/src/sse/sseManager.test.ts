@@ -356,7 +356,7 @@ describe('SSEManager reconnect replay', () => {
         expect(order).toEqual(['s3', 's-mid'])
     })
 
-    it('evicts by byte budget while keeping at least one event', () => {
+    it('evicts by byte budget', () => {
         const manager = new SSEManager(0, new VisibilityTracker())
         const { sent } = subscribeCollecting(manager, 'a')
         const bigMetadata = 'x'.repeat(1_500_000)
@@ -376,5 +376,63 @@ describe('SSEManager reconnect replay', () => {
         expect(fresh.resume).toBe('ok')
         expect(fresh.replay).toHaveLength(1)
         expect(fresh.replay[0]?.event).toMatchObject({ sessionId: 'big-3' })
+    })
+})
+
+
+describe('SSE replay backpressure', () => {
+    it('closes a replaying client before its live backlog grows without bound', async () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        let cursor: string | undefined
+        manager.subscribe({
+            id: 'first', namespace: 'alpha', all: true,
+            send: (_event, id) => { cursor = id }, sendHeartbeat: () => {}
+        })
+        manager.broadcast({ type: 'session-updated', sessionId: 'seen', namespace: 'alpha' })
+        manager.unsubscribe('first')
+        manager.broadcast({ type: 'session-updated', sessionId: 'missed', namespace: 'alpha' })
+        let closed = 0
+        const reconnect = manager.subscribe({
+            id: 'blocked', namespace: 'alpha', all: true, resumeFrom: cursor,
+            send: () => { throw new Error('must not send before replay completes') },
+            sendHeartbeat: () => {}, close: () => { closed += 1 }
+        })
+        expect(reconnect.replay).toHaveLength(1)
+        for (let i = 0; i < 100; i++) {
+            manager.broadcast({
+                type: 'message-received', namespace: 'alpha', sessionId: 's1',
+                message: { id: String(i), localId: null, seq: i, createdAt: 1, content: 'x'.repeat(64 * 1024) }
+            })
+        }
+        expect(manager.hasSubscription('blocked')).toBe(false)
+        expect(closed).toBe(1)
+        await manager.drainPending('blocked')
+        manager.stop()
+    })
+
+    it('does not retain an oversized event and forces REST resync if it was missed', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const ids: string[] = []
+        manager.subscribe({
+            id: 'first', namespace: 'alpha', all: true,
+            send: (_event, id) => { if (id) ids.push(id) }, sendHeartbeat: () => {}
+        })
+        manager.broadcast({ type: 'session-updated', sessionId: 'seen', namespace: 'alpha' })
+        manager.broadcast({
+            type: 'message-received', namespace: 'alpha', sessionId: 's1',
+            message: { id: 'big', localId: null, seq: 1, createdAt: 1, content: '界'.repeat(800_000) }
+        })
+        const missed = manager.subscribe({
+            id: 'missed', namespace: 'alpha', all: true, resumeFrom: ids[0],
+            send: () => {}, sendHeartbeat: () => {}
+        })
+        expect(missed.resume).toBe('gap')
+        expect(missed.replay).toHaveLength(0)
+        const seen = manager.subscribe({
+            id: 'seen', namespace: 'alpha', all: true, resumeFrom: ids[1],
+            send: () => {}, sendHeartbeat: () => {}
+        })
+        expect(seen.resume).toBe('ok')
+        manager.stop()
     })
 })

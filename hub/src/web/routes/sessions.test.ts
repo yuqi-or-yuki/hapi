@@ -1,7 +1,4 @@
 import { describe, expect, it } from 'bun:test'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'fs'
-import { tmpdir } from 'os'
-import { join } from 'path'
 import { Hono } from 'hono'
 import type { Session, SyncEngine } from '../../sync/syncEngine'
 import type { Store } from '../../store'
@@ -193,57 +190,6 @@ function createApp(session: Session, opts?: {
 }
 
 describe('sessions routes', () => {
-
-    it('marks the claiming session debateActive while a debate run is alive', async () => {
-        const projectDir = mkdtempSync(join(tmpdir(), 'hapi-debate-badge-'))
-        try {
-            const debateDir = join(projectDir, '.hapi-debates', 'run-1')
-            mkdirSync(debateDir, { recursive: true })
-            writeFileSync(join(debateDir, 'hapi-session-id'), 'session-1')
-            writeFileSync(join(debateDir, 'state.json'), JSON.stringify({
-                status: 'running',
-                orchestratorPid: process.pid
-            }))
-            const session = createSession({ metadata: { path: projectDir, host: 'localhost', flavor: 'codex' } })
-            const { app } = createApp(session)
-
-            const response = await app.request('/api/sessions')
-
-            expect(response.status).toBe(200)
-            const body = await response.json() as { sessions: Array<{ id: string; debateActive: boolean; loopActive: boolean }> }
-            expect(body.sessions).toEqual([
-                expect.objectContaining({ id: 'session-1', debateActive: true, loopActive: false })
-            ])
-        } finally {
-            rmSync(projectDir, { recursive: true, force: true })
-        }
-    })
-
-    it('clears debateActive for completed debate runs', async () => {
-        const projectDir = mkdtempSync(join(tmpdir(), 'hapi-debate-badge-'))
-        try {
-            const debateDir = join(projectDir, '.hapi-debates', 'run-1')
-            mkdirSync(debateDir, { recursive: true })
-            writeFileSync(join(debateDir, 'hapi-session-id'), 'session-1')
-            writeFileSync(join(debateDir, 'state.json'), JSON.stringify({
-                status: 'complete',
-                orchestratorPid: process.pid
-            }))
-            const session = createSession({ metadata: { path: projectDir, host: 'localhost', flavor: 'codex' } })
-            const { app } = createApp(session)
-
-            const response = await app.request('/api/sessions')
-
-            expect(response.status).toBe(200)
-            const body = await response.json() as { sessions: Array<{ id: string; debateActive: boolean }> }
-            expect(body.sessions).toEqual([
-                expect.objectContaining({ id: 'session-1', debateActive: false })
-            ])
-        } finally {
-            rmSync(projectDir, { recursive: true, force: true })
-        }
-    })
-
     it('surfaces the due time when a session has a pending enabled scheduled message', async () => {
         const session = createSession()
         const { app } = createApp(session, {

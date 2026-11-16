@@ -51,7 +51,6 @@ export function useSkills(
         // that is almost always identical. getSuggestions() refetches when
         // the user actually types "$", which is the moment freshness matters.
         staleTime: 5 * 60_000,
-        refetchOnWindowFocus: true,
         gcTime: 30 * 60 * 1000,
         retry: false,
     })

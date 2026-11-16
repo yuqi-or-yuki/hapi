@@ -17,8 +17,6 @@ export type StoredSession = {
     serviceTier: string | null
     todos: unknown | null
     todosUpdatedAt: number | null
-    teamState: unknown | null
-    teamStateUpdatedAt: number | null
     active: boolean
     activeAt: number | null
     seq: number

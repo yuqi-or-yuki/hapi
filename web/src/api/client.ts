@@ -31,8 +31,7 @@ import type {
     SessionTitleSuggestionResponse,
     SessionsResponse,
     ScheduledMessageResponse,
-    ScheduledMessagesResponse,
-    SkillUsageResponse
+    ScheduledMessagesResponse
 } from '@/types/api'
 import type {
     AgyModelsResponse,
@@ -59,7 +58,6 @@ import type {
     SqliteStorageUsageResponse,
     HubSettingsResponse,
     UpdateHubSettingsRequest,
-    UsageSummaryResponse,
     UploadFileResponse
 } from '@hapi/protocol/apiTypes'
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
@@ -148,6 +146,18 @@ export class ApiError extends Error {
         this.status = status
         this.code = code
         this.body = body
+    }
+}
+
+const SEND_TIMEOUT_MS = 30_000
+
+/** The send POST got no answer in time. The hub may still have stored the
+ *  message, so callers must retry with the SAME localId (idempotent) rather
+ *  than start a fresh send. */
+export class SendTimeoutError extends Error {
+    constructor() {
+        super('Sending timed out')
+        this.name = 'SendTimeoutError'
     }
 }
 
@@ -538,16 +548,26 @@ export class ApiClient {
         scheduledAt?: number | null,
         deliveryMode?: MessageDeliveryMode,
     ): Promise<void> {
-        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
-            method: 'POST',
-            body: JSON.stringify({
-                text,
-                localId: localId ?? undefined,
-                attachments: attachments ?? undefined,
-                scheduledAt: scheduledAt ?? undefined,
-                deliveryMode: deliveryMode ?? undefined,
+        // A stalled POST otherwise keeps the composer locked forever and
+        // silently swallows the next send. AbortController rather than
+        // AbortSignal.timeout: older Safari/Chrome lack the latter.
+        const controller = new AbortController()
+        const timer = setTimeout(() => controller.abort(new SendTimeoutError()), SEND_TIMEOUT_MS)
+        try {
+            await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+                method: 'POST',
+                signal: controller.signal,
+                body: JSON.stringify({
+                    text,
+                    localId: localId ?? undefined,
+                    attachments: attachments ?? undefined,
+                    scheduledAt: scheduledAt ?? undefined,
+                    deliveryMode: deliveryMode ?? undefined,
+                })
             })
-        })
+        } finally {
+            clearTimeout(timer)
+        }
     }
 
     async getQueuedState(sessionId: string, localIds: string[]): Promise<QueuedStateResponse> {
@@ -778,17 +798,6 @@ export class ApiClient {
             method: 'PUT',
             body: JSON.stringify(settings)
         })
-    }
-
-    async getUsageSummary(
-        range: '7d' | '30d' | 'all' = '7d',
-        timeZone: string = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
-    ): Promise<UsageSummaryResponse> {
-        const params = new URLSearchParams({
-            range,
-            timeZone
-        })
-        return await this.request<UsageSummaryResponse>(`/api/usage/summary?${params.toString()}`)
     }
 
     async restartMachineRunner(machineId: string): Promise<{ message: string }> {
@@ -1064,10 +1073,6 @@ export class ApiClient {
         return await this.request<ScheduledMessageResponse>(`/api/scheduled-messages/${encodeURIComponent(id)}`, {
             method: 'DELETE'
         })
-    }
-
-    async getSkillUsage(): Promise<SkillUsageResponse> {
-        return await this.request<SkillUsageResponse>('/api/skills/usage')
     }
 
     async getPreference<T>(key: string): Promise<T | null> {

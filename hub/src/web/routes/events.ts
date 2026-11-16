@@ -3,6 +3,7 @@ import { streamSSE } from 'hono/streaming'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { SSEManager } from '../../sse/sseManager'
+import { SSEWriter } from '../../sse/sseWriter'
 import type { SyncEngine } from '../../sync/syncEngine'
 import type { VisibilityState } from '../../visibility/visibilityTracker'
 import type { VisibilityTracker } from '../../visibility/visibilityTracker'
@@ -85,6 +86,18 @@ export function createEventsRoutes(
         }
 
         const response = streamSSE(c, async (stream) => {
+            // Register cleanup before the first write: an unread handshake
+            // can time out before we ever reach the usual wait-for-abort path.
+            let finish: () => void = () => {}
+            const done = new Promise<void>((resolve) => { finish = resolve })
+            const writer = new SSEWriter(
+                (data, id) => stream.writeSSE({ data, id }),
+                () => { stream.abort(); finish() }
+            )
+            const onAbort = () => { writer.close(); finish() }
+            c.req.raw.signal.addEventListener('abort', onAbort, { once: true })
+            stream.onAbort(onAbort)
+            if (c.req.raw.signal.aborted || stream.aborted) onAbort()
             // Reconnects supply the last SSE id they saw; when the manager
             // still has everything after it, the missed events are replayed
             // here and the client skips its REST resync (`resume: 'ok'`).
@@ -96,17 +109,16 @@ export function createEventsRoutes(
                 machineId,
                 visibility,
                 resumeFrom,
-                send: (event, eventId, serialized) => stream.writeSSE({ data: serialized ?? JSON.stringify(event), id: eventId }),
+                send: (event, eventId, serialized) => writer.write(serialized ?? JSON.stringify(event), eventId),
+                close: () => writer.close(),
                 sendHeartbeat: async () => {
-                    await stream.writeSSE({
-                        data: JSON.stringify({
-                            type: 'heartbeat',
-                            namespace,
-                            data: {
-                                timestamp: Date.now()
-                            }
-                        })
-                    })
+                    await writer.write(JSON.stringify({
+                        type: 'heartbeat',
+                        namespace,
+                        data: {
+                            timestamp: Date.now()
+                        }
+                    }))
                 }
             })
 
@@ -114,29 +126,28 @@ export function createEventsRoutes(
                 // Verdict first, replay second, live traffic third: the client
                 // decides whether to resync from the verdict, so it must never
                 // see replayed or live events before it.
-                await stream.writeSSE({
-                    data: JSON.stringify({
-                        type: 'connection-changed',
-                        data: {
-                            status: 'connected',
-                            subscriptionId,
-                            resume
-                        }
-                    })
-                })
+                await writer.write(JSON.stringify({
+                    type: 'connection-changed',
+                    data: {
+                        status: 'connected',
+                        subscriptionId,
+                        resume
+                    }
+                }))
 
                 for (const item of replay) {
-                    await stream.writeSSE({ data: JSON.stringify(item.event), id: item.eventId })
+                    await writer.write(JSON.stringify(item.event), item.eventId)
                 }
                 await manager.drainPending(subscriptionId)
 
-                await new Promise<void>((resolve) => {
-                    const done = () => resolve()
-                    c.req.raw.signal.addEventListener('abort', done, { once: true })
-                    stream.onAbort(done)
-                })
+                await done
+            } catch {
+                // Slow/disconnected clients recover through SSE replay or REST.
+                writer.close()
             } finally {
+                c.req.raw.signal.removeEventListener('abort', onAbort)
                 manager.unsubscribe(subscriptionId)
+                writer.close()
             }
         })
 

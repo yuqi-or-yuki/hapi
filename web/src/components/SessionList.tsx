@@ -1034,16 +1034,6 @@ function SessionItem(props: {
                                     tooltipId={attentionId!}
                                 />
                             ) : null}
-                            {s.loopActive ? (
-                                <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-[var(--app-badge-warning-bg)] text-[var(--app-badge-warning-text)]">
-                                    ⟳ loop
-                                </span>
-                            ) : null}
-                            {s.debateActive ? (
-                                <span className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none bg-purple-500/10 text-purple-500">
-                                    ⚖ debate
-                                </span>
-                            ) : null}
                             {s.metadata?.zeroshotStage ? (
                                 <span className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-[10px] font-medium leading-none ${ZEROSHOT_STAGE_BADGES[s.metadata.zeroshotStage]?.colors ?? 'bg-[var(--app-secondary-bg)] text-[var(--app-hint)]'}`}>
                                     {ZEROSHOT_STAGE_BADGES[s.metadata.zeroshotStage]?.label ?? s.metadata.zeroshotStage}

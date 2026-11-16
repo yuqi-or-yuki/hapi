@@ -1,6 +1,5 @@
 /**
- * Session citation helpers shared by web Copy-reference, MCP tool descriptions,
- * and flavor system prompts (tiann/hapi#1370).
+ * Session citation helpers for web Copy-reference and composer chips.
  *
  * Two paste forms agents must recognize:
  * 1. Copy reference prose: `See session "…" (/sessions/<id>) for context`
@@ -11,23 +10,7 @@
 
 /** Appended to Copy-reference clipboard text so cold pastes steer agents. */
 export const SESSION_REFERENCE_STEER_SUFFIX =
-    ' HAPI hub peer - call inspect_peer with that session id; do not Grep/Glob/Read /sessions/ as a local file.'
-
-/**
- * MCP `inspect_peer` tool description. Written for the model (firing predicate +
- * negative constraint), not for humans.
- */
-export const INSPECT_PEER_TOOL_DESCRIPTION =
-    'Read another HAPI session (metadata + recent message text) on the same hub/namespace. ' +
-    'Fires when the user cites a peer via markdown [title](/sessions/<id>), Copy-reference prose ' +
-    'See session "…" (/sessions/<id>) for context, or a bare /sessions/<id>. ' +
-    'Extract <id> and pass it as sessionIdPrefix. /sessions/<id> is a hub path - do NOT Grep, Glob, or Read it as a local filesystem path. ' +
-    'Read-only: does not resume. Prefer this (or `hapi inspect-peer`) over JWT+curl.'
-
-/** Zod `.describe` for sessionIdPrefix on inspect_peer. */
-export const SESSION_ID_PREFIX_PARAM_DESCRIPTION =
-    'Target HAPI session id or unique id prefix (another session - not this chat). ' +
-    'Prefer the full UUID from [title](/sessions/<id>) or Copy-reference See session "…" (/sessions/<id>) for context.'
+    ' (That is a HAPI hub session path, not a local file.)'
 
 /**
  * Hub session ids have no dots. Reject dotted tails so source paths like
@@ -115,30 +98,4 @@ export function normalizeSessionIdPrefix(raw: string): string {
     }
     const ids = extractSessionCitationIds(trimmed)
     return ids.length === 1 ? ids[0]! : ''
-}
-
-export type SessionCitationSteerTools = {
-    /** Flavor-specific inspect tool name, e.g. `mcp__hapi__inspect_peer`. */
-    inspectTool: string
-    /** Flavor-specific discovery tool when no citation is available. */
-    listPeersTool?: string
-}
-
-/**
- * Always-on system-prompt line: both citation forms + hub-not-FS + tool names.
- */
-export function buildSessionCitationSteerInstruction(tools: SessionCitationSteerTools): string {
-    let text =
-        `When the user cites another HAPI session as [title](/sessions/<id>), ` +
-        `Copy-reference prose See session "…" (/sessions/<id>) for context, ` +
-        `or a bare /sessions/<id>, extract that <id>. ` +
-        `/sessions/<id> is a HAPI hub path, not a local filesystem path - do not Grep, Glob, or Read it as a file. ` +
-        `Call "${tools.inspectTool}" with sessionIdPrefix=<id> to read metadata and recent messages. ` +
-        `Prefer this over JWT+curl. Shell fallback: hapi inspect-peer <id>.`
-    if (tools.listPeersTool) {
-        text +=
-            ` To discover peers without a citation, call "${tools.listPeersTool}" ` +
-            `(same hub/namespace; works from runner-spawned sessions).`
-    }
-    return text
 }

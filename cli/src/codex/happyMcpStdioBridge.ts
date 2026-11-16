@@ -1,7 +1,7 @@
 /**
  * HAPI MCP STDIO Bridge
  *
- * Minimal STDIO MCP server exposing HAPI tools such as `change_title`, `display_image`, `display_video`, `display_media`, `list_peers`, and `inspect_peer`.
+ * Minimal STDIO MCP server exposing HAPI tools such as `change_title`, `display_image`, `display_video`, and `display_media`.
  * On invocation it forwards the tool call to an existing HAPI HTTP MCP server
  * using the StreamableHTTPClientTransport.
  *
@@ -17,12 +17,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { z } from 'zod';
 import { DISPLAY_IMAGE_PROMPT_CURSOR, DISPLAY_MEDIA_PROMPT_CURSOR, DISPLAY_VIDEO_PROMPT_CURSOR } from '@/modules/common/displayImagePrompt';
-import {
-  INSPECT_PEER_TOOL_DESCRIPTION,
-  SESSION_ID_PREFIX_PARAM_DESCRIPTION,
-} from '@hapi/protocol/sessionCitation';
 
-const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media', 'list_peers', 'inspect_peer'];
+const DEFAULT_TOOL_NAMES = ['change_title', 'display_image', 'display_video', 'display_media'];
 
 function parseArgs(argv: string[]): { url: string | null; toolNames: Set<string> } {
   let url: string | null = null;
@@ -188,69 +184,6 @@ export async function runHappyMcpStdioBridge(argv: string[]): Promise<void> {
           } catch (error) {
             return {
               content: [{ type: 'text' as const, text: `Failed to display media: ${error instanceof Error ? error.message : String(error)}` }],
-              isError: true,
-            };
-          }
-        }
-      );
-    }
-
-    const inspectPeerInputSchema: z.ZodTypeAny = z.object({
-      sessionIdPrefix: z.string().trim().min(1).describe(SESSION_ID_PREFIX_PARAM_DESCRIPTION),
-      messageLimit: z.number().int().min(1).max(100).optional().describe(
-        'Recent message page size (default 30, max 100). Text snippets only.'
-      ),
-    });
-
-    if (toolNames.has('inspect_peer')) {
-      server.registerTool<any, any>(
-        'inspect_peer',
-        {
-          description: INSPECT_PEER_TOOL_DESCRIPTION,
-          title: 'Inspect Peer Session',
-          inputSchema: inspectPeerInputSchema,
-        },
-        async (args: Record<string, unknown>) => {
-          try {
-            const client = await ensureHttpClient();
-            const response = await client.callTool({ name: 'inspect_peer', arguments: args });
-            return response as any;
-          } catch (error) {
-            return {
-              content: [
-                { type: 'text' as const, text: `Failed to inspect peer: ${error instanceof Error ? error.message : String(error)}` },
-              ],
-              isError: true,
-            };
-          }
-        }
-      );
-    }
-
-    const listPeersInputSchema: z.ZodTypeAny = z.object({
-      limit: z.number().int().min(1).max(100).optional().describe(
-        'Max sessions to return (default 30, max 100). Newest updatedAt first.'
-      ),
-    });
-
-    if (toolNames.has('list_peers')) {
-      server.registerTool<any, any>(
-        'list_peers',
-        {
-          description: 'List peer HAPI sessions on the same hub/namespace (id prefix, active, flavor, name). Uses this session\'s hub credentials - works from runner-spawned agents without being on the hub host. Then call inspect_peer with a listed id.',
-          title: 'List Peer Sessions',
-          inputSchema: listPeersInputSchema,
-        },
-        async (args: Record<string, unknown>) => {
-          try {
-            const client = await ensureHttpClient();
-            const response = await client.callTool({ name: 'list_peers', arguments: args });
-            return response as any;
-          } catch (error) {
-            return {
-              content: [
-                { type: 'text' as const, text: `Failed to list peers: ${error instanceof Error ? error.message : String(error)}` },
-              ],
               isError: true,
             };
           }

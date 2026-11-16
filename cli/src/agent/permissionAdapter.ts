@@ -8,6 +8,7 @@ import {
     resolveToolAutoApprovalDecision,
     type AutoApprovalDecision
 } from '@/modules/common/permission/BasePermissionHandler';
+import { capCompletedRequests } from '@/modules/common/permission/completedRequests';
 
 interface PermissionResponseMessage {
     id: string;
@@ -118,7 +119,7 @@ export class PermissionAdapter {
 
         this.session.updateAgentState((currentState) => ({
             ...currentState,
-            completedRequests: {
+            completedRequests: capCompletedRequests({
                 ...currentState.completedRequests,
                 [request.id]: {
                     tool: toolName,
@@ -128,7 +129,7 @@ export class PermissionAdapter {
                     status,
                     decision: outcome.outcome === 'selected' ? decision : 'abort'
                 }
-            }
+            })
         } satisfies AgentState));
 
         logger.debug(
@@ -172,7 +173,7 @@ export class PermissionAdapter {
             return {
                 ...currentState,
                 requests: remaining,
-                completedRequests: {
+                completedRequests: capCompletedRequests({
                     ...currentState.completedRequests,
                     [response.id]: {
                         tool: toolName,
@@ -182,7 +183,7 @@ export class PermissionAdapter {
                         status,
                         decision
                     }
-                }
+                })
             } satisfies AgentState;
         });
 
@@ -236,7 +237,7 @@ export class PermissionAdapter {
             return {
                 ...currentState,
                 requests: {},
-                completedRequests
+                completedRequests: capCompletedRequests(completedRequests)
             };
         });
     }

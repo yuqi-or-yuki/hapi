@@ -29,7 +29,7 @@ export function useCodexModels(args: {
             throw new Error('Codex models target unavailable')
         },
         enabled: Boolean(enabled && machineId),
-        staleTime: 30_000,
+        staleTime: 5 * 60_000,
         retry: false,
     })
 
@@ -55,7 +55,7 @@ export function useCodexModels(args: {
             throw new Error('Codex models fallback target unavailable')
         },
         enabled: useSessionFallback,
-        staleTime: 30_000,
+        staleTime: 5 * 60_000,
         retry: false,
     })
     const query = useSessionFallback ? sessionQuery : machineQuery

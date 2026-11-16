@@ -22,19 +22,16 @@ import { createMessagesRoutes } from './routes/messages'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
 import { createStorageRoutes } from './routes/storage'
-import { createUsageRoutes } from './routes/usage'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createPreferencesRoutes } from './routes/preferences'
 import { createScheduledMessagesRoutes } from './routes/scheduledMessages'
-import { createSkillUsageRoutes } from './routes/skillUsage'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
 import { createPiSessionRoutes } from './routes/piSessions'
 import { createPushRoutes } from './routes/push'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
 import { createHubSettingsRoutes } from './routes/hubSettings'
-import { createWorkGraphRoutes } from './routes/workGraph'
 import type { SSEManager } from '../sse/sseManager'
 import type { VisibilityTracker } from '../visibility/visibilityTracker'
 import type { Server as BunServer, ServerWebSocket } from 'bun'
@@ -256,7 +253,6 @@ function createWebApp(options: {
         status: 'ok',
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {
-            workGraph: true,
             titleSuggestion: readTitleProviderConfig() !== null
         }
     }))
@@ -292,12 +288,10 @@ function createWebApp(options: {
     app.route('/api', createSessionsRoutes(options.getSyncEngine, options.store))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createScheduledMessagesRoutes(options.store, options.getSyncEngine))
-    app.route('/api', createSkillUsageRoutes(options.store))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
     app.route('/api', createStorageRoutes(configuration.dbPath))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
-    app.route('/api', createUsageRoutes(options.store))
     app.route('/api', createGitRoutes(options.getSyncEngine))
     app.route('/api', createPreferencesRoutes(options.store, options.getSseManager))
     // 中文注释：这里提供两类 Codex 辅助能力：扫描本地 transcript 以导入到 Hapi，以及按需重启 Codex Desktop 客户端。
@@ -313,7 +307,6 @@ function createWebApp(options: {
     app.route('/api', createDevicesRoutes(options.store))
     app.route('/api', createVoiceRoutes({ dataDir: configuration.dataDir }))
     // Path is intentionally NOT `/api/events` — that route is the SSE stream.
-    app.route('/api', createWorkGraphRoutes(options.store))
 
     // Skip static serving in relay mode, show helpful message on root
     if (options.relayMode) {

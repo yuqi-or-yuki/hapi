@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
-import { AgentStateSchema, MetadataSchema, SessionPatchSchema, TeamStateSchema } from '@hapi/protocol/schemas'
+import { AgentStateSchema, MetadataSchema, SessionPatchSchema } from '@hapi/protocol/schemas'
 import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
-import type { Store } from '../store'
+import type { Store, StoredSession } from '../store'
 import { clampAliveTime } from './aliveTime'
 import { EventPublisher } from './eventPublisher'
 import { extractTodoWriteTodosFromMessageContent, TodosSchema } from './todos'
@@ -155,6 +155,13 @@ export class SessionCache {
             }
         }
 
+        const session = this.buildSession(stored, existing)
+        this.sessions.set(sessionId, session)
+        this.publisher.emit({ type: existing ? 'session-updated' : 'session-added', sessionId, data: session })
+        return session
+    }
+
+    private buildSession(stored: StoredSession, existing: Session | undefined): Session {
         const metadata = (() => {
             const parsed = MetadataSchema.safeParse(stored.metadata)
             return parsed.success ? parsed.data : null
@@ -171,13 +178,7 @@ export class SessionCache {
             return parsed.success ? parsed.data : undefined
         })()
 
-        const teamState = (() => {
-            if (stored.teamState === null || stored.teamState === undefined) return undefined
-            const parsed = TeamStateSchema.safeParse(stored.teamState)
-            return parsed.success ? parsed.data : undefined
-        })()
-
-        const session: Session = {
+        return {
             id: stored.id,
             namespace: stored.namespace,
             seq: stored.seq,
@@ -202,9 +203,7 @@ export class SessionCache {
             activeTurnStartedAt: existing?.activeTurnStartedAt ?? null,
             backgroundTaskCount: existing?.backgroundTaskCount ?? 0,
             todos,
-            teamState,
             todosUpdatedAt: stored.todosUpdatedAt ?? 0,
-            teamStateUpdatedAt: stored.teamStateUpdatedAt ?? 0,
             model: stored.model,
             modelReasoningEffort: stored.modelReasoningEffort,
             effort: stored.effort,
@@ -213,16 +212,17 @@ export class SessionCache {
             collaborationMode: existing?.collaborationMode,
             copilotAgentMode: existing?.copilotAgentMode ?? metadata?.preferredCopilotAgentMode
         }
-
-        this.sessions.set(sessionId, session)
-        this.publisher.emit({ type: existing ? 'session-updated' : 'session-added', sessionId, data: session })
-        return session
     }
 
+    /**
+     * Boot-time load. Builds the cache straight from the rows of one query
+     * (no per-session re-read) and publishes nothing: no client is connected
+     * yet, so per-session `session-added` events would only fill the SSE
+     * replay buffer.
+     */
     reloadAll(): void {
-        const sessions = this.store.sessions.getSessions()
-        for (const session of sessions) {
-            this.refreshSession(session.id, { backfillTodos: false })
+        for (const stored of this.store.sessions.getSessions()) {
+            this.sessions.set(stored.id, this.buildSession(stored, this.sessions.get(stored.id)))
         }
     }
 
@@ -325,11 +325,6 @@ export class SessionCache {
         if (patch.todos !== undefined) {
             session.todos = patch.todos.value
             session.todosUpdatedAt = patch.todos.version
-        }
-        // Versioned teamState: key present + value null = TeamDelete clear.
-        if (patch.teamState !== undefined) {
-            session.teamState = patch.teamState.value ?? undefined
-            session.teamStateUpdatedAt = patch.teamState.version
         }
         if (patch.metadata !== undefined) {
             session.metadata = patch.metadata.value
@@ -1203,13 +1198,7 @@ export class SessionCache {
         }
 
         const movedMessages = this.store.messages.mergeSessionMessages(oldSessionId, newSessionId)
-        // mergeSessions deletes the source. mergeSessionHistory keeps it alive
-        // with the original socket, so its notify chain must stay on that id.
-        if (options.deleteOldSession) {
-            this.store.workGraph.reassignNotifySession(namespace, oldSessionId, newSessionId)
-        }
         if (movedMessages.moved > 0) {
-            this.store.usage.transferSession(oldSessionId, newSessionId)
             if (!options.deleteOldSession) {
                 this.publisher.emit({ type: 'messages-invalidated', sessionId: oldSessionId, namespace })
             }
@@ -1384,14 +1373,6 @@ export class SessionCache {
             }
         }
 
-        if (oldStored.teamState !== null && oldStored.teamStateUpdatedAt !== null) {
-            this.store.sessions.setSessionTeamState(
-                newSessionId,
-                oldStored.teamState,
-                oldStored.teamStateUpdatedAt,
-                namespace
-            )
-        }
 
         if (options.deleteOldSession) {
             const deleted = this.store.sessions.deleteSession(oldSessionId, namespace)

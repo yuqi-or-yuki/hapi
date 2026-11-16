@@ -18,6 +18,9 @@ export function useMachines(api: ApiClient | null, enabled: boolean): {
             return await api.getMachines()
         },
         enabled: Boolean(api && enabled),
+        // SSE `machine-updated` patches this cache and reconnect invalidates it;
+        // the default 5s staleness made every one of the ~7 mounts refetch.
+        staleTime: 60_000,
     })
 
     return {

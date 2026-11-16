@@ -139,6 +139,44 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
         unmount()
     })
 
+    it('backs off when connections open and then drop before staying healthy', () => {
+        const { unmount } = renderUseSSE()
+
+        // Open-then-drop: each new connection opens, then errors right away.
+        const openThenDrop = () => {
+            const source = FakeEventSource.instances[FakeEventSource.instances.length - 1]
+            act(() => { source?.simulateOpen() })
+            act(() => { source?.onerror?.({}) })
+        }
+
+        openThenDrop()
+        // First recovery is immediate (jitter only).
+        act(() => { vi.advanceTimersByTime(600) })
+        expect(FakeEventSource.instances).toHaveLength(2)
+
+        openThenDrop()
+        act(() => { vi.advanceTimersByTime(600) })
+        // The open did not forgive the backoff: second retry waits >= 1s.
+        expect(FakeEventSource.instances).toHaveLength(2)
+        act(() => { vi.advanceTimersByTime(1_000) })
+        expect(FakeEventSource.instances).toHaveLength(3)
+
+        openThenDrop()
+        act(() => { vi.advanceTimersByTime(1_600) })
+        expect(FakeEventSource.instances).toHaveLength(3)
+        act(() => { vi.advanceTimersByTime(1_000) })
+        expect(FakeEventSource.instances).toHaveLength(4)
+
+        // A connection that stays up for the healthy window resets the backoff.
+        act(() => { FakeEventSource.instances[3]?.simulateOpen() })
+        act(() => { vi.advanceTimersByTime(30_000) })
+        act(() => { FakeEventSource.instances[3]?.onerror?.({}) })
+        act(() => { vi.advanceTimersByTime(600) })
+        expect(FakeEventSource.instances).toHaveLength(5)
+
+        unmount()
+    })
+
     it('abandons a hung reconnect attempt even after a prior reconnect request', () => {
         const onDisconnect = vi.fn()
         const { unmount } = renderUseSSE({ onDisconnect })
