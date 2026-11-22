@@ -3,6 +3,7 @@ import type { SessionSummary } from '@/types/api'
 import { formatFutureRelativeTime } from '@/lib/scheduledTime'
 import { useTranslation } from '@/lib/use-translation'
 import { SwarmRailIcon } from '@/components/AppRail'
+import { RunStrip } from './RunStrip'
 import { WorkerAvatar } from './WorkerAvatar'
 import { describeSchedule, workerName, workerSeed, workerState, type WorkerState } from './worker'
 
@@ -45,7 +46,7 @@ function useStateLine(session: SessionSummary, state: WorkerState): string {
 
 /**
  * A card says who the worker is, what it does, and whether it needs you.
- * Everything else (run history, machine, permissions, editing) is one click
+ * Everything else (machine, permissions, editing) is one click
  * away on the worker's page, so a healthy swarm reads as a quiet list.
  */
 function WorkerCard(props: { worker: Worker; onOpen: () => void; onApprove: () => void }) {
@@ -78,6 +79,12 @@ function WorkerCard(props: { worker: Worker; onOpen: () => void; onApprove: () =
                         <span className={`h-1.5 w-1.5 shrink-0 rounded-full bg-current ${state === 'working' ? 'animate-pulse' : ''}`} />
                         <span className="truncate">{line}</span>
                     </p>
+                    {/* Only once there is a record: an empty strip would say nothing. */}
+                    {session.workerRun?.recent.length ? (
+                        <p className="mt-1.5 text-xs text-[var(--app-hint)]">
+                            <RunStrip recent={session.workerRun.recent} />
+                        </p>
+                    ) : null}
                 </div>
             </div>
 

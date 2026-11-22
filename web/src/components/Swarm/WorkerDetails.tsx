@@ -3,19 +3,14 @@ import type { PermissionAutonomy } from '@hapi/protocol/modes'
 import { formatRelativeTime } from '@/lib/relativeTime'
 import { useTranslation } from '@/lib/use-translation'
 import { WorkerAvatar } from './WorkerAvatar'
-import { describeSchedule, runMark, trustLevel, workerName, workerSeed, type RunMark } from './worker'
+import { RunStrip } from './RunStrip'
+import { describeSchedule, trustLevel, workerName, workerSeed } from './worker'
 
 const TRUST_STYLES: Record<PermissionAutonomy | 'unknown', string> = {
     asks: 'border-[var(--app-border)] text-[var(--app-hint)]',
     guarded: 'border-amber-500/40 text-amber-600 dark:text-amber-400',
     free: 'border-red-500/40 text-red-600 dark:text-red-400',
     unknown: 'border-[var(--app-border)] text-[var(--app-hint)]'
-}
-
-const RUN_MARK_STYLES: Record<RunMark, string> = {
-    onTime: 'bg-emerald-500',
-    late: 'bg-amber-500',
-    missed: 'bg-red-500'
 }
 
 type Run = NonNullable<SessionSummary['workerRun']>
@@ -34,20 +29,7 @@ function RunHistory(props: { recent: Run['recent']; nextRunAt: number | null }) 
             : null
         return <span>{when ? t('swarm.schedule.firstRunAt', { time: when }) : t('swarm.schedule.neverRan')}</span>
     }
-    const marks = props.recent.map(runMark)
-    return (
-        <span className="inline-flex items-center gap-2">
-            <span className="inline-flex items-center gap-1" role="img" aria-label={t('swarm.runs.label')}>
-                {[...props.recent].reverse().map((event) => {
-                    const mark = runMark(event)
-                    const when = new Date(event.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-                    const detail = mark === 'late' ? t('swarm.runs.late', { n: Math.round(event.lateMs / 60_000) }) : t(`swarm.runs.${mark}`)
-                    return <span key={event.at} title={`${when} · ${detail}`} className={`h-3.5 w-1.5 rounded-full ${RUN_MARK_STYLES[mark]}`} />
-                })}
-            </span>
-            {t('swarm.runs.summary', { onTime: marks.filter((mark) => mark === 'onTime').length, total: marks.length })}
-        </span>
-    )
+    return <RunStrip recent={props.recent} />
 }
 
 /**
