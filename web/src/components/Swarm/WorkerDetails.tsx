@@ -21,9 +21,19 @@ const RUN_MARK_STYLES: Record<RunMark, string> = {
 type Run = NonNullable<SessionSummary['workerRun']>
 
 /** One mark per recent run, oldest to newest: the record of whether the schedule is being kept. */
-function RunHistory(props: { recent: Run['recent'] }) {
+function RunHistory(props: { recent: Run['recent']; nextRunAt: number | null }) {
     const { t } = useTranslation()
-    if (props.recent.length === 0) return <span>{t('swarm.schedule.neverRan')}</span>
+    // This line is the record of the *schedule*, so an empty one only means the
+    // clock has not struck yet. A worker almost always does its job once while
+    // being set up, and that run is not a scheduled delivery -- saying "has not
+    // run yet" next to a board full of its results reads as broken. Name the
+    // next run instead, which is the thing the operator actually wants.
+    if (props.recent.length === 0) {
+        const when = props.nextRunAt
+            ? new Date(props.nextRunAt).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+            : null
+        return <span>{when ? t('swarm.schedule.firstRunAt', { time: when }) : t('swarm.schedule.neverRan')}</span>
+    }
     const marks = props.recent.map(runMark)
     return (
         <span className="inline-flex items-center gap-2">
@@ -89,7 +99,7 @@ export function WorkerDetails(props: {
                 {run ? (
                     <>
                         <dt className="text-[var(--app-hint)]">{t('swarm.details.runs')}</dt>
-                        <dd className="text-[var(--app-fg)]"><RunHistory recent={run.recent} /></dd>
+                        <dd className="text-[var(--app-fg)]"><RunHistory recent={run.recent} nextRunAt={run.paused ? null : run.nextRunAt} /></dd>
                     </>
                 ) : null}
                 {run?.lastError ? (
