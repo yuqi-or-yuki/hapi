@@ -29,7 +29,8 @@ import {
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import type { SlashCommand, SwarmScheduleRequest } from '@hapi/protocol/apiTypes'
 import type { SwarmMembership, WorkerRun, WorkerRunEvent } from '@hapi/protocol'
-import type { ScheduledMessageHistoryRow } from '../../store'
+import type { ScheduledMessageHistoryRow, WorkerRecord } from '../../store'
+import { isTalentBoard, unfilledCards } from '@hapi/protocol/workerReview'
 import { Hono, type Context } from 'hono'
 import { z } from 'zod'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
@@ -120,6 +121,30 @@ function applyWorkerSchedule(
     const patch = { text, dueAt: schedule.firstRunAt, intervalMs: schedule.intervalMs, maxOccurrences: null, enabled: true }
     if (currentId && store.scheduledMessages.update(namespace, currentId, patch)) return currentId
     return store.scheduledMessages.create({ namespace, sourceSessionId: sessionId, cloneBeforeSend: false, ...patch }).id
+}
+
+/**
+ * The review cards this write would leave unfilled. Rows are merged exactly as
+ * the store merges them (a null field removes it), so the check judges the row
+ * as it would be stored. Only the rows being written are judged: a write
+ * cannot be blamed for some other row, and fixing one card is never blocked.
+ */
+export function unfilledAfterWrite(
+    existing: readonly WorkerRecord[],
+    writes: readonly { key: string; data: Record<string, unknown> }[],
+    board: SwarmMembership['board']
+): { key: string; missing: string[] }[] {
+    const stored = new Map(existing.map((row) => [row.key, row.data]))
+    const merged = new Map<string, Record<string, unknown>>()
+    for (const write of writes) {
+        const row = { ...(merged.get(write.key) ?? stored.get(write.key) ?? {}) }
+        for (const [field, value] of Object.entries(write.data)) {
+            if (value === null) delete row[field]
+            else row[field] = value
+        }
+        merged.set(write.key, row)
+    }
+    return unfilledCards([...merged].map(([key, data]) => ({ key, data })), board)
 }
 
 /** The delivered and missed runs in a schedule's history, newest first. */
@@ -1085,6 +1110,19 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
         if (!parsed.success) {
             return c.json({ error: 'Invalid body: expected { records: [{ key, data: { field: value } }] }' }, 400)
         }
+        const invalid = unfilledAfterWrite(
+            store.workerRecords.list(c.get('namespace'), sessionResult.sessionId),
+            parsed.data.records,
+            sessionResult.session.metadata.swarm.board
+        )
+        if (invalid.length > 0) {
+            // All or nothing: one unfilled card makes the batch invalid, so nothing is saved.
+            const listed = invalid.slice(0, 10).map((card) => `${card.key} (${card.missing.join(', ')})`).join('; ')
+            return c.json({
+                error: `Rejected, nothing was saved: ${invalid.length} review card(s) are not prefilled. Every card awaiting review needs a name, suggestedDecision ("yes" or "no") and a suggestedReason${isTalentBoard(sessionResult.session.metadata.swarm.board) ? ', plus bestFitRole' : ''}. Missing: ${listed}${invalid.length > 10 ? '; …' : ''}`
+            }, 400)
+        }
+
         try {
             const count = store.workerRecords.upsert(c.get('namespace'), sessionResult.sessionId, parsed.data.records)
             return c.json({ ok: true, count })
