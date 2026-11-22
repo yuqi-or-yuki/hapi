@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { SetSessionSwarmRequest } from '@hapi/protocol/apiTypes'
+import type { ActiveWindow } from '@hapi/protocol/schemas'
 import type { SessionSummary } from '@/types/api'
 import {
     Dialog,
@@ -24,11 +25,17 @@ export type WorkerDraft = SetSessionSwarmRequest & { job: string }
 type WorkerSubject = {
     id: string
     flavor?: string | null
-    swarm?: { job: string; name?: string; avatarSeed?: string; playbook?: string; review?: { runsLeft: number } } | null
+    swarm?: { job: string; name?: string; avatarSeed?: string; playbook?: string; review?: { runsLeft: number }; activeWindow?: ActiveWindow } | null
     workerRun?: SessionSummary['workerRun']
 }
 
 const INPUT_CLASS = 'rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-2.5 text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[var(--app-button)]'
+
+const HOURS = Array.from({ length: 25 }, (_, hour) => hour)
+
+function hourLabel(hour: number): string {
+    return new Date(2000, 0, 1, hour % 24).toLocaleTimeString(undefined, { hour: 'numeric' })
+}
 
 const REVIEW_CHOICES = [0, 1, 3, 5] as const
 
@@ -61,6 +68,7 @@ export function PromoteToWorkerDialog(props: {
     const [name, setName] = useState(worker.swarm?.name ?? '')
     const [seed, setSeed] = useState(savedSeed)
     const [schedule, setSchedule] = useState<ScheduleDraft>(savedSchedule)
+    const [activeWindow, setActiveWindow] = useState<ActiveWindow>(worker.swarm?.activeWindow ?? {})
     const [playbook, setPlaybook] = useState(worker.swarm?.playbook ?? '')
     const [reviewRuns, setReviewRuns] = useState(worker.swarm?.review?.runsLeft ?? 0)
     const [error, setError] = useState<string | null>(null)
@@ -73,6 +81,7 @@ export function PromoteToWorkerDialog(props: {
         setName(worker.swarm?.name ?? '')
         setSeed(savedSeed)
         setSchedule(savedSchedule)
+        setActiveWindow(worker.swarm?.activeWindow ?? {})
         setPlaybook(worker.swarm?.playbook ?? '')
         setReviewRuns(worker.swarm?.review?.runsLeft ?? 0)
         setError(null)
@@ -96,6 +105,8 @@ export function PromoteToWorkerDialog(props: {
                 avatarSeed: seed,
                 playbook: playbook.trim(),
                 reviewRuns,
+                // An empty window means "around the clock", which the hub stores as no window at all.
+                activeWindow: activeWindow.weekdaysOnly || activeWindow.startHour !== undefined ? activeWindow : null,
                 // An untouched schedule is left alone so saving a rename does not re-time the next run.
                 schedule: sameDraft(schedule, savedSchedule) ? undefined : draftToRequest(schedule, Date.now())
             })
@@ -237,6 +248,50 @@ export function PromoteToWorkerDialog(props: {
                                 />
                             </div>
                         ) : null}
+                        {schedule.mode === 'none' ? null : (
+                            <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-[var(--app-fg)]">
+                                <label className="inline-flex items-center gap-2">
+                                    <input
+                                        type="checkbox"
+                                        checked={Boolean(activeWindow.weekdaysOnly)}
+                                        onChange={(event) => setActiveWindow({ ...activeWindow, weekdaysOnly: event.target.checked || undefined })}
+                                    />
+                                    {t('swarm.promote.window.weekdays')}
+                                </label>
+                                <label className="inline-flex items-center gap-2">
+                                    <input
+                                        type="checkbox"
+                                        checked={activeWindow.startHour !== undefined}
+                                        onChange={(event) => setActiveWindow({
+                                            weekdaysOnly: activeWindow.weekdaysOnly,
+                                            ...(event.target.checked ? { startHour: 9, endHour: 17 } : {})
+                                        })}
+                                    />
+                                    {t('swarm.promote.window.hours')}
+                                </label>
+                                {activeWindow.startHour !== undefined && activeWindow.endHour !== undefined ? (
+                                    <span className="inline-flex items-center gap-2">
+                                        <select
+                                            aria-label={t('swarm.promote.window.from')}
+                                            value={activeWindow.startHour}
+                                            onChange={(event) => setActiveWindow({ ...activeWindow, startHour: Number(event.target.value) })}
+                                            className={`${INPUT_CLASS} py-1.5`}
+                                        >
+                                            {HOURS.filter((hour) => hour < activeWindow.endHour!).map((hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}
+                                        </select>
+                                        –
+                                        <select
+                                            aria-label={t('swarm.promote.window.to')}
+                                            value={activeWindow.endHour}
+                                            onChange={(event) => setActiveWindow({ ...activeWindow, endHour: Number(event.target.value) })}
+                                            className={`${INPUT_CLASS} py-1.5`}
+                                        >
+                                            {HOURS.filter((hour) => hour > activeWindow.startHour!).map((hour) => <option key={hour} value={hour}>{hourLabel(hour)}</option>)}
+                                        </select>
+                                    </span>
+                                ) : null}
+                            </div>
+                        )}
                         <p className="mt-2 text-xs text-[var(--app-hint)]">
                             {t(schedule.mode === 'none' ? 'swarm.promote.schedule.noneHint' : 'swarm.promote.schedule.hint')}
                         </p>

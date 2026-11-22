@@ -1036,7 +1036,8 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
                 avatarSeed: parsed.data.avatarSeed ?? current?.avatarSeed,
                 playbook: playbook === undefined ? current?.playbook : playbook || undefined,
                 review: reviewRuns === undefined ? current?.review : reviewRuns > 0 ? { runsLeft: reviewRuns } : undefined,
-                board: parsed.data.board ?? current?.board
+                board: parsed.data.board ?? current?.board,
+                activeWindow: parsed.data.activeWindow === undefined ? current?.activeWindow : parsed.data.activeWindow ?? undefined
             }
             const text = workerPrompt(worker)
             const namespace = c.get('namespace')
@@ -1050,6 +1051,8 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
                 // clock: the same schedule keeps running with the new brief.
                 store?.scheduledMessages.update(namespace, scheduleId, { text })
             }
+
+            if (scheduleId && worker.activeWindow) store?.scheduledMessages.alignToWindow(scheduleId, worker.activeWindow)
 
             await engine.setSessionSwarm(sessionResult.sessionId, { ...worker, scheduleId })
             return c.json({ ok: true })

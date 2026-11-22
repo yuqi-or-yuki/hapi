@@ -60,6 +60,23 @@ export type WorktreeMetadata = z.infer<typeof WorktreeMetadataSchema>
  * that is the session's own permission mode, which is what actually gates
  * the agent. Duplicating it would let the badge drift from the real rule.
  */
+/**
+ * When a worker's schedule is allowed to fire, on the hub's local clock.
+ * Slots outside it are skipped, not missed: the hub does not wake the worker.
+ */
+export const ActiveWindowSchema = z.object({
+    weekdaysOnly: z.boolean().optional(),
+    /** Hours of the day, 0-24, start inclusive and end exclusive. Both or neither. */
+    startHour: z.number().int().min(0).max(23).optional(),
+    endHour: z.number().int().min(1).max(24).optional()
+}).refine(
+    (value) => (value.startHour === undefined) === (value.endHour === undefined)
+        && (value.startHour === undefined || value.startHour < value.endHour!),
+    { message: 'startHour and endHour go together, with startHour before endHour' }
+)
+
+export type ActiveWindow = z.infer<typeof ActiveWindowSchema>
+
 export const SwarmMembershipSchema = z.object({
     /** The one repeating job this worker owns, in the operator's words. */
     job: z.string().min(1).max(200),
@@ -70,6 +87,8 @@ export const SwarmMembershipSchema = z.object({
     avatarSeed: z.string().min(1).max(64).optional(),
     /** The scheduled message that wakes this worker for its job, if it runs on a clock. */
     scheduleId: z.string().optional(),
+    /** Restricts the schedule to weekdays and/or working hours. Absent: it runs around the clock. */
+    activeWindow: ActiveWindowSchema.optional(),
     /**
      * How the job is done right now. Sent with every scheduled run, so a change
      * to the approach takes effect on the next run and survives context compaction.

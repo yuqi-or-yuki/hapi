@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { nextDailyRun } from '@hapi/protocol/workerSchedule'
-import { parseRows } from './worker'
+import { parseActiveWindow, parseRows } from './worker'
 
 describe('parseRows', () => {
     it('accepts flat rows, nested rows and a single object', () => {
@@ -22,5 +22,15 @@ describe('nextDailyRun', () => {
         expect(nextDailyRun('14:30', now)).toBe(new Date(2026, 0, 1, 14, 30).getTime())
         expect(nextDailyRun('09:00', now)).toBe(new Date(2026, 0, 2, 9, 0).getTime())
         expect(() => nextDailyRun('25:00', now)).toThrow('Invalid time of day')
+    })
+})
+
+describe('parseActiveWindow', () => {
+    it('reads weekdays and hours, and leaves the window alone when neither is given', () => {
+        expect(parseActiveWindow(['promote', '--weekdays', '--hours', '9-17'])).toEqual({ weekdaysOnly: true, startHour: 9, endHour: 17 })
+        expect(parseActiveWindow(['promote', '--weekdays'])).toEqual({ weekdaysOnly: true })
+        expect(parseActiveWindow(['promote'])).toBeUndefined()
+        expect(parseActiveWindow(['promote', '--any-time'])).toBeNull()
+        expect(() => parseActiveWindow(['promote', '--hours', '17-9'])).toThrow('Invalid --hours')
     })
 })

@@ -12,6 +12,7 @@ type Swarm = {
     name?: string
     playbook?: string
     review?: { runsLeft: number }
+    activeWindow?: { weekdaysOnly?: boolean; startHour?: number; endHour?: number }
     board?: { title?: string; columns?: string[] }
 }
 
@@ -30,6 +31,20 @@ function parseSchedule(args: string[], now: number): { intervalMs: number; first
     const intervalMs = parseIntervalMs(getFlag(args, 'every'))
     if (intervalMs !== undefined) return { intervalMs, firstRunAt: now + intervalMs }
     return undefined
+}
+
+/** `--weekdays`, `--hours 9-17`, or `--any-time` to lift both. Undefined leaves the window as it is. */
+export function parseActiveWindow(args: string[]): { weekdaysOnly?: boolean; startHour?: number; endHour?: number } | null | undefined {
+    if (hasFlag(args, 'any-time')) return null
+    const hours = getFlag(args, 'hours')
+    const weekdaysOnly = hasFlag(args, 'weekdays')
+    if (hours === undefined) return weekdaysOnly ? { weekdaysOnly } : undefined
+    const match = hours.match(/^(\d{1,2})-(\d{1,2})$/)
+    const [startHour, endHour] = match ? [Number(match[1]), Number(match[2])] : [NaN, NaN]
+    if (!(startHour >= 0 && endHour <= 24 && startHour < endHour)) {
+        throw new Error(`Invalid --hours value: ${hours} (expected start-end on a 24h clock, e.g. 9-17)`)
+    }
+    return { weekdaysOnly: weekdaysOnly || undefined, startHour, endHour }
 }
 
 function parsePlaybook(args: string[]): string | undefined {
@@ -86,6 +101,10 @@ async function handleWorkerCommand(args: string[]): Promise<void> {
         console.log(swarm.review
             ? chalk.yellow(`  review period: ${swarm.review.runsLeft} more approved run(s) before running free - draft outward-facing actions, do not take them`)
             : '  running free (no review period)')
+        if (swarm.activeWindow) {
+            const { weekdaysOnly, startHour, endHour } = swarm.activeWindow
+            console.log(`  scheduled runs only: ${[weekdaysOnly ? 'weekdays' : '', startHour !== undefined ? `${startHour}:00-${endHour}:00` : ''].filter(Boolean).join(', ')} (hub local time)`)
+        }
         if (swarm.board?.columns) console.log(`  board columns: ${swarm.board.columns.join(', ')}`)
         if (swarm.playbook) console.log(`  playbook:\n${swarm.playbook.replace(/^/gm, '    ')}`)
         return
@@ -100,6 +119,7 @@ async function handleWorkerCommand(args: string[]): Promise<void> {
             job,
             name: getFlag(args, 'name'),
             schedule: parseSchedule(args, Date.now()),
+            activeWindow: parseActiveWindow(args),
             playbook: parsePlaybook(args),
             reviewRuns: parseReviewRuns(args),
             board: columns || title ? { title, columns } : undefined
@@ -167,6 +187,7 @@ Targets the current HAPI session (${HAPI_SESSION_ID_ENV}); pass --session <id> f
 ${chalk.bold('Usage:')}
   hapi worker status
   hapi worker promote [--job <text>] [--name <name>] [--every 6h | --daily 09:00 | --on-demand]
+                      [--weekdays] [--hours 9-17] [--any-time]
                       [--playbook <text> | --playbook-file <path>] [--review <runs> | --no-review]
                       [--columns a,b,c] [--board-title <text>]
                       Only the flags you pass change; the schedule keeps running through edits.
@@ -182,6 +203,11 @@ ${chalk.bold('Board rows:')}
   so a rerun updates the row instead of adding a duplicate. Fields merge: recording
   {"emailSent": true} for an existing key changes only that field; null removes a field.
   URLs, emails, numbers and true/false get their own cell style on the board.
+
+${chalk.bold('Working hours:')}
+  --weekdays and --hours 9-17 (24h, the hub's local time) limit when the schedule fires.
+  Slots outside are skipped without waking the worker and are not counted as missed.
+  --any-time removes the limit. Messages from the user still reach the worker at any time.
 
 ${chalk.bold('Playbook:')}
   How the job is done right now. It is sent with every scheduled run, so when the approach

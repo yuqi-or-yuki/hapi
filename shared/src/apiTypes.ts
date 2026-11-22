@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import {
+    ActiveWindowSchema,
     AttachmentMetadataSchema,
     CodexCollaborationModeSchema,
     CopilotAgentModeSchema,
@@ -361,6 +362,8 @@ export const SetSessionSwarmRequestSchema = z.object({
     avatarSeed: z.string().trim().min(1).max(64).optional(),
     /** Omit to keep the current schedule; `null` removes it. */
     schedule: SwarmScheduleRequestSchema.nullable().optional(),
+    /** Omit to keep the current window; `null` lets the schedule run around the clock. */
+    activeWindow: ActiveWindowSchema.nullable().optional(),
     /** Omit to keep the current playbook; empty string clears it. */
     playbook: z.string().trim().max(8000).optional(),
     /** Runs still to be approved before the worker runs free. Omit to keep; 0 ends the review period. */

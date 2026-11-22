@@ -1,5 +1,7 @@
 import type { Store, ScheduledMessageRow } from '../store'
 import { currentSlot } from '../store/scheduledMessageStore'
+import type { ActiveWindow } from '@hapi/protocol/schemas'
+import { isWithinWindow } from '@hapi/protocol/workerSchedule'
 import type { Session, SyncEngine } from '../sync/syncEngine'
 
 const POLL_MS = 30_000
@@ -61,11 +63,32 @@ export class ScheduledMessageService {
                 if (!dueIds.has(id)) this.attempts.delete(id)
             }
             for (const job of due) {
+                if (this.deferToWindow(engine, job)) continue
                 await this.runJob(engine, this.settleMissedSlot(engine, job, now))
             }
         } finally {
             this.running = false
         }
+    }
+
+    /** The active window of the worker this job is the schedule of, if it has one. */
+    private windowFor(engine: SyncEngine, job: ScheduledMessageRow): ActiveWindow | undefined {
+        const swarm = engine.getSession(job.sourceSessionId)?.metadata?.swarm
+        return swarm?.scheduleId === job.id ? swarm.activeWindow : undefined
+    }
+
+    /**
+     * A slot outside the worker's active window (a weekend, the middle of the
+     * night) is not run at all: the worker is not woken, and the job moves to
+     * its next slot inside the window. Judged by the slot, not by the clock,
+     * so a run that is merely late for a slot inside the window still goes.
+     */
+    private deferToWindow(engine: SyncEngine, job: ScheduledMessageRow): boolean {
+        const window = this.windowFor(engine, job)
+        if (!window || isWithinWindow(job.dueAt, window)) return false
+        this.store.scheduledMessages.alignToWindow(job.id, window)
+        this.attempts.delete(job.id)
+        return true
     }
 
     /**
@@ -128,6 +151,9 @@ export class ScheduledMessageService {
             })
             this.store.scheduledMessages.markSent(job.id, targetSessionId)
             this.attempts.delete(job.id)
+            // So the card shows the real next run (Monday 9:00), not a slot that will be skipped.
+            const window = this.windowFor(engine, job)
+            if (window) this.store.scheduledMessages.alignToWindow(job.id, window)
         } catch (error) {
             this.failJob(engine, job, error instanceof Error ? error.message : 'Scheduled send failed')
         }

@@ -39,7 +39,7 @@ function useStateLine(session: SessionSummary, state: WorkerState): string {
     if (state === 'failing' && run?.lastError) return run.lastError
     if (state === 'scheduled' && run) {
         const next = run.nextRunAt <= Date.now() ? t('swarm.schedule.dueNow') : formatFutureRelativeTime(run.nextRunAt, t)
-        return `${describeSchedule(run, t)} · ${next}`
+        return `${describeSchedule(run, t, session.metadata?.swarm?.activeWindow)} · ${next}`
     }
     return t(`swarm.state.${state}`)
 }

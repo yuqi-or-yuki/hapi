@@ -1,4 +1,5 @@
 import type { SwarmScheduleRequest } from '@hapi/protocol/apiTypes'
+import type { ActiveWindow } from '@hapi/protocol/schemas'
 import { permissionAutonomy, type PermissionAutonomy } from '@hapi/protocol/modes'
 import { nextDailyRun } from '@hapi/protocol/workerSchedule'
 import type { SessionSummary } from '@/types/api'
@@ -83,7 +84,7 @@ export function sameDraft(a: ScheduleDraft, b: ScheduleDraft): boolean {
     return JSON.stringify(a) === JSON.stringify(b)
 }
 
-export function describeSchedule(run: WorkerRun, t: Translate): string {
+function describeCadence(run: WorkerRun, t: Translate): string {
     const draft = draftFromRun(run)
     if (draft.mode === 'daily') {
         const time = new Date(run.nextRunAt).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
@@ -93,6 +94,19 @@ export function describeSchedule(run: WorkerRun, t: Translate): string {
         return t(draft.unit === 'hours' ? 'swarm.schedule.everyHours' : 'swarm.schedule.everyMinutes', { n: draft.every })
     }
     return ''
+}
+
+function hourLabel(hour: number): string {
+    return new Date(2000, 0, 1, hour % 24).toLocaleTimeString(undefined, { hour: 'numeric' })
+}
+
+/** "Every 2h, weekdays 9 AM–5 PM": the cadence plus the window that limits it, if any. */
+export function describeSchedule(run: WorkerRun, t: Translate, window?: ActiveWindow): string {
+    const limits = [
+        window?.weekdaysOnly ? t('swarm.schedule.weekdays') : '',
+        window?.startHour !== undefined && window.endHour !== undefined ? `${hourLabel(window.startHour)}–${hourLabel(window.endHour)}` : ''
+    ].filter(Boolean).join(' ')
+    return limits ? `${describeCadence(run, t)}, ${limits}` : describeCadence(run, t)
 }
 
 /**

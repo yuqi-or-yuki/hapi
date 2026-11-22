@@ -75,7 +75,7 @@ export function WorkerDetails(props: {
                 <dt className="text-[var(--app-hint)]">{t('swarm.details.schedule')}</dt>
                 <dd className="text-[var(--app-fg)]">
                     {run
-                        ? `${describeSchedule(run, t)}${run.paused ? ` · ${t('swarm.state.paused')}` : ''}${lastRun ? ` · ${t('swarm.schedule.lastRun', { time: lastRun })}` : ''}`
+                        ? `${describeSchedule(run, t, swarm?.activeWindow)}${run.paused ? ` · ${t('swarm.state.paused')}` : ''}${lastRun ? ` · ${t('swarm.schedule.lastRun', { time: lastRun })}` : ''}`
                         : t('swarm.schedule.none')}
                 </dd>
                 {run ? (

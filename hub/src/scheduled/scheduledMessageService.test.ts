@@ -101,4 +101,20 @@ describe('ScheduledMessageService repeating jobs', () => {
         expect(sent).toEqual(['run'])
         expect(row().dueAt).toBe(T0 + 2 * HOUR)
     })
+
+    it('does not wake a worker for a slot outside its active window, and counts no miss', async () => {
+        const { service, session, sent, alerts, row } = setup()
+        // T0 is 09:00 UTC on a Thursday; a window that excludes that local hour either way.
+        const hour = new Date(T0).getHours()
+        const startHour = (hour + 2) % 24 === 23 ? 0 : Math.min(22, (hour + 2) % 24)
+        const window = { startHour, endHour: startHour + 1 }
+        session.metadata = { path: '/repo', host: 'h', swarm: { job: 'Job', promotedAt: 1, scheduleId: row().id, activeWindow: window } }
+
+        await service.tick()
+        expect(sent).toHaveLength(0)
+        expect(alerts).toHaveLength(0)
+        expect(row().error).toBeNull()
+        expect(new Date(row().dueAt).getHours()).toBe(startHour)
+        expect(row().dueAt).toBeGreaterThan(T0)
+    })
 })

@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { Database } from 'bun:sqlite'
+import type { ActiveWindow } from '@hapi/protocol/schemas'
+import { firstSlotInWindow } from '@hapi/protocol/workerSchedule'
 
 export type ScheduledMessageStatus = 'pending' | 'sent' | 'failed' | 'cancelled'
 export type ScheduledMessageHistoryEvent = 'created' | 'updated' | 'sent' | 'failed' | 'cancelled' | 'skipped' | 'enabled' | 'disabled'
@@ -352,6 +354,22 @@ export class ScheduledMessageStore {
             SELECT * FROM scheduled_messages WHERE namespace = ? AND id = ?
         `).get(namespace, id)
         return row ? this.withHistory(mapRow(row)) : null
+    }
+
+    /**
+     * Move a repeating job's next run to the first slot inside its worker's
+     * active window. Silent on purpose: a slot outside the window was never
+     * owed, so it is neither a run nor a miss and leaves no history.
+     */
+    alignToWindow(id: string, window: ActiveWindow): void {
+        const job = this.getById(id)
+        if (!job || job.status !== 'pending' || !job.intervalMs) return
+        const dueAt = firstSlotInWindow(job.dueAt, job.intervalMs, window)
+        if (dueAt === job.dueAt) return
+        this.db.query(`
+            UPDATE scheduled_messages SET due_at = $due_at, updated_at = $updated_at
+            WHERE id = $id AND status = 'pending'
+        `).run({ id, due_at: dueAt, updated_at: Date.now() })
     }
 
     /** Pending jobs follow a session that was resumed under a new id. */
