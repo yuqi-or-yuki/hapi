@@ -682,6 +682,8 @@ function AppInner() {
         ? 'swarm' as const
         : pathname.startsWith('/skills')
             ? 'skills' as const
+            : pathname.startsWith('/secrets')
+            ? 'secrets' as const
             : pathname.startsWith('/browse')
             ? 'browse' as const
             : pathname.startsWith('/settings')

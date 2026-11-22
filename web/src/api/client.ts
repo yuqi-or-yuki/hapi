@@ -1,5 +1,17 @@
 import type { SetSessionSwarmRequest } from '@hapi/protocol/apiTypes'
 
+export type SecretEntry = {
+    name: string
+    username?: string
+    url?: string
+    note?: string
+    updatedAt: number
+    lastUsedAt?: number
+    lastUsedBy?: string
+}
+/** `password` omitted on an edit keeps the stored one. */
+export type SecretInput = { username: string; url: string; note: string; password?: string }
+
 export type WorkerRecord = { key: string; data: Record<string, unknown>; createdAt: number; updatedAt: number }
 import type {
     AttachmentMetadata,
@@ -1043,6 +1055,18 @@ export class ApiClient {
             method: 'PUT',
             body: JSON.stringify(worker ?? { job: null })
         })
+    }
+
+    async getSecrets(): Promise<{ supported: boolean; secrets: SecretEntry[] }> {
+        return await this.request('/api/secrets')
+    }
+
+    async saveSecret(name: string, input: SecretInput): Promise<void> {
+        await this.request(`/api/secrets/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(input) })
+    }
+
+    async deleteSecret(name: string): Promise<void> {
+        await this.request(`/api/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
     }
 
     async getWorkerRecords(sessionId: string): Promise<{ records: WorkerRecord[] }> {

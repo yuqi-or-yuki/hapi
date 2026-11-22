@@ -60,6 +60,16 @@ export function SkillsRailIcon(props: IconProps) {
     ))
 }
 
+/** Secrets mark: a key. Stored logins agents may use. */
+export function SecretsRailIcon(props: IconProps) {
+    return stroke(props, (
+        <>
+            <circle cx="7.5" cy="15.5" r="4.5" />
+            <path d="m10.7 12.3 9.3-9.3M17 6l3 3M14 9l2 2" />
+        </>
+    ))
+}
+
 export function BrowseRailIcon(props: IconProps) {
     return stroke(props, <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />)
 }
@@ -143,12 +153,12 @@ function RailButton(props: { item: RailItem }) {
  * permanent rail would eat scarce phone width.
  */
 export function AppRail(props: {
-    active: 'sessions' | 'swarm' | 'skills' | 'browse' | 'settings' | null
+    active: 'sessions' | 'swarm' | 'skills' | 'secrets' | 'browse' | 'settings' | null
     workerCount?: number
     canBrowse?: boolean
     sidebarFolded: boolean
     onToggleSidebar: () => void
-    onNavigate: (to: 'sessions' | 'swarm' | 'skills' | 'browse' | 'settings') => void
+    onNavigate: (to: 'sessions' | 'swarm' | 'skills' | 'secrets' | 'browse' | 'settings') => void
 }) {
     const { t } = useTranslation()
     // Mac reports "MacIntel"/"Mac" here; everywhere else Ctrl is the modifier.
@@ -178,6 +188,13 @@ export function AppRail(props: {
             icon: <SkillsRailIcon className="h-5 w-5" />,
             active: props.active === 'skills',
             onClick: () => props.onNavigate('skills')
+        },
+        {
+            key: 'secrets',
+            label: t('rail.secrets'),
+            icon: <SecretsRailIcon className="h-5 w-5" />,
+            active: props.active === 'secrets',
+            onClick: () => props.onNavigate('secrets')
         }
     ]
 

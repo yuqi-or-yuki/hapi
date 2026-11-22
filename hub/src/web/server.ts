@@ -26,6 +26,7 @@ import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createPreferencesRoutes } from './routes/preferences'
 import { createScheduledMessagesRoutes } from './routes/scheduledMessages'
+import { createSecretsRoutes } from './routes/secrets'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
 import { createPiSessionRoutes } from './routes/piSessions'
 import { createPushRoutes } from './routes/push'
@@ -288,6 +289,7 @@ function createWebApp(options: {
     app.route('/api', createSessionsRoutes(options.getSyncEngine, options.store))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createScheduledMessagesRoutes(options.store, options.getSyncEngine))
+    app.route('/api', createSecretsRoutes(options.store))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
     app.route('/api', createStorageRoutes(configuration.dbPath))

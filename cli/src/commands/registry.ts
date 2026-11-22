@@ -20,6 +20,7 @@ import { mcpCommand } from './mcp'
 import { notifyCommand } from './notify'
 import { scheduleCommand } from './schedule'
 import { workerCommand } from './worker'
+import { secretCommand } from './secret'
 import { hubCommand } from './hub'
 import type { CommandContext, CommandDefinition } from './types'
 
@@ -62,7 +63,8 @@ const COMMANDS: CommandDefinition[] = [
     runnerCommand,
     notifyCommand,
     scheduleCommand,
-    workerCommand
+    workerCommand,
+    secretCommand
 ]
 
 const commandMap = new Map<string, CommandDefinition>()

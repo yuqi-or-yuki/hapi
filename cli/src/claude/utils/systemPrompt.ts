@@ -1,6 +1,7 @@
 import { trimIdent } from "@/utils/trimIdent";
 import { shouldIncludeCoAuthoredBy } from "./claudeSettings";
 import { DISPLAY_IMAGE_PROMPT_CLAUDE, DISPLAY_MEDIA_PROMPT_CLAUDE, DISPLAY_VIDEO_PROMPT_CLAUDE } from "@/modules/common/displayImagePrompt";
+import { HAPI_SECRETS_PROMPT } from "@/modules/common/secretsPrompt";
 import { withSessionSummaryInstruction } from "@/modules/common/sessionSummaryInstruction";
 
 /**
@@ -11,6 +12,7 @@ const BASE_SYSTEM_PROMPT = (() => trimIdent(`
     ${DISPLAY_IMAGE_PROMPT_CLAUDE}
     ${DISPLAY_VIDEO_PROMPT_CLAUDE}
     ${DISPLAY_MEDIA_PROMPT_CLAUDE}
+    ${HAPI_SECRETS_PROMPT}
 `))();
 
 /**

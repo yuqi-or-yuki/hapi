@@ -24,7 +24,8 @@ import { SwarmView } from '@/components/Swarm/SwarmView'
 import { SkillsView, skillInvocation } from '@/components/Skills/SkillsView'
 import { useMachineSkills, type UnifiedSkill } from '@/hooks/queries/useMachineSkills'
 import { saveDraft } from '@/lib/composer-drafts'
-import { SwarmRailIcon, SkillsRailIcon } from '@/components/AppRail'
+import { SwarmRailIcon, SkillsRailIcon, SecretsRailIcon } from '@/components/AppRail'
+import { SecretsView } from '@/components/Secrets/SecretsView'
 import { HeaderOverflowMenu } from '@/components/HeaderOverflowMenu'
 import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -620,6 +621,62 @@ function SwarmPage() {
     )
 }
 
+function SecretsPage() {
+    const { api } = useAppContext()
+    const goBack = useAppGoBack()
+    const { t } = useTranslation()
+    const queryClient = useQueryClient()
+    const { sessions } = useSessions(api)
+    const { data, isLoading, error } = useQuery({ queryKey: ['secrets'], queryFn: () => api.getSecrets() })
+    const sessionTitles = useMemo(
+        () => Object.fromEntries(sessions.map((session) => [session.id, getSessionTitle(session)])),
+        [sessions]
+    )
+    const refresh = () => queryClient.invalidateQueries({ queryKey: ['secrets'] })
+    const search = useSearch({ from: '/secrets' })
+    const draft = search.new ? { name: search.new, username: search.username, url: search.url, note: search.note } : undefined
+
+    return (
+        <div className="flex h-full min-h-0 flex-col bg-[var(--app-bg)]">
+            <div className="flex items-center gap-2 border-b border-[var(--app-border)] p-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
+                <button
+                    type="button"
+                    onClick={goBack}
+                    aria-label={t('button.back')}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)]"
+                >
+                    <BackIcon />
+                </button>
+                <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-[var(--app-fg)]">{t('secrets.title')}</div>
+                    <div className="truncate text-xs text-[var(--app-hint)]">{t('secrets.subtitle')}</div>
+                </div>
+            </div>
+            <div className="app-scroll-y flex-1 min-h-0">
+                <SecretsView
+                    secrets={data?.secrets ?? []}
+                    supported={data?.supported ?? true}
+                    isLoading={isLoading}
+                    error={error instanceof Error ? error.message : null}
+                    sessionTitles={sessionTitles}
+                    // Keyed so a second link opens a fresh, prefilled dialog. Wait for the
+                    // list: a draft for an existing name must open as an edit of it.
+                    key={isLoading ? 'loading' : draft?.name ?? 'list'}
+                    draft={isLoading ? undefined : draft}
+                    onSave={async (name, input) => {
+                        await api.saveSecret(name, input)
+                        await refresh()
+                    }}
+                    onDelete={async (name) => {
+                        await api.deleteSecret(name)
+                        await refresh()
+                    }}
+                />
+            </div>
+        </div>
+    )
+}
+
 /** One worker: who it is and how it is doing, then the board of what it has produced. */
 function WorkerPage() {
     const { api } = useAppContext()
@@ -1137,6 +1194,7 @@ function SessionsPage() {
                                 items={[
                                     { key: 'swarm', icon: <SwarmRailIcon className="h-4 w-4" />, label: t('rail.swarm'), onClick: () => navigate({ to: '/swarm' }) },
                                     { key: 'skills', icon: <SkillsRailIcon className="h-4 w-4" />, label: t('rail.skills'), onClick: () => navigate({ to: '/skills' }) },
+                                    { key: 'secrets', icon: <SecretsRailIcon className="h-4 w-4" />, label: t('rail.secrets'), onClick: () => navigate({ to: '/secrets' }) },
                                     { key: 'jobs', icon: <CalendarClockIcon className="h-4 w-4" />, label: 'Scheduled jobs', onClick: () => navigate({ to: '/scheduled-jobs' }) },
                                     { key: 'codex-sync', icon: <CodexImportIcon className="h-4 w-4" />, label: t('codexSync.tooltip'), onClick: () => void openCodexImportDialog() },
                                     { key: 'browse', icon: <FolderOpenIcon className="h-4 w-4" />, label: t('browse.nav'), onClick: () => navigate({ to: '/browse' }) },
@@ -2499,6 +2557,18 @@ const swarmRoute = createRoute({
     component: SwarmPage,
 })
 
+const secretsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/secrets',
+    // `?new=<name>&username=&url=&note=` opens the add dialog prefilled. There is
+    // deliberately no password parameter: it must never sit in a URL or a chat.
+    validateSearch: (search: Record<string, unknown>): { new?: string; username?: string; url?: string; note?: string } => {
+        const text = (value: unknown) => (typeof value === 'string' && value ? value : undefined)
+        return { new: text(search.new), username: text(search.username), url: text(search.url), note: text(search.note) }
+    },
+    component: SecretsPage,
+})
+
 const workerBoardRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/swarm/$sessionId',
@@ -2519,6 +2589,7 @@ export const routeTree = rootRoute.addChildren([
     browseRoute,
     swarmRoute,
     workerBoardRoute,
+    secretsRoute,
     skillsRoute,
     scheduledJobsRoute,
     settingsRoute.addChildren([

@@ -9,6 +9,7 @@
         ".": "./src/index.ts",
         "./apiTypes": "./src/apiTypes.ts",
         "./workerSchedule": "./src/workerSchedule.ts",
+        "./secretVault": "./src/secretVault.ts",
         "./messages": "./src/messages.ts",
         "./slashCommands": "./src/slashCommands.ts",
         "./buildInfo": "./src/buildInfo.ts",

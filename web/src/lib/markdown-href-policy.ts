@@ -16,6 +16,7 @@ export type MarkdownHrefDecision =
 const STATIC_SPA_PATHS = new Set([
     '/',
     '/browse',
+    '/secrets',
     '/share',
     '/sessions',
     '/settings',

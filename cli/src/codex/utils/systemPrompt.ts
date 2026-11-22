@@ -7,6 +7,7 @@
 
 import { trimIdent } from '@/utils/trimIdent';
 import { DISPLAY_IMAGE_PROMPT_CODEX, DISPLAY_MEDIA_PROMPT_CODEX, DISPLAY_VIDEO_PROMPT_CODEX } from '@/modules/common/displayImagePrompt';
+import { HAPI_SECRETS_PROMPT } from '@/modules/common/secretsPrompt';
 import { withSessionSummaryInstruction } from '@/modules/common/sessionSummaryInstruction';
 
 /**
@@ -23,6 +24,7 @@ export const TITLE_INSTRUCTION = trimIdent(`
     ${DISPLAY_IMAGE_PROMPT_CODEX}
     ${DISPLAY_VIDEO_PROMPT_CODEX}
     ${DISPLAY_MEDIA_PROMPT_CODEX}
+    ${HAPI_SECRETS_PROMPT}
 `);
 
 /**
