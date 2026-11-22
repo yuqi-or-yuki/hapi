@@ -393,6 +393,19 @@ export class RpcGateway {
         }
     }
 
+    /** Skills the runner itself can see — not tied to any one session. */
+    async listSkillsForMachine(machineId: string, flavor?: string): Promise<{
+        success: boolean
+        skills?: Array<{ name: string; description?: string }>
+        error?: string
+    }> {
+        return await this.machineRpc(machineId, RPC_METHODS.ListSkills, { flavor }) as {
+            success: boolean
+            skills?: Array<{ name: string; description?: string }>
+            error?: string
+        }
+    }
+
     async listClaudeModelsForSession(sessionId: string): Promise<RpcListClaudeModelsResponse> {
         return await this.sessionRpc(sessionId, 'listClaudeModels', {}, MODEL_LIST_RPC_TIMEOUT_MS) as RpcListClaudeModelsResponse
     }

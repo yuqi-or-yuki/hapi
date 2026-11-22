@@ -102,9 +102,6 @@ export function NewSession(props: {
     const [suppressSuggestions, setSuppressSuggestions] = useState(false)
     const [isDirectoryFocused, setIsDirectoryFocused] = useState(false)
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
-    const [legacyCodexYolo] = useState(
-        () => loadPreferredAgent() === 'codex' && loadPreferredYoloMode()
-    )
     const [model, setModel] = useState('auto')
     const [cursorSelectedBase, setCursorSelectedBase] = useState('auto')
     const pendingCursorBaseRef = useRef<string | null>(null)
@@ -808,8 +805,7 @@ export function NewSession(props: {
 
         const preferred = resolvePreferredLaunchSettings(
             agent,
-            loadPreferredLaunchSettings(machineId, agent),
-            legacyCodexYolo
+            loadPreferredLaunchSettings(machineId, agent)
         )
 
         setModel(agent === 'opencode' ? 'auto' : preferred.model)
@@ -825,7 +821,7 @@ export function NewSession(props: {
         setAgySelectedModel(
             agent === 'agy' && preferred.model !== 'auto' ? preferred.model : null
         )
-    }, [agent, legacyCodexYolo, machineId])
+    }, [agent, machineId])
 
     useEffect(() => {
         if (

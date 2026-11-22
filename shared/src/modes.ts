@@ -83,6 +83,48 @@ export const PERMISSION_MODE_LABELS: Record<PermissionMode, string> = {
     'always-proceed': 'Always Proceed'
 }
 
+/**
+ * How far an agent may go before it stops and asks — the trust level the swarm
+ * view shows for a worker.
+ *
+ *  - `asks`    stops for approval before it acts
+ *  - `guarded` acts on its own, but only inside a guard rail (edits only, or
+ *              a sandbox). It does not ask.
+ *  - `free`    acts on its own with no guard rail
+ *  - `unknown` no mode reported, or one this build does not know
+ *
+ * Exhaustive by `Record<PermissionMode, …>` on purpose: a new permission mode
+ * must be classified here or the build fails. Silently bucketing an unknown
+ * mode would tell an operator a worker is supervised when it may not be.
+ */
+export type PermissionAutonomy = 'asks' | 'guarded' | 'free'
+
+export const PERMISSION_MODE_AUTONOMY: Record<PermissionMode, PermissionAutonomy> = {
+    default: 'asks',
+    plan: 'asks',
+    ask: 'asks',
+    debug: 'asks',
+    'read-only': 'asks',
+    'request-review': 'asks',
+    acceptEdits: 'guarded',
+    auto: 'guarded',
+    autoReview: 'guarded',
+    'safe-yolo': 'guarded',
+    bypassPermissions: 'free',
+    yolo: 'free',
+    'always-proceed': 'free'
+}
+
+/**
+ * Trust level for a mode string off the wire. Anything unrecognised — an
+ * absent mode, or one from a newer CLI — reads as `unknown` rather than being
+ * guessed in either direction.
+ */
+export function permissionAutonomy(mode: string | null | undefined): PermissionAutonomy | 'unknown' {
+    if (!mode) return 'unknown'
+    return PERMISSION_MODE_AUTONOMY[mode as PermissionMode] ?? 'unknown'
+}
+
 export type PermissionModeTone = 'neutral' | 'info' | 'warning' | 'danger'
 
 export const PERMISSION_MODE_TONES: Record<PermissionMode, PermissionModeTone> = {

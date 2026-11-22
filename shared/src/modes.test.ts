@@ -1,6 +1,9 @@
 import { describe, expect, it, test } from 'bun:test'
 import {
     AGENT_FLAVORS,
+    PERMISSION_MODES,
+    PERMISSION_MODE_AUTONOMY,
+    permissionAutonomy,
     AgentFlavorSchema,
     CREATABLE_AGENT_FLAVORS,
     getPermissionModeLabel,
@@ -180,5 +183,30 @@ describe('isSteeringSupportedForSession', () => {
     it('rejects non-steerable flavors', () => {
         expect(isSteeringSupportedForSession({ flavor: 'claude' })).toBe(false)
         expect(isSteeringSupportedForSession(null)).toBe(false)
+    })
+})
+
+describe('permission autonomy', () => {
+    it('classifies every permission mode', () => {
+        expect(Object.keys(PERMISSION_MODE_AUTONOMY).sort()).toEqual([...PERMISSION_MODES].sort())
+    })
+
+    it('treats every no-prompt mode as free, whichever agent it came from', () => {
+        expect(permissionAutonomy('bypassPermissions')).toBe('free')
+        expect(permissionAutonomy('yolo')).toBe('free')
+        expect(permissionAutonomy('always-proceed')).toBe('free')
+    })
+
+    it('keeps sandboxed and edits-only modes apart from free', () => {
+        expect(permissionAutonomy('safe-yolo')).toBe('guarded')
+        expect(permissionAutonomy('acceptEdits')).toBe('guarded')
+        expect(permissionAutonomy('default')).toBe('asks')
+    })
+
+    it('reports unknown instead of guessing for an absent or unrecognised mode', () => {
+        expect(permissionAutonomy(null)).toBe('unknown')
+        expect(permissionAutonomy(undefined)).toBe('unknown')
+        expect(permissionAutonomy('')).toBe('unknown')
+        expect(permissionAutonomy('mode-from-a-newer-cli')).toBe('unknown')
     })
 })

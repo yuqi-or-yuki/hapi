@@ -66,13 +66,19 @@ export function useSlashCommands(
         return builtin
     }, [agentType, query.data])
 
+    const isStale = query.isStale
+    const isFetching = query.isFetching
+
     const getSuggestions = useCallback(async (queryText: string): Promise<Suggestion[]> => {
         // Opening the menu is the one moment a stale list is visible, so
         // refresh here instead of polling in the background. Fire-and-forget:
         // the /slash-commands RPC can stall for its full 30s timeout when the
         // CLI is wedged, and the menu must show cached + built-in commands
         // immediately - the refreshed list flows in via query state.
-        if (queryText === '/') {
+        // Any stale "/" query, not just the bare "/" -- see useSkills: fast
+        // typing and pasting skip the lone-sigil keystroke the exact match
+        // waited for. staleTime caps the RPC rate; isFetching stops restarts.
+        if (queryText.startsWith('/') && isStale && !isFetching) {
             void query.refetch()
         }
 
@@ -115,7 +121,7 @@ export function useSlashCommands(
                 content: cmd.content,
                 source: cmd.source
             }))
-    }, [commands, query.refetch])
+    }, [commands, query.refetch, isStale, isFetching])
 
     return {
         commands,

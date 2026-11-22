@@ -6,6 +6,8 @@ import {
     isPermissionModeAllowedForFlavor,
     RenameSessionRequestSchema,
     SetSessionPinnedRequestSchema,
+    SetSessionSwarmRequestSchema,
+    UpsertWorkerRecordsRequestSchema,
     ResumeSessionRequestSchema,
     RewindConversationRequestSchema,
     SCRATCHLIST_MAX_ENTRIES,
@@ -25,7 +27,9 @@ import {
     UploadFileRequestSchema
 } from '@hapi/protocol'
 import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
-import type { SlashCommand } from '@hapi/protocol/apiTypes'
+import type { SlashCommand, SwarmScheduleRequest } from '@hapi/protocol/apiTypes'
+import type { SwarmMembership, WorkerRun, WorkerRunEvent } from '@hapi/protocol'
+import type { ScheduledMessageHistoryRow } from '../../store'
 import { Hono, type Context } from 'hono'
 import { z } from 'zod'
 import type { SyncEngine, Session } from '../../sync/syncEngine'
@@ -77,6 +81,57 @@ function estimateBase64Bytes(base64: string): number {
     return Math.floor((len * 3) / 4) - padding
 }
 
+type WorkerBrief = Pick<SwarmMembership, 'job' | 'playbook' | 'review'>
+
+/**
+ * What a worker is told on each scheduled run. Rebuilt whenever the worker is
+ * edited, so the next run always carries the current job, playbook and review
+ * state instead of whatever was true when the schedule was created.
+ */
+export function workerPrompt(worker: WorkerBrief): string {
+    const parts = [`Scheduled run of your standing job: ${worker.job}`]
+    if (worker.playbook) {
+        parts.push(`Current playbook (this is how the job is done now; it replaces any earlier instructions in this conversation):\n${worker.playbook}`)
+    }
+    parts.push('Do this run now. Put every result on your board with `hapi worker record` (one row per item, a stable --key so reruns update rows instead of duplicating them; `hapi worker rows` shows what is already there).')
+    if (worker.review) {
+        parts.push(`REVIEW PERIOD (${worker.review.runsLeft} more approved run${worker.review.runsLeft === 1 ? '' : 's'} before you run free): do the work and record the rows, but do not take any action that reaches outside this machine or cannot be undone (sending email or messages, posting, purchasing, deleting, pushing). Prepare those as drafts, list exactly what you would have done, and stop for review.`)
+    }
+    parts.push('Then report in a few lines what changed and anything that needs my attention.')
+    return parts.join('\n\n')
+}
+
+/**
+ * Create, re-time or remove the scheduled message behind a worker.
+ * Returns the id the swarm record should point at.
+ */
+function applyWorkerSchedule(
+    store: Store,
+    namespace: string,
+    sessionId: string,
+    currentId: string | undefined,
+    schedule: SwarmScheduleRequest | null,
+    text: string
+): string | undefined {
+    if (schedule === null) {
+        if (currentId) store.scheduledMessages.cancel(namespace, currentId)
+        return undefined
+    }
+    const patch = { text, dueAt: schedule.firstRunAt, intervalMs: schedule.intervalMs, maxOccurrences: null, enabled: true }
+    if (currentId && store.scheduledMessages.update(namespace, currentId, patch)) return currentId
+    return store.scheduledMessages.create({ namespace, sourceSessionId: sessionId, cloneBeforeSend: false, ...patch }).id
+}
+
+/** The delivered and missed runs in a schedule's history, newest first. */
+function recentRuns(history: readonly ScheduledMessageHistoryRow[]): WorkerRunEvent[] {
+    return history
+        .filter((entry) => entry.event === 'sent' || (entry.event === 'skipped' && entry.error?.startsWith('Missed')))
+        .slice(0, 14)
+        .map((entry) => entry.event === 'sent'
+            ? { at: entry.createdAt, outcome: 'ran' as const, lateMs: Math.max(0, entry.createdAt - entry.dueAt) }
+            : { at: entry.createdAt, outcome: 'missed' as const, lateMs: 0 })
+}
+
 export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, store?: Store): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
@@ -126,7 +181,18 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
         }
 
         const scheduledDueAtsBySessionId = new Map<string, number[]>()
+        const workerRunByScheduleId = new Map<string, WorkerRun>()
         for (const m of store?.scheduledMessages.list(namespace, { status: 'pending' }) ?? []) {
+            if (m.intervalMs) {
+                workerRunByScheduleId.set(m.id, {
+                    nextRunAt: m.dueAt,
+                    intervalMs: m.intervalMs,
+                    paused: !m.enabled,
+                    lastRunAt: m.sentAt,
+                    lastError: m.error,
+                    recent: recentRuns(m.history)
+                })
+            }
             if (!m.enabled) continue
             const dueAts = scheduledDueAtsBySessionId.get(m.sourceSessionId)
             if (dueAts) {
@@ -139,6 +205,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
             dueAts.sort((a, b) => a - b)
         }
 
+        const boardStats = store?.workerRecords.stats(namespace)
         const sessionIds = sessionRecords.map((session) => session.id)
         const scheduledCounts = engine.getFutureScheduledMessageCounts(sessionIds)
         const nextScheduledAt = engine.getNextScheduledAtBySessionIds(sessionIds)
@@ -146,7 +213,9 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
             ...toSessionSummary(session),
             scheduledDueAts: scheduledDueAtsBySessionId.get(session.id) ?? [],
             futureScheduledMessageCount: scheduledCounts.get(session.id) ?? 0,
-            nextScheduledAt: nextScheduledAt.get(session.id) ?? null
+            nextScheduledAt: nextScheduledAt.get(session.id) ?? null,
+            workerBoard: boardStats?.get(session.id),
+            workerRun: workerRunByScheduleId.get(session.metadata?.swarm?.scheduleId ?? '')
         }))
 
         return c.json({ sessions })
@@ -936,6 +1005,99 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
             const message = error instanceof Error ? error.message : 'Failed to update review state'
             return c.json({ error: message }, 500)
         }
+    })
+
+    app.put('/sessions/:id/swarm', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) return sessionResult
+
+        const body = await c.req.json().catch(() => null)
+        const parsed = SetSessionSwarmRequestSchema.safeParse(body)
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body: job must be a non-empty string, or null to retire the worker' }, 400)
+        }
+
+        try {
+            const current = sessionResult.session.metadata?.swarm
+            const { job, schedule } = parsed.data
+            if (job === null) {
+                if (current?.scheduleId) store?.scheduledMessages.cancel(c.get('namespace'), current.scheduleId)
+                await engine.setSessionSwarm(sessionResult.sessionId, null)
+                return c.json({ ok: true })
+            }
+
+            const { name, playbook, reviewRuns } = parsed.data
+            const worker = {
+                job,
+                name: name === undefined ? current?.name : name || undefined,
+                avatarSeed: parsed.data.avatarSeed ?? current?.avatarSeed,
+                playbook: playbook === undefined ? current?.playbook : playbook || undefined,
+                review: reviewRuns === undefined ? current?.review : reviewRuns > 0 ? { runsLeft: reviewRuns } : undefined,
+                board: parsed.data.board ?? current?.board
+            }
+            const text = workerPrompt(worker)
+            const namespace = c.get('namespace')
+
+            let scheduleId = current?.scheduleId
+            if (schedule !== undefined) {
+                if (!store) return c.json({ error: 'Schedules are unavailable' }, 503)
+                scheduleId = applyWorkerSchedule(store, namespace, sessionResult.sessionId, scheduleId, schedule, text)
+            } else if (scheduleId) {
+                // Editing the job, playbook or review state never touches the
+                // clock: the same schedule keeps running with the new brief.
+                store?.scheduledMessages.update(namespace, scheduleId, { text })
+            }
+
+            await engine.setSessionSwarm(sessionResult.sessionId, { ...worker, scheduleId })
+            return c.json({ ok: true })
+        } catch (error) {
+            const message = error instanceof Error ? error.message : 'Failed to update swarm membership'
+            return c.json({ error: message }, 500)
+        }
+    })
+
+    app.get('/sessions/:id/worker-records', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) return sessionResult
+
+        return c.json({ records: store?.workerRecords.list(c.get('namespace'), sessionResult.sessionId) ?? [] })
+    })
+
+    app.post('/sessions/:id/worker-records', async (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) return sessionResult
+        if (!store) return c.json({ error: 'Boards are unavailable' }, 503)
+        if (!sessionResult.session.metadata?.swarm) {
+            return c.json({ error: 'This session is not a swarm worker; promote it first' }, 409)
+        }
+
+        const parsed = UpsertWorkerRecordsRequestSchema.safeParse(await c.req.json().catch(() => null))
+        if (!parsed.success) {
+            return c.json({ error: 'Invalid body: expected { records: [{ key, data: { field: value } }] }' }, 400)
+        }
+        try {
+            const count = store.workerRecords.upsert(c.get('namespace'), sessionResult.sessionId, parsed.data.records)
+            return c.json({ ok: true, count })
+        } catch (error) {
+            return c.json({ error: error instanceof Error ? error.message : 'Failed to save rows' }, 400)
+        }
+    })
+
+    app.delete('/sessions/:id/worker-records/:key', (c) => {
+        const engine = requireSyncEngine(c, getSyncEngine)
+        if (engine instanceof Response) return engine
+        const sessionResult = requireSessionFromParam(c, engine)
+        if (sessionResult instanceof Response) return sessionResult
+
+        const removed = store?.workerRecords.remove(c.get('namespace'), sessionResult.sessionId, c.req.param('key')) ?? false
+        return removed ? c.json({ ok: true }) : c.json({ error: 'Row not found' }, 404)
     })
 
     app.put('/sessions/:id/pin', async (c) => {

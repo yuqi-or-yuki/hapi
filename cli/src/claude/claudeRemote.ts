@@ -36,6 +36,7 @@ export async function claudeRemote(opts: {
     // Callbacks
     onSessionFound: (id: string, extras?: { forkedFrom?: string }) => void,
     onThinkingChange?: (thinking: boolean) => void,
+    onBackgroundTaskCountChange?: (count: number) => void,
     onMessage: (message: SDKMessage) => void,
     onFirstResult?: (initialMessage: string) => void,
     onCompletionEvent?: (message: string) => void,
@@ -219,6 +220,19 @@ export async function claudeRemote(opts: {
         }
     };
 
+    // Live background tasks (agents, shells) of this Claude process. The SDK
+    // sends the full set on every membership change and nothing at startup, so
+    // each process starts from zero and ends at zero.
+    let backgroundTaskCount = -1;
+    const updateBackgroundTaskCount = (count: number) => {
+        if (backgroundTaskCount !== count) {
+            backgroundTaskCount = count;
+            logger.debug(`[claudeRemote] Background task count changed to: ${count}`);
+            opts.onBackgroundTaskCountChange?.(count);
+        }
+    };
+    updateBackgroundTaskCount(0);
+
     // Start the loop
     const response = query({
         prompt: messages,
@@ -323,6 +337,10 @@ export async function claudeRemote(opts: {
                 }
             }
 
+            if (message.type === 'system' && (message as { subtype?: string }).subtype === 'background_tasks_changed') {
+                updateBackgroundTaskCount(countActiveBackgroundTasks((message as { tasks?: unknown }).tasks));
+            }
+
             // Capture the /compact outcome. Only a reported failure is recorded:
             // anything else leaves the success path untouched, so a status shape
             // we do not recognise cannot invent a failure.
@@ -364,6 +382,28 @@ export async function claudeRemote(opts: {
                 await opts.onReady(completionEvent);
                 logger.debug(`${debugPrefix} onReady emitted for result #${resultSeq}`);
 
+                if (inputEnded) {
+                    // Input closed while this turn was in flight -- normally
+                    // because a model/permission switch parked the next prompt
+                    // for a fresh process (claudeRemoteLauncher's "mode has
+                    // changed, pending message"). The turn has now finished, so
+                    // this attempt is done and the launcher can relaunch and
+                    // deliver the parked prompt.
+                    //
+                    // Without this the attempt only closes its *input* stream.
+                    // A session that still has live background work (an async
+                    // subagent, a backgrounded shell) keeps the response stream
+                    // open indefinitely, `inputEnded` keeps short-circuiting
+                    // scheduleNextMessage(), and every prompt the operator sends
+                    // from then on queues forever against a session that looks
+                    // perfectly healthy.
+                    logger.debug(
+                        `${debugPrefix} input ended; ending attempt after result #${resultSeq} ` +
+                        `so the launcher can relaunch with any parked message`
+                    );
+                    return;
+                }
+
                 // Pull next user message without blocking response stream processing.
                 // Claude may emit autonomous async messages (e.g. scheduled tasks) after a result,
                 // and we must keep consuming those messages immediately.
@@ -399,5 +439,17 @@ export async function claudeRemote(opts: {
             `(streamMessages=${streamMessageSeq}, results=${resultSeq}, nextFetches=${nextMessageFetchSeq}, inputEnded=${inputEnded})`
         );
         updateThinking(false);
+        updateBackgroundTaskCount(0);
     }
+}
+
+/**
+ * Counts the tasks of a `background_tasks_changed` payload that represent real
+ * work. `ambient` tasks (live-update watchers and the like) are not activity.
+ */
+export function countActiveBackgroundTasks(tasks: unknown): number {
+    if (!Array.isArray(tasks)) {
+        return 0;
+    }
+    return tasks.filter((task) => task && typeof task === 'object' && (task as { ambient?: unknown }).ambient !== true).length;
 }

@@ -32,6 +32,19 @@ export type SessionStatusData = {
 
 const BACKGROUND_START_RE = /Command running in background with ID:\s*([^\s<]+)/
 const TASK_ID_RE = /<task-id>\s*([^<]+?)\s*<\/task-id>/
+// Result of an Agent call launched with run_in_background: the tool call
+// completes at once and the agent keeps working until its task notification.
+const BACKGROUND_AGENT_START_RE = /Async agent launched successfully[\s\S]*?agentId:\s*([A-Za-z0-9_-]+)/
+
+function findBackgroundAgentId(value: unknown): string | null {
+    if (typeof value === 'string') return value.match(BACKGROUND_AGENT_START_RE)?.[1] ?? null
+    const values = Array.isArray(value) ? value : isObject(value) ? Object.values(value) : []
+    for (const item of values) {
+        const agentId = findBackgroundAgentId(item)
+        if (agentId) return agentId
+    }
+    return null
+}
 
 function findBackgroundTaskId(value: unknown): string | null {
     if (typeof value === 'string') return value.match(BACKGROUND_START_RE)?.[1] ?? null
@@ -123,9 +136,20 @@ function subagentTitle(block: ToolCallBlock): string {
     return getInputStringAny(block.tool.input, ['subagent_type', 'agent_type']) ?? 'Agent'
 }
 
-function subagentFromBlock(block: ToolCallBlock): SessionStatusSubagent | null {
+function subagentFromBlock(block: ToolCallBlock, isRunningInBackground: (block: ToolCallBlock) => boolean): SessionStatusSubagent | null {
     if (block.tool.name !== 'CodexAgent' && !isSubagentToolName(block.tool.name)) return null
-    if (block.tool.state === 'completed') return null
+    if (block.tool.state === 'completed') {
+        if (!isRunningInBackground(block)) return null
+        const latestChild = block.children.at(-1)
+        return {
+            id: block.tool.id,
+            title: subagentTitle(block),
+            detail: latestChild?.kind === 'tool-call' ? latestChild.tool.nativeTitle ?? latestChild.tool.name : null,
+            state: 'running',
+            startedAt: block.tool.startedAt ?? block.createdAt,
+            endedAt: null
+        }
+    }
 
     const latestChild = block.children.at(-1)
     const activity = block.tool.name === 'CodexAgent'
@@ -162,9 +186,24 @@ export function buildSessionStatusData(args: {
         : args.backgroundTaskCount > 0
             ? detectedTerminals.confirmed.slice(-args.backgroundTaskCount)
             : []
+    // Background agents: launched, not yet notified as finished, and the hub
+    // does not report that nothing is running.
+    const completedTaskIds = backgroundTaskCompletions(args.messages).ids
+    const unfinishedBackgroundAgentToolIds = args.backgroundTaskCount === 0
+        ? []
+        : tools
+            .filter((block) => {
+                if (block.tool.state !== 'completed' || !isSubagentToolName(block.tool.name)) return false
+                const agentId = findBackgroundAgentId(block.tool.result)
+                return agentId !== null && !completedTaskIds.has(agentId)
+            })
+            .map((block) => block.tool.id)
+    const backgroundAgentToolIds = new Set(args.backgroundTaskCount === undefined
+        ? unfinishedBackgroundAgentToolIds
+        : unfinishedBackgroundAgentToolIds.slice(-args.backgroundTaskCount))
     const undiscoveredTerminalCount = args.backgroundTaskCount === undefined
         ? 0
-        : Math.max(0, args.backgroundTaskCount - terminals.length)
+        : Math.max(0, args.backgroundTaskCount - terminals.length - backgroundAgentToolIds.size)
     const possibleTerminalCommands = undiscoveredTerminalCount > 0
         ? detectedTerminals.uncertain.map((terminal) => terminal.command)
         : []
@@ -172,7 +211,7 @@ export function buildSessionStatusData(args: {
         goal: args.goal ?? null,
         tasks: args.tasks ? [...args.tasks] : [],
         subagents: tools
-            .map(subagentFromBlock)
+            .map((block) => subagentFromBlock(block, (candidate) => backgroundAgentToolIds.has(candidate.tool.id)))
             .filter((subagent): subagent is SessionStatusSubagent => subagent !== null),
         terminals,
         undiscoveredTerminalCount,

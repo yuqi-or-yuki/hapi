@@ -85,6 +85,21 @@ type HistoryDbRow = {
     created_at: number
 }
 
+/**
+ * The first slot strictly after `now`, counted from `dueAt` in whole intervals.
+ * Anchoring to the original phase (rather than `now + interval`) is what keeps
+ * "daily at 9:00" at 9:00 after a late or retried run.
+ */
+export function nextSlotAfter(dueAt: number, intervalMs: number, now: number): number {
+    const elapsed = Math.max(0, now - dueAt)
+    return dueAt + (Math.floor(elapsed / intervalMs) + 1) * intervalMs
+}
+
+/** The latest slot at or before `now` — the run that is owed right now. */
+export function currentSlot(dueAt: number, intervalMs: number, now: number): number {
+    return nextSlotAfter(dueAt, intervalMs, now) - intervalMs
+}
+
 function mapRow(row: DbRow): ScheduledMessageRow {
     return {
         id: row.id,
@@ -281,7 +296,7 @@ export class ScheduledMessageStore {
         const occurrenceCount = (job?.occurrenceCount ?? 0) + 1
         const underLimit = job?.maxOccurrences === null || job?.maxOccurrences === undefined || occurrenceCount < job.maxOccurrences
         if (job?.intervalMs && job.intervalMs > 0 && underLimit) {
-            const nextDueAt = Math.max(now + job.intervalMs, job.dueAt + job.intervalMs)
+            const nextDueAt = nextSlotAfter(job.dueAt, job.intervalMs, now)
             this.db.query(`
                 UPDATE scheduled_messages
                 SET target_session_id = $target_session_id, due_at = $due_at, occurrence_count = $occurrence_count, sent_at = $sent_at, updated_at = $updated_at, error = NULL
@@ -307,15 +322,29 @@ export class ScheduledMessageStore {
         `).run({ id, error, updated_at: now })
     }
 
+    /**
+     * A repeating job's attempt failed. It stays pending and keeps its slot so
+     * the service can retry; a single bad resume must not end the schedule.
+     */
+    markRetry(id: string, error: string): void {
+        const job = this.getById(id)
+        if (job) this.recordHistory({ ...job, error }, 'failed')
+        this.db.query(`
+            UPDATE scheduled_messages
+            SET error = $error, updated_at = $updated_at
+            WHERE id = $id AND status = 'pending'
+        `).run({ id, error, updated_at: Date.now() })
+    }
+
     markSkipped(id: string, reason: string, nextDueAt: number): void {
         const now = Date.now()
         const job = this.getById(id)
         if (job) this.recordHistory({ ...job, dueAt: nextDueAt, error: reason }, 'skipped')
         this.db.query(`
             UPDATE scheduled_messages
-            SET due_at = $due_at, updated_at = $updated_at
+            SET due_at = $due_at, error = $error, updated_at = $updated_at
             WHERE id = $id AND status = 'pending'
-        `).run({ id, due_at: nextDueAt, updated_at: now })
+        `).run({ id, due_at: nextDueAt, error: reason, updated_at: now })
     }
 
     private get(namespace: string, id: string): ScheduledMessageRow | null {
@@ -325,7 +354,15 @@ export class ScheduledMessageStore {
         return row ? this.withHistory(mapRow(row)) : null
     }
 
-    private getById(id: string): ScheduledMessageRow | null {
+    /** Pending jobs follow a session that was resumed under a new id. */
+    retarget(oldSessionId: string, newSessionId: string): void {
+        this.db.query(`
+            UPDATE scheduled_messages SET source_session_id = ?
+            WHERE source_session_id = ? AND status = 'pending'
+        `).run(newSessionId, oldSessionId)
+    }
+
+    getById(id: string): ScheduledMessageRow | null {
         const row = this.db.query<DbRow, [string]>(`
             SELECT * FROM scheduled_messages WHERE id = ?
         `).get(id)

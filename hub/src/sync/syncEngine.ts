@@ -13,7 +13,7 @@ import {
     isMachineCapabilitySkewed,
 } from '@hapi/protocol/runnerCapabilities'
 import type { CursorChatStoreStatus, CursorMigrateOutcome, CursorMigrateToAcpRequest, MessageDeliveryMode, MessagesResponse, QueuedStateResponse, SlashCommandsResponse } from '@hapi/protocol/apiTypes'
-import type { SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
+import type { SteerQueuedMessageResponse, SwarmMembership } from '@hapi/protocol/schemas'
 import type { AgentFlavor, CodexCollaborationMode, CopilotAgentMode, DecryptedMessage, PermissionMode, Session, SyncEvent } from '@hapi/protocol/types'
 import { unwrapRoleWrappedRecordEnvelope } from '@hapi/protocol/messages'
 import type { Server } from 'socket.io'
@@ -345,6 +345,10 @@ export class SyncEngine {
         return session
     }
 
+    hasPersistedSession(sessionId: string, namespace: string): boolean {
+        return this.store.sessions.getSession(sessionId)?.namespace === namespace
+    }
+
     resolveSessionAccess(
         sessionId: string,
         namespace: string
@@ -491,6 +495,7 @@ export class SyncEngine {
         effort?: string | null
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
+        backgroundTaskCount?: number
     }): void {
         this.sessionCache.handleSessionAlive(payload)
         this.messageService.replayImmediateQueuedMessages(payload.sid)
@@ -1845,6 +1850,13 @@ export class SyncEngine {
 
     async setSessionReadyForReview(sessionId: string, readyForReview: boolean): Promise<void> {
         await this.sessionCache.setSessionReadyForReview(sessionId, readyForReview)
+    }
+
+    async setSessionSwarm(
+        sessionId: string,
+        worker: Omit<SwarmMembership, 'promotedAt'> | null
+    ): Promise<void> {
+        await this.sessionCache.setSessionSwarm(sessionId, worker)
     }
 
     async suggestSessionTitle(sessionId: string): Promise<string> {
@@ -3905,6 +3917,14 @@ export class SyncEngine {
         error?: string
     }> {
         return await this.rpcGateway.listSkills(sessionId, flavor)
+    }
+
+    async listSkillsForMachine(machineId: string, flavor?: string): Promise<{
+        success: boolean
+        skills?: Array<{ name: string; description?: string }>
+        error?: string
+    }> {
+        return await this.rpcGateway.listSkillsForMachine(machineId, flavor)
     }
 
     async listAgyModelsForMachine(machineId: string): Promise<RpcListAgyModelsResponse> {

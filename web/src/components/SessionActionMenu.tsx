@@ -36,6 +36,10 @@ type SessionActionMenuProps = {
     onDelete: () => void
     onClone?: () => void
     onSchedule?: () => void
+    /** Opens the promote dialog; absent when swarm membership can't be changed here. */
+    onPromoteToWorker?: () => void
+    onRetireWorker?: () => void
+    isWorker?: boolean
     anchorPoint: { x: number; y: number }
     menuId?: string
 }
@@ -71,6 +75,30 @@ function UnreadIcon(props: { className?: string }) {
             className={props.className}
         >
             <circle cx="12" cy="12" r="4" fill="currentColor" />
+        </svg>
+    )
+}
+
+function SwarmIcon(props: { className?: string }) {
+    return (
+        <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="18"
+            height="18"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            className={props.className}
+        >
+            <circle cx="12" cy="12" r="2.5" />
+            <circle cx="5" cy="6" r="2" />
+            <circle cx="19" cy="6" r="2" />
+            <circle cx="5" cy="18" r="2" />
+            <circle cx="19" cy="18" r="2" />
+            <path d="m6.6 7.4 3.2 3.2M17.4 7.4l-3.2 3.2M6.6 16.6l3.2-3.2M17.4 16.6l-3.2-3.2" />
         </svg>
     )
 }
@@ -263,6 +291,9 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
         reopenHint,
         onDelete,
         onClone,
+        onPromoteToWorker,
+        onRetireWorker,
+        isWorker = false,
         anchorPoint,
         menuId
     } = props
@@ -499,6 +530,38 @@ export function SessionActionMenu(props: SessionActionMenuProps) {
                     >
                         <UnreadIcon className="text-[var(--app-hint)]" />
                         {t('session.action.markUnread')}
+                    </button>
+                ) : null}
+
+                {onPromoteToWorker ? (
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
+                        onClick={() => {
+                            haptic.selection()
+                            onClose()
+                            onPromoteToWorker()
+                        }}
+                    >
+                        <SwarmIcon className="text-[var(--app-hint)]" />
+                        {t(isWorker ? 'session.action.editJob' : 'session.action.promoteToWorker')}
+                    </button>
+                ) : null}
+
+                {isWorker && onRetireWorker ? (
+                    <button
+                        type="button"
+                        role="menuitem"
+                        className={`${baseItemClassName} hover:bg-[var(--app-subtle-bg)]`}
+                        onClick={() => {
+                            haptic.selection()
+                            onClose()
+                            onRetireWorker()
+                        }}
+                    >
+                        <SwarmIcon className="text-[var(--app-hint)]" />
+                        {t('session.action.retireWorker')}
                     </button>
                 ) : null}
 

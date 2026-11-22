@@ -81,7 +81,7 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 type: 'error' as const,
                 message: 'This runner must be upgraded before creating sessions',
                 code: 'runner_upgrade_required' as const,
-            })
+            }, 409)
         }
 
         const body = await c.req.json().catch(() => null)
@@ -116,6 +116,12 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             parsed.data.copilotAgentMode,
             startingMode
         )
+        if (result.type === 'error') {
+            return c.json(result, result.code === 'outside_workspace_roots' ? 403 : 502)
+        }
+        if (!engine.hasPersistedSession(result.sessionId, c.get('namespace'))) {
+            return c.json({ type: 'error', message: 'Runner reported success but the session was not persisted' }, 502)
+        }
         return c.json(result)
     })
 
@@ -247,6 +253,40 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
             return c.json({
                 success: false,
                 error: error instanceof Error ? error.message : 'Failed to list Pi models'
+            }, 500)
+        }
+    })
+
+    app.get('/machines/:id/skills', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) {
+            return machine
+        }
+
+        // Skill roots differ per agent (~/.claude/skills, ~/.codex/skills, ...),
+        // so the catalog is only meaningful for one flavor at a time.
+        const flavor = c.req.query('flavor') || undefined
+
+        try {
+            const result = await engine.listSkillsForMachine(machineId, flavor)
+            return c.json(result)
+        } catch (error) {
+            if (error instanceof RpcTargetMissingError) {
+                return c.json({
+                    success: false,
+                    error: error.message,
+                    code: RPC_TARGET_MISSING_ERROR_CODE
+                }, 503)
+            }
+            return c.json({
+                success: false,
+                error: error instanceof Error ? error.message : 'Failed to list skills'
             }, 500)
         }
     })

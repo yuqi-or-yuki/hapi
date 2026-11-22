@@ -19,6 +19,7 @@ import { hookForwarderCommand } from './hookForwarder'
 import { mcpCommand } from './mcp'
 import { notifyCommand } from './notify'
 import { scheduleCommand } from './schedule'
+import { workerCommand } from './worker'
 import { hubCommand } from './hub'
 import type { CommandContext, CommandDefinition } from './types'
 
@@ -60,7 +61,8 @@ const COMMANDS: CommandDefinition[] = [
     resumeCommand,
     runnerCommand,
     notifyCommand,
-    scheduleCommand
+    scheduleCommand,
+    workerCommand
 ]
 
 const commandMap = new Map<string, CommandDefinition>()
@@ -68,10 +70,85 @@ for (const command of COMMANDS) {
     commandMap.set(command.name, command)
 }
 
+/**
+ * Words that are not registered commands but must still fall through to the
+ * default command with their arguments untouched.
+ *
+ * `claude` is how the runner launches every Claude session
+ * (`hapi claude --hapi-starting-mode remote …`, see runner/run.ts
+ * buildCliArgs): the default command is registered under the name `default`,
+ * so `claude` only ever worked by falling through. Treating it as an unknown
+ * subcommand would stop Claude sessions spawning at all.
+ */
+const FALLTHROUGH_WORDS = new Set(['claude'])
+
+/**
+ * A bare lowercase word with no spaces, e.g. `worker` — the shape of a
+ * subcommand, not of a prompt. Anything a person would actually type as a
+ * prompt has a space, a capital, or punctuation in it.
+ */
+function looksLikeSubcommand(arg: string): boolean {
+    return !FALLTHROUGH_WORDS.has(arg) && /^[a-z][a-z0-9-]*$/.test(arg)
+}
+
+/** Levenshtein distance, capped: we only care about near-misses. */
+function editDistance(a: string, b: string): number {
+    let previous = Array.from({ length: b.length + 1 }, (_, i) => i)
+    for (let i = 1; i <= a.length; i++) {
+        const current = [i]
+        for (let j = 1; j <= b.length; j++) {
+            current[j] = a[i - 1] === b[j - 1]
+                ? previous[j - 1]
+                : Math.min(previous[j - 1], previous[j], current[j - 1]) + 1
+        }
+        previous = current
+    }
+    return previous[b.length]
+}
+
+export function suggestCommand(subcommand: string, names: readonly string[] = [...commandMap.keys()]): string | null {
+    let best: { name: string; distance: number } | null = null
+    for (const name of names) {
+        const distance = editDistance(subcommand, name)
+        if (distance <= Math.max(2, Math.floor(name.length / 3)) && (!best || distance < best.distance)) {
+            best = { name, distance }
+        }
+    }
+    return best?.name ?? null
+}
+
+/**
+ * Reports an unrecognised subcommand instead of silently treating it as a
+ * prompt.
+ *
+ * The fall-through to `claudeCommand` is deliberate for real prompts, but a
+ * bare word that is *meant* to be a subcommand used to start a whole agent
+ * session that then sat waiting for input forever — which is what happened
+ * when a skill called `hapi worker status` against a build that predated the
+ * `worker` command: two orphan sessions, no error, no output.
+ */
+const unknownCommand: CommandDefinition = {
+    name: 'unknown',
+    requiresRuntimeAssets: false,
+    run: async (context) => {
+        const subcommand = context.subcommand ?? ''
+        const suggestion = suggestCommand(subcommand)
+        console.error(chalk.red('Error:'), `Unknown command "${subcommand}".`)
+        if (suggestion) {
+            console.error(`Did you mean ${chalk.cyan(`hapi ${suggestion}`)}?`)
+        }
+        console.error(`Run ${chalk.cyan('hapi --help')} for the command list,`)
+        console.error(`or quote it to send as a prompt: ${chalk.cyan(`hapi "${context.args.join(' ')}"`)}`)
+        process.exit(1)
+    }
+}
+
 export function resolveCommand(args: string[]): { command: CommandDefinition; context: CommandContext } {
     const subcommand = args[0]
     const command = subcommand ? commandMap.get(subcommand) : undefined
-    const resolvedCommand = command ?? claudeCommand
+    // No args, a flag, or anything prompt-shaped still starts a session.
+    const resolvedCommand = command
+        ?? (subcommand && looksLikeSubcommand(subcommand) ? unknownCommand : claudeCommand)
     const commandArgs = command ? args.slice(1) : args
 
     return {

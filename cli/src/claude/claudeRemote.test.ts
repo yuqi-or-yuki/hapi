@@ -109,6 +109,108 @@ describe('claudeRemote async message handling', () => {
         }
     });
 
+    it('reports the live background task count, skipping ambient tasks, and resets it when the stream ends', async () => {
+        const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation(queryMock as typeof claudeSdk.query);
+        const { claudeRemote } = await import('./claudeRemote');
+        const counts: number[] = [];
+
+        queryMock.mockReturnValueOnce(createAsyncStream([
+            {
+                type: 'system',
+                subtype: 'background_tasks_changed',
+                tasks: [
+                    { task_id: 'a', task_type: 'local_agent', description: 'Review' },
+                    { task_id: 'b', task_type: 'local_bash', description: 'Experiment' },
+                    { task_id: 'c', task_type: 'monitor', description: 'Watcher', ambient: true }
+                ]
+            } as unknown as SDKMessage,
+            { type: 'result', subtype: 'success' } as unknown as SDKMessage,
+            {
+                type: 'system',
+                subtype: 'background_tasks_changed',
+                tasks: [{ task_id: 'b', task_type: 'local_bash', description: 'Experiment' }]
+            } as unknown as SDKMessage
+        ]));
+
+        let nextCallCount = 0;
+        try {
+            await claudeRemote({
+                sessionId: 'session-1',
+                path: process.cwd(),
+                mcpServers: {},
+                claudeEnvVars: {},
+                claudeArgs: [],
+                allowedTools: [],
+                hookSettingsPath: '/tmp/hook.json',
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                nextMessage: async () => nextCallCount++ === 0
+                    ? { message: 'Go', mode: { permissionMode: 'default' } }
+                    : null,
+                onReady: () => {},
+                isAborted: () => false,
+                onSessionFound: () => {},
+                onMessage: () => {},
+                onBackgroundTaskCountChange: (count) => counts.push(count)
+            });
+
+            expect(counts).toEqual([0, 2, 1, 0]);
+        } finally {
+            queryMock.mockReset();
+            querySpy.mockRestore();
+        }
+    });
+
+    it('ends the attempt at the next result when a mode switch parks the prompt', async () => {
+        const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation(queryMock as typeof claudeSdk.query);
+        const { claudeRemote } = await import('./claudeRemote');
+
+        // A session with live background work keeps emitting after its result.
+        // Before the fix the loop consumed these forever with input closed, so
+        // the parked prompt was never relaunched and every later prompt queued
+        // against a session that still looked healthy.
+        let consumedAfterResult = 0;
+        const stream = {
+            async *[Symbol.asyncIterator]() {
+                yield { type: 'result', subtype: 'success' } as unknown as SDKMessage;
+                yield { type: 'result', subtype: 'success' } as unknown as SDKMessage;
+                for (;;) {
+                    consumedAfterResult += 1;
+                    await Promise.resolve();
+                    yield { type: 'assistant', message: { role: 'assistant', content: [] } } as unknown as SDKMessage;
+                }
+            }
+        };
+        queryMock.mockReturnValueOnce(stream);
+
+        let nextCallCount = 0;
+        try {
+            await claudeRemote({
+                sessionId: 'session-1',
+                path: process.cwd(),
+                mcpServers: {},
+                claudeEnvVars: {},
+                claudeArgs: [],
+                allowedTools: [],
+                hookSettingsPath: '/tmp/hook.json',
+                canCallTool: async () => ({ behavior: 'allow', updatedInput: {} }),
+                // First call feeds the turn; the second parks a mode-switched
+                // message in the launcher and reports "no more input".
+                nextMessage: async () => nextCallCount++ === 0
+                    ? { message: 'Go', mode: { permissionMode: 'default' } }
+                    : null,
+                onReady: () => {},
+                isAborted: () => false,
+                onSessionFound: () => {},
+                onMessage: () => {}
+            });
+        } finally {
+            queryMock.mockReset();
+            querySpy.mockRestore();
+        }
+
+        expect(consumedAfterResult).toBe(0);
+    });
+
     it('waits for async onReady work before completing the result stream', async () => {
         const querySpy = vi.spyOn(claudeSdk, 'query').mockImplementation(queryMock as typeof claudeSdk.query);
         const { claudeRemote } = await import('./claudeRemote');

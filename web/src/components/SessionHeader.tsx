@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useIsMutating, useQueryClient } from '@tanstack/react-query'
-import type { Session } from '@/types/api'
+import type { Session, SessionsResponse } from '@/types/api'
 import type { ApiClient } from '@/api/client'
 import { isTelegramApp } from '@/hooks/useTelegram'
 import { sessionModelMutationKey, useSessionActions } from '@/hooks/mutations/useSessionActions'
@@ -16,7 +16,10 @@ import { formatReasoningLabel, getReasoningEffortForFlavor } from '@/lib/codexSt
 import { retargetSharePendingTransfer } from '@/lib/sharePendingState'
 import { getSessionModelLabel } from '@/lib/sessionModelLabel'
 import { useTranslation } from '@/lib/use-translation'
+import { PromoteToWorkerDialog, type WorkerDraft } from '@/components/Swarm/PromoteToWorkerDialog'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+import { WorkerAvatar } from '@/components/Swarm/WorkerAvatar'
+import { workerName, workerSeed } from '@/components/Swarm/worker'
 import { isFastServiceTier } from '@/components/AssistantChat/codexFastMode'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { useToast } from '@/lib/toast-context'
@@ -228,6 +231,7 @@ export function SessionHeader(props: {
     const [deleteOpen, setDeleteOpen] = useState(false)
     const [cloneOpen, setCloneOpen] = useState(false)
     const [scheduleOpen, setScheduleOpen] = useState(false)
+    const [promoteOpen, setPromoteOpen] = useState(false)
     const [isSyncingCodex, setIsSyncingCodex] = useState(false)
     const [isSyncingPi, setIsSyncingPi] = useState(false)
 
@@ -237,6 +241,30 @@ export function SessionHeader(props: {
         session.metadata?.flavor ?? null
     )
     const [reopenError, setReopenError] = useState<string | null>(null)
+
+    const swarm = session.metadata?.swarm ?? null
+    // Only the session list carries the worker's clock; the dialog needs it to show the current schedule.
+    const workerRun = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions)
+        ?.sessions.find((item) => item.id === session.id)?.workerRun
+
+    const handleSetSwarmJob = async (worker: WorkerDraft | null) => {
+        if (!api) throw new Error('Not connected')
+        await api.setSessionSwarm(session.id, worker)
+        await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+    }
+
+    const handleRetireWorker = async () => {
+        try {
+            await handleSetSwarmJob(null)
+        } catch (error) {
+            addToast({
+                title: t('swarm.updateFailed'),
+                body: error instanceof Error ? error.message : t('dialog.error.default'),
+                sessionId: session.id,
+                url: `/sessions/${session.id}`
+            })
+        }
+    }
 
     const handleSetPinMode = async (mode: 'none' | 'project' | 'global') => {
         try {
@@ -404,6 +432,12 @@ export function SessionHeader(props: {
                         </svg>
                     </button>
 
+                    {swarm ? (
+                        <span title={workerName(session)}>
+                            <WorkerAvatar seed={workerSeed(session)} size={32} />
+                        </span>
+                    ) : null}
+
                     {/* Session info - two lines: title and path */}
                     <div className="min-w-0 flex-1">
                         <div className="truncate font-semibold">
@@ -564,8 +598,19 @@ export function SessionHeader(props: {
                 onDelete={() => setDeleteOpen(true)}
                 onClone={() => setCloneOpen(true)}
                 onSchedule={() => setScheduleOpen(true)}
+                isWorker={Boolean(swarm)}
+                onPromoteToWorker={api ? () => setPromoteOpen(true) : undefined}
+                onRetireWorker={api ? () => void handleRetireWorker() : undefined}
                 anchorPoint={menuAnchorPoint}
                 menuId={menuId}
+            />
+
+            <PromoteToWorkerDialog
+                isOpen={promoteOpen}
+                onClose={() => setPromoteOpen(false)}
+                sessionTitle={title}
+                worker={{ id: session.id, flavor: session.metadata?.flavor, swarm, workerRun }}
+                onPromote={(draft) => handleSetSwarmJob(draft)}
             />
 
             {reopenError ? (

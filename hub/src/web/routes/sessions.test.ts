@@ -176,7 +176,8 @@ function createApp(session: Session, opts?: {
     const store = {
         scheduledMessages: {
             list: () => (opts?.pendingScheduledMessages ?? []) as ScheduledMessageRow[]
-        }
+        },
+        workerRecords: { stats: () => new Map() }
     } as unknown as Store
 
     const app = new Hono<WebAppEnv>()

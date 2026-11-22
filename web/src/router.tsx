@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
     Navigate,
     Outlet,
@@ -20,6 +20,11 @@ import {
 import { App } from '@/App'
 import { SessionChat } from '@/components/SessionChat'
 import { SessionList } from '@/components/SessionList'
+import { SwarmView } from '@/components/Swarm/SwarmView'
+import { SkillsView, skillInvocation } from '@/components/Skills/SkillsView'
+import { useMachineSkills, type UnifiedSkill } from '@/hooks/queries/useMachineSkills'
+import { saveDraft } from '@/lib/composer-drafts'
+import { SwarmRailIcon, SkillsRailIcon } from '@/components/AppRail'
 import { HeaderOverflowMenu } from '@/components/HeaderOverflowMenu'
 import { CodexSessionSyncDialog } from '@/components/CodexSessionSyncDialog'
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog'
@@ -39,6 +44,10 @@ import { useSessions } from '@/hooks/queries/useSessions'
 import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
 import { useSkills } from '@/hooks/queries/useSkills'
 import { getSessionTitle } from '@/lib/sessionTitle'
+import { PromoteToWorkerDialog } from '@/components/Swarm/PromoteToWorkerDialog'
+import { WorkerBoard } from '@/components/Swarm/WorkerBoard'
+import { WorkerDetails } from '@/components/Swarm/WorkerDetails'
+import type { SetSessionSwarmRequest } from '@hapi/protocol/apiTypes'
 import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { useSendMessage, type SendErrorInfo } from '@/hooks/mutations/useSendMessage'
@@ -47,6 +56,7 @@ import { ApiError } from '@/api/client'
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import { queryKeys } from '@/lib/query-keys'
 import { useToast } from '@/lib/toast-context'
+import { safeCopyToClipboard } from '@/lib/clipboard'
 import { useTranslation } from '@/lib/use-translation'
 import { seedMessageWindowFromSession, syncTailMessages } from '@/lib/message-window-store'
 import { clearDraftsAfterSend } from '@/lib/clearDraftsAfterSend'
@@ -476,6 +486,223 @@ function getMachineTitle(machine: Machine): string {
     return machine.id.slice(0, 8)
 }
 
+function SkillsPage() {
+    const { api } = useAppContext()
+    const goBack = useAppGoBack()
+    const navigate = useNavigate()
+    const { t } = useTranslation()
+    const { addToast } = useToast()
+    const { machines } = useMachines(api, true)
+    const machineLabelsById = useMachineLabels(machines)
+    const { sessions } = useSessions(api)
+    const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
+    // Default to the first machine once the list arrives, but never override a
+    // machine the operator picked.
+    const machineId = selectedMachineId ?? machines[0]?.id ?? null
+    const { skills, isLoading, failedFlavors, error, refetch } = useMachineSkills(api, machineId)
+
+    const handleCopy = useCallback(async (skill: UnifiedSkill) => {
+        const invocation = skillInvocation(skill.name)
+        try {
+            await safeCopyToClipboard(invocation)
+            addToast({ title: t('skills.copied', { invocation }), body: '', sessionId: '', url: '' })
+        } catch {
+            addToast({ title: t('skills.copyFailed'), body: '', sessionId: '', url: '' })
+        }
+    }, [addToast, t])
+
+    // Load the invocation into that session's composer and go there, rather
+    // than sending it: running a skill is the operator's call, not a side
+    // effect of browsing the catalog.
+    const handleUse = useCallback((skill: UnifiedSkill, sessionId: string) => {
+        saveDraft(sessionId, skillInvocation(skill.name))
+        navigate(getSessionListSelectionNavigation(sessionId))
+    }, [navigate])
+
+    return (
+        <div className="flex h-full min-h-0 flex-col bg-[var(--app-bg)]">
+            <div className="flex items-center gap-2 border-b border-[var(--app-border)] p-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
+                <button
+                    type="button"
+                    onClick={goBack}
+                    aria-label={t('button.back')}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)]"
+                >
+                    <BackIcon />
+                </button>
+                <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-[var(--app-fg)]">{t('skills.title')}</div>
+                    <div className="truncate text-xs text-[var(--app-hint)]">{t('skills.subtitle')}</div>
+                </div>
+            </div>
+            <div className="app-scroll-y flex-1 min-h-0">
+                <SkillsView
+                    machines={machines}
+                    machineLabelsById={machineLabelsById}
+                    machineId={machineId}
+                    onMachineChange={setSelectedMachineId}
+                    skills={skills}
+                    isLoading={isLoading}
+                    failedFlavors={failedFlavors}
+                    error={error}
+                    onRetry={refetch}
+                    sessions={sessions}
+                    onCopy={(skill) => void handleCopy(skill)}
+                    onUse={handleUse}
+                />
+            </div>
+        </div>
+    )
+}
+
+/**
+ * The one way the web changes a worker: write the swarm record, refresh the
+ * list, and surface a failure as a toast. `null` retires the worker.
+ */
+function useUpdateWorker() {
+    const { api } = useAppContext()
+    const { addToast } = useToast()
+    const { t } = useTranslation()
+    const queryClient = useQueryClient()
+
+    return useCallback(async (sessionId: string, worker: SetSessionSwarmRequest | null): Promise<boolean> => {
+        try {
+            await api.setSessionSwarm(sessionId, worker)
+            await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+            return true
+        } catch (error) {
+            addToast({
+                title: t('swarm.updateFailed'),
+                body: error instanceof Error ? error.message : t('dialog.error.default'),
+                sessionId,
+                url: `/sessions/${sessionId}`
+            })
+            return false
+        }
+    }, [addToast, api, queryClient, t])
+}
+
+function SwarmPage() {
+    const { api } = useAppContext()
+    const navigate = useNavigate()
+    const goBack = useAppGoBack()
+    const { t } = useTranslation()
+    const { sessions } = useSessions(api)
+    const updateWorker = useUpdateWorker()
+
+    return (
+        <div className="flex h-full min-h-0 flex-col bg-[var(--app-bg)]">
+            <div className="flex items-center gap-2 border-b border-[var(--app-border)] p-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
+                <button
+                    type="button"
+                    onClick={goBack}
+                    aria-label={t('button.back')}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)]"
+                >
+                    <BackIcon />
+                </button>
+                <div className="min-w-0 flex-1">
+                    <div className="font-semibold text-[var(--app-fg)]">{t('swarm.title')}</div>
+                    <div className="truncate text-xs text-[var(--app-hint)]">{t('swarm.subtitle')}</div>
+                </div>
+            </div>
+            <div className="app-scroll-y flex-1 min-h-0">
+                <SwarmView
+                    sessions={sessions}
+                    onOpenWorker={(sessionId) => navigate({ to: '/swarm/$sessionId', params: { sessionId } })}
+                    onApprove={(session) => {
+                        const swarm = session.metadata?.swarm
+                        if (swarm?.review) void updateWorker(session.id, { job: swarm.job, reviewRuns: swarm.review.runsLeft - 1 })
+                    }}
+                />
+            </div>
+        </div>
+    )
+}
+
+/** One worker: who it is and how it is doing, then the board of what it has produced. */
+function WorkerPage() {
+    const { api } = useAppContext()
+    const navigate = useNavigate()
+    const { t } = useTranslation()
+    const { sessionId } = useParams({ from: '/swarm/$sessionId' })
+    const { sessions } = useSessions(api)
+    const { machines } = useMachines(api, true)
+    const machineLabelsById = useMachineLabels(machines)
+    const updateWorker = useUpdateWorker()
+    const queryClient = useQueryClient()
+    const [editing, setEditing] = useState(false)
+    const session = sessions.find((item) => item.id === sessionId) ?? null
+    const swarm = session?.metadata?.swarm
+    // Polled rather than pushed: rows arrive in bursts at the end of a run, and
+    // a board is something you glance at, not something you watch tick.
+    const { data, isLoading, error } = useQuery({
+        queryKey: ['worker-records', sessionId],
+        queryFn: () => api.getWorkerRecords(sessionId),
+        refetchInterval: 15_000
+    })
+    const actionClass = 'rounded-full border border-[var(--app-border)] px-3 py-1.5 text-xs font-medium text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)]'
+
+    return (
+        <div className="flex h-full min-h-0 flex-col bg-[var(--app-bg)]">
+            <div className="flex items-center gap-2 border-b border-[var(--app-border)] p-3 pt-[calc(0.75rem+env(safe-area-inset-top))]">
+                <button
+                    type="button"
+                    onClick={() => navigate({ to: '/swarm' })}
+                    aria-label={t('button.back')}
+                    className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)]"
+                >
+                    <BackIcon />
+                </button>
+                <div className="min-w-0 flex-1 font-semibold text-[var(--app-fg)]">{t('swarm.title')}</div>
+                {session && swarm ? (
+                    <>
+                        <button type="button" className={actionClass} onClick={() => navigate(getSessionListSelectionNavigation(session.id))}>
+                            {t('swarm.openSession')}
+                        </button>
+                        <button type="button" className={actionClass} onClick={() => setEditing(true)}>
+                            {t('swarm.edit')}
+                        </button>
+                        <button
+                            type="button"
+                            className="px-2 py-1.5 text-xs text-[var(--app-hint)] hover:text-[var(--app-fg)]"
+                            onClick={() => void updateWorker(session.id, null).then((ok) => { if (ok) void navigate({ to: '/swarm' }) })}
+                        >
+                            {t('swarm.retire')}
+                        </button>
+                    </>
+                ) : null}
+            </div>
+            {session && swarm ? (
+                <div className="app-scroll-y flex-1 min-h-0">
+                    <WorkerDetails
+                        session={session}
+                        machineLabel={session.metadata?.machineId ? machineLabelsById[session.metadata.machineId] ?? null : null}
+                        onReview={(runsLeft) => void updateWorker(session.id, { job: swarm.job, reviewRuns: runsLeft })}
+                    />
+                    <WorkerBoard
+                        session={session}
+                        records={data?.records ?? []}
+                        isLoading={isLoading}
+                        error={error instanceof Error ? error.message : null}
+                    />
+                    <PromoteToWorkerDialog
+                        isOpen={editing}
+                        onClose={() => setEditing(false)}
+                        sessionTitle={getSessionTitle(session)}
+                        worker={{ id: session.id, flavor: session.metadata?.flavor, swarm, workerRun: session.workerRun }}
+                        onPromote={async (draft) => {
+                            // Thrown errors stay in the dialog, next to the fields that caused them.
+                            await api.setSessionSwarm(session.id, draft)
+                            await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+                        }}
+                    />
+                </div>
+            ) : null}
+        </div>
+    )
+}
+
 function SessionsPage() {
     const {
         api,
@@ -489,7 +716,8 @@ function SessionsPage() {
         unreadDoneOrders,
         clearUnreadDone,
         baseUrl,
-        titleSuggestionAvailable = false
+        titleSuggestionAvailable = false,
+        sidebarCollapsed
     } = useAppContext()
     const queryClient = useQueryClient()
     const navigate = useNavigate()
@@ -841,7 +1069,7 @@ function SessionsPage() {
         <>
             <div className="flex h-full min-h-0">
             <div
-                className={`${isSessionsIndex ? 'flex' : 'hidden split:flex'} w-full shrink-0 flex-col bg-[var(--app-bg)]`}
+                className={`${isSessionsIndex ? 'flex' : 'hidden split:flex'} ${sidebarCollapsed ? 'split:hidden' : ''} w-full shrink-0 flex-col bg-[var(--app-bg)]`}
                 style={{ '--sidebar-w': `${sidebar.width}px` } as React.CSSProperties}
             >
                 <div className="bg-[var(--app-bg)] pt-[env(safe-area-inset-top)]">
@@ -907,6 +1135,8 @@ function SessionsPage() {
                                 onClose={() => setIsMoreMenuOpen(false)}
                                 triggerRef={moreButtonRef}
                                 items={[
+                                    { key: 'swarm', icon: <SwarmRailIcon className="h-4 w-4" />, label: t('rail.swarm'), onClick: () => navigate({ to: '/swarm' }) },
+                                    { key: 'skills', icon: <SkillsRailIcon className="h-4 w-4" />, label: t('rail.skills'), onClick: () => navigate({ to: '/skills' }) },
                                     { key: 'jobs', icon: <CalendarClockIcon className="h-4 w-4" />, label: 'Scheduled jobs', onClick: () => navigate({ to: '/scheduled-jobs' }) },
                                     { key: 'codex-sync', icon: <CodexImportIcon className="h-4 w-4" />, label: t('codexSync.tooltip'), onClick: () => void openCodexImportDialog() },
                                     { key: 'browse', icon: <FolderOpenIcon className="h-4 w-4" />, label: t('browse.nav'), onClick: () => navigate({ to: '/browse' }) },
@@ -1019,7 +1249,7 @@ function SessionsPage() {
 
             {/* Resize handle - desktop only */}
             <div
-                className="sidebar-resize-handle hidden split:block shrink-0"
+                className={`sidebar-resize-handle hidden ${sidebarCollapsed ? '' : 'split:block'} shrink-0`}
                 data-dragging={sidebar.isDragging || undefined}
                 onPointerDown={sidebar.onPointerDown}
             />
@@ -2257,6 +2487,24 @@ const scheduledJobsRoute = createRoute({
     component: ScheduledJobsPage,
 })
 
+const skillsRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/skills',
+    component: SkillsPage,
+})
+
+const swarmRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/swarm',
+    component: SwarmPage,
+})
+
+const workerBoardRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/swarm/$sessionId',
+    component: WorkerPage,
+})
+
 export const routeTree = rootRoute.addChildren([
     indexRoute,
     sessionsRoute.addChildren([
@@ -2269,6 +2517,9 @@ export const routeTree = rootRoute.addChildren([
         ]),
     ]),
     browseRoute,
+    swarmRoute,
+    workerBoardRoute,
+    skillsRoute,
     scheduledJobsRoute,
     settingsRoute.addChildren([
         settingsIndexRoute,

@@ -486,4 +486,22 @@ describe('cli session handlers', () => {
             supersededBySessionId: 'owned-target', opencodeClearOperation: operation, lifecycleState: 'archived'
         })
     })
+
+    it('keeps a session a swarm worker when the CLI writes metadata that predates the promotion', () => {
+        const store = new Store(':memory:')
+        const swarm = { job: 'Keep the pipeline topped up', promotedAt: 1 }
+        const session = store.sessions.getOrCreateSession('worker-stays', { path: '/tmp/project', swarm }, null, 'default')
+        const socket = new FakeSocket()
+        registerSessionHandlers(socket as unknown as CliSocketWithData, {
+            store,
+            resolveSessionAccess: () => ({ ok: true, value: session as StoredSession }),
+            emitAccessError: () => { throw new Error('unexpected access error') }
+        })
+        socket.trigger('update-metadata', {
+            sid: session.id,
+            expectedVersion: session.metadataVersion,
+            metadata: { path: '/tmp/project', summary: { text: 'new prompt', updatedAt: 2 } }
+        }, () => {})
+        expect(store.sessions.getSessionByNamespace(session.id, 'default')?.metadata).toMatchObject({ swarm })
+    })
 })

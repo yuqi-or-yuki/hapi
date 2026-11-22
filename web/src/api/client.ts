@@ -1,3 +1,6 @@
+import type { SetSessionSwarmRequest } from '@hapi/protocol/apiTypes'
+
+export type WorkerRecord = { key: string; data: Record<string, unknown>; createdAt: number; updatedAt: number }
 import type {
     AttachmentMetadata,
     AuthResponse,
@@ -999,6 +1002,13 @@ export class ApiClient {
         )
     }
 
+    /** Skills the runner on this machine can see, for one agent flavor. */
+    async getMachineSkills(machineId: string, flavor: string): Promise<SkillsResponse> {
+        return await this.request<SkillsResponse>(
+            `/api/machines/${encodeURIComponent(machineId)}/skills?flavor=${encodeURIComponent(flavor)}`
+        )
+    }
+
     async renameSession(sessionId: string, name: string): Promise<void> {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
             method: 'PATCH',
@@ -1025,6 +1035,18 @@ export class ApiClient {
             method: 'PATCH',
             body: JSON.stringify({ text })
         })
+    }
+
+    /** Promote a session to a swarm worker, or pass `null` to retire it. */
+    async setSessionSwarm(sessionId: string, worker: SetSessionSwarmRequest | null): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/swarm`, {
+            method: 'PUT',
+            body: JSON.stringify(worker ?? { job: null })
+        })
+    }
+
+    async getWorkerRecords(sessionId: string): Promise<{ records: WorkerRecord[] }> {
+        return await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/worker-records`)
     }
 
     async setSessionPinMode(sessionId: string, mode: 'none' | 'project' | 'global'): Promise<void> {

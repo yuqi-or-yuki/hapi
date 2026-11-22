@@ -285,7 +285,13 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
         preferences: store.preferences
     })
 
-    scheduledMessageService = new ScheduledMessageService(store, () => syncEngine)
+    scheduledMessageService = new ScheduledMessageService(store, () => syncEngine, (session, summary) => {
+        for (const channel of notificationChannels) {
+            void channel.sendTaskNotification(session, { summary, status: 'failed' }).catch((error) => {
+                console.error('[scheduled] failed to send alert', error)
+            })
+        }
+    })
     scheduledMessageService.start()
 
     // Start HTTP service first (before tunnel, so tunnel has something to forward to)

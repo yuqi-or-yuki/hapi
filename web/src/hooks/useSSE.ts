@@ -559,7 +559,9 @@ export function useSSE(options: {
                     nextScheduledAt: existing?.nextScheduledAt ?? null,
                     // Only the list route computes this; keep it rather than
                     // wiping the schedule chip on every full-session event.
-                    scheduledDueAts: existing?.scheduledDueAts ?? []
+                    scheduledDueAts: existing?.scheduledDueAts ?? [],
+                    workerRun: existing?.workerRun,
+                    workerBoard: existing?.workerBoard
                 }
                 const nextSessions = previous.sessions.slice()
                 if (existingIndex >= 0) {

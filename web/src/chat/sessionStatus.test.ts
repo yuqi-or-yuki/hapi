@@ -92,6 +92,28 @@ describe('buildSessionStatusData', () => {
         ])
     })
 
+    it('keeps a background agent running until its task notification arrives', () => {
+        const blocks: ChatBlock[] = [toolBlock({
+            name: 'Agent',
+            tool: {
+                id: 'agent-bg',
+                state: 'completed',
+                input: { description: 'Review plan' },
+                result: [{ type: 'text', text: 'Async agent launched successfully.\nagentId: abc123 (internal ID)' }]
+            },
+            children: [toolBlock({ name: 'Bash', tool: { state: 'completed' } })]
+        })]
+        const status = (messages: NormalizedMessage[], backgroundTaskCount?: number) =>
+            buildSessionStatusData({ goal: null, tasks: [], blocks, messages, backgroundTaskCount })
+
+        expect(status([], 1)).toEqual(expect.objectContaining({
+            subagents: [expect.objectContaining({ id: 'agent-bg', title: 'Review plan', detail: 'Bash', state: 'running', endedAt: null })],
+            undiscoveredTerminalCount: 0
+        }))
+        expect(status([taskNotification('abc123')], 1)?.subagents).toEqual([])
+        expect(status([], 0)).toBeNull()
+    })
+
     it('tracks Claude background terminals until their task notification arrives', () => {
         const blocks: ChatBlock[] = [toolBlock({
             name: 'Agent',

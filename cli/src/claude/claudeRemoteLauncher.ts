@@ -512,6 +512,7 @@ class ClaudeRemoteLauncher extends RemoteLauncherBase {
                             session.consumeOneTimeFlags();
                         },
                         onThinkingChange: session.onThinkingChange,
+                        onBackgroundTaskCountChange: session.onBackgroundTaskCountChange,
                         claudeEnvVars: session.claudeEnvVars,
                         claudeArgs: session.claudeArgs,
                         onMessage,

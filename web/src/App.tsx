@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Outlet, useLocation, useMatchRoute, useRouter } from '@tanstack/react-router'
+import { useNavigate } from '@tanstack/react-router'
+import { AppRail } from '@/components/AppRail'
+import { useSidebarCollapse } from '@/hooks/useSidebarCollapse'
+import { useSessions } from '@/hooks/queries/useSessions'
+import { useMachines } from '@/hooks/queries/useMachines'
+import { selectWorkers } from '@/components/Swarm/SwarmView'
 import { useQueryClient } from '@tanstack/react-query'
 import { getTelegramWebApp, isTelegramApp } from '@/hooks/useTelegram'
 import { initializeChatSurfaceColors } from '@/hooks/useChatSurfaceColors'
@@ -160,6 +166,17 @@ function AppInner() {
     const { token, api, isLoading: isAuthLoading, error: authError, needsBinding, bind } = useAuth(authSource, baseUrl)
     const [titleSuggestionAvailable, setTitleSuggestionAvailable] = useState(false)
     const goBack = useAppGoBack()
+    const navigate = useNavigate()
+    const sidebarCollapse = useSidebarCollapse()
+    // Rail data. Both queries are shared by key with the pages that already use
+    // them, so mounting them here costs no extra request once a page has loaded.
+    const { sessions: railSessions } = useSessions(api)
+    const { machines: railMachines } = useMachines(api, true)
+    const workerCount = useMemo(() => selectWorkers(railSessions).length, [railSessions])
+    const canBrowse = useMemo(
+        () => railMachines.some((machine) => (machine.metadata?.workspaceRoots?.length ?? 0) > 0),
+        [railMachines]
+    )
     const pathname = useLocation({ select: (location) => location.pathname })
     const matchRoute = useMatchRoute()
     const router = useRouter()
@@ -661,6 +678,18 @@ function AppInner() {
         )
     }
 
+    const railSection = pathname.startsWith('/swarm')
+        ? 'swarm' as const
+        : pathname.startsWith('/skills')
+            ? 'skills' as const
+            : pathname.startsWith('/browse')
+            ? 'browse' as const
+            : pathname.startsWith('/settings')
+                ? 'settings' as const
+                : pathname.startsWith('/sessions')
+                    ? 'sessions' as const
+                    : null
+
     return (
         <AppContextProvider value={{
             api,
@@ -675,7 +704,9 @@ function AppInner() {
             setAllDoneRing,
             previewAgentDoneRing,
             unreadDoneOrders,
-            clearUnreadDone
+            clearUnreadDone,
+            sidebarCollapsed: sidebarCollapse.collapsed,
+            toggleSidebarCollapsed: sidebarCollapse.toggle
         }}>
             <VoiceProvider>
                 <PwaUpdateBannerWithStatusOffset
@@ -693,8 +724,23 @@ function AppInner() {
                     isReconnecting={showReconnectingBanner}
                 />
                 <RunnerVersionSkewBanner />
-                <div className="h-full min-h-0 flex flex-col">
-                    <Outlet />
+                <div className="h-full min-h-0 flex">
+                    <AppRail
+                        active={railSection}
+                        workerCount={workerCount}
+                        canBrowse={canBrowse}
+                        sidebarFolded={sidebarCollapse.collapsed}
+                        onToggleSidebar={sidebarCollapse.toggle}
+                        onNavigate={(to) => {
+                            // Folding is only meaningful next to the session
+                            // list; re-open it when the rail sends you back.
+                            if (to === 'sessions') sidebarCollapse.setCollapsed(false)
+                            void navigate({ to: to === 'sessions' ? '/sessions' : `/${to}` })
+                        }}
+                    />
+                    <div className="h-full min-h-0 min-w-0 flex-1 flex flex-col">
+                        <Outlet />
+                    </div>
                 </div>
                 <ToastContainer />
                 <InstallPrompt />

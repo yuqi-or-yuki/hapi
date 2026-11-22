@@ -32,7 +32,7 @@ export function HoverTooltip(props: {
     target: ReactNode
     /** Rich tooltip content. Plain text or a small fragment with headings/lists. */
     children: ReactNode
-    side?: 'top' | 'bottom'
+    side?: 'top' | 'bottom' | 'left' | 'right'
     align?: 'start' | 'center' | 'end' | 'row'
     className?: string
     /** Parent-focus reveal classes (e.g. SESSION_ROW_TOOLTIP_FOCUS_CLASS). */
@@ -40,6 +40,12 @@ export function HoverTooltip(props: {
     /** Optional classes for the tooltip panel (e.g. wider popover). */
     tooltipClassName?: string
     open?: boolean
+    /**
+     * Reveal while anything inside the wrapper has keyboard focus. For a
+     * tooltip whose target *is* the focusable control (an icon-only button),
+     * which cannot describe itself with `revealOnParentFocusClass`.
+     */
+    revealOnFocusWithin?: boolean
     containerRef?: Ref<HTMLSpanElement>
     hoverGroup?: 'default' | 'help'
 }) {
@@ -47,12 +53,18 @@ export function HoverTooltip(props: {
     const align = props.align ?? 'center'
     const spansRow = align === 'row'
     const isHelpGroup = props.hoverGroup === 'help'
+    // Side placement for a vertical strip (the icon rail): the bubble sits
+    // beside the icon and centres on it, rather than above or below where a
+    // 56px-wide rail would stack it awkwardly over its neighbours.
+    const isSideways = side === 'left' || side === 'right'
 
-    const alignClasses = spansRow
-        ? 'left-1 right-1 w-auto'
-        : align === 'start' ? 'left-0'
-        : align === 'end' ? 'right-0'
-        : 'left-1/2 -translate-x-1/2'
+    const alignClasses = isSideways
+        ? cn('top-1/2 -translate-y-1/2', side === 'right' ? 'left-full ml-2' : 'right-full mr-2')
+        : spansRow
+            ? 'left-1 right-1 w-auto'
+            : align === 'start' ? 'left-0'
+            : align === 'end' ? 'right-0'
+            : 'left-1/2 -translate-x-1/2'
 
     return (
         <span
@@ -75,13 +87,16 @@ export function HoverTooltip(props: {
                     spansRow ? 'max-w-none' : 'w-max max-w-[14rem]',
                     'rounded-md border border-[var(--app-border)] bg-[var(--app-secondary-bg)]',
                     'px-2 py-1 text-xs leading-snug text-[var(--app-fg)] shadow-lg',
-                    side === 'top' ? 'bottom-full mb-1' : 'top-full mt-1',
+                    isSideways ? '' : side === 'top' ? 'bottom-full mb-1' : 'top-full mt-1',
                     alignClasses,
                     'opacity-0 invisible',
                     isHelpGroup
                         ? 'group-hover/help-tooltip:opacity-100 group-hover/help-tooltip:visible'
                         : 'group-hover/hover-tooltip:opacity-100 group-hover/hover-tooltip:visible',
                     props.revealOnParentFocusClass,
+                    props.revealOnFocusWithin && (isHelpGroup
+                        ? 'group-focus-within/help-tooltip:opacity-100 group-focus-within/help-tooltip:visible'
+                        : 'group-focus-within/hover-tooltip:opacity-100 group-focus-within/hover-tooltip:visible'),
                     props.open && 'opacity-100 visible',
                     props.tooltipClassName,
                     'transition-opacity duration-100'

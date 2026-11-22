@@ -345,6 +345,45 @@ export const SetSessionPinnedRequestSchema = z.object({
 export type SetSessionPinnedRequest = z.infer<typeof SetSessionPinnedRequestSchema>
 export type SessionPinMode = SetSessionPinnedRequest['mode']
 
+/** PUT /sessions/:id/swarm — promote a session to a worker, or `null` to retire it. */
+export const SwarmScheduleRequestSchema = z.object({
+    /** Gap between runs. Runs stay anchored to `firstRunAt`, so "daily at 9" stays at 9. */
+    intervalMs: z.number().int().min(60_000),
+    firstRunAt: z.number().int().min(0)
+})
+
+export type SwarmScheduleRequest = z.infer<typeof SwarmScheduleRequestSchema>
+
+export const SetSessionSwarmRequestSchema = z.object({
+    job: z.string().trim().min(1).max(200).nullable(),
+    /** Omit to keep the current value; empty string clears it. */
+    name: z.string().trim().max(40).optional(),
+    avatarSeed: z.string().trim().min(1).max(64).optional(),
+    /** Omit to keep the current schedule; `null` removes it. */
+    schedule: SwarmScheduleRequestSchema.nullable().optional(),
+    /** Omit to keep the current playbook; empty string clears it. */
+    playbook: z.string().trim().max(8000).optional(),
+    /** Runs still to be approved before the worker runs free. Omit to keep; 0 ends the review period. */
+    reviewRuns: z.number().int().min(0).max(50).optional(),
+    /** Omit to keep the current board layout. */
+    board: z.object({
+        title: z.string().trim().min(1).max(80).optional(),
+        columns: z.array(z.string().trim().min(1).max(60)).max(40).optional()
+    }).optional()
+})
+
+/** POST /sessions/:id/worker-records — add rows to a worker's board, or patch rows by key. */
+export const UpsertWorkerRecordsRequestSchema = z.object({
+    records: z.array(z.object({
+        key: z.string().trim().min(1).max(200),
+        data: z.record(z.string().min(1).max(60), z.unknown())
+    })).min(1).max(500)
+})
+
+export type UpsertWorkerRecordsRequest = z.infer<typeof UpsertWorkerRecordsRequestSchema>
+
+export type SetSessionSwarmRequest = z.infer<typeof SetSessionSwarmRequestSchema>
+
 /**
  * An empty string clears the custom name, so unlike session rename there is no
  * `min(1)`: the machine falls back to its hostname. The length ceiling is

@@ -49,11 +49,17 @@ export function savePreferredAgent(agent: AgentType): void {
     }
 }
 
+/**
+ * Yolo is the default for a new session: this is a personal, local-first tool
+ * whose sessions are expected to get on with the work unsupervised. An explicit
+ * choice is still remembered — only the never-chosen case lands on yolo.
+ */
 export function loadPreferredYoloMode(): boolean {
     try {
-        return localStorage.getItem(YOLO_STORAGE_KEY) === 'true'
+        const stored = localStorage.getItem(YOLO_STORAGE_KEY)
+        return stored === null ? true : stored === 'true'
     } catch {
-        return false
+        return true
     }
 }
 
@@ -127,8 +133,7 @@ function resolvePreferredOptionValue(
 
 export function resolvePreferredLaunchSettings(
     agent: AgentType,
-    preferred: PreferredLaunchSettings | null,
-    legacyCodexYolo = false
+    preferred: PreferredLaunchSettings | null
 ): PreferredLaunchSettings {
     const preferredModel = preferred?.model ?? 'auto'
     const staticModelValues = MODEL_OPTIONS[agent].map((option) => option.value)
@@ -154,12 +159,14 @@ export function resolvePreferredLaunchSettings(
     const supportsCodexFamilyPermissionMode = usesCodexFamilyPermissionModes(agent)
     const availablePermissionModes = getPermissionModesForFlavor(agent)
     const preferredPermissionMode = preferred?.permissionMode
+    // Same default as the Claude-family yolo toggle above: a new session runs
+    // free unless this agent has no such mode, or an explicit preference was
+    // stored for it.
+    const codexFamilyFallbackMode = availablePermissionModes.includes('yolo') ? 'yolo' : 'default'
     const permissionMode = supportsCodexFamilyPermissionMode
         ? preferredPermissionMode && availablePermissionModes.includes(preferredPermissionMode)
             ? preferredPermissionMode
-            : agent === 'codex' && legacyCodexYolo
-                ? 'yolo'
-                : 'default'
+            : codexFamilyFallbackMode
         : undefined
 
     return {

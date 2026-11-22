@@ -16,7 +16,7 @@ describe('NewSession preferences', () => {
 
     it('loads defaults when storage is empty', () => {
         expect(loadPreferredAgent()).toBe('claude')
-        expect(loadPreferredYoloMode()).toBe(false)
+        expect(loadPreferredYoloMode()).toBe(true)
     })
 
     it('loads saved values from storage', () => {
@@ -165,16 +165,14 @@ describe('NewSession preferences', () => {
             cursorSelectedBase: 'auto',
             effort: 'auto',
             modelReasoningEffort: 'default',
-            permissionMode: 'default'
+            permissionMode: 'yolo'
         })
     })
 
-    it('migrates the legacy YOLO preference for Codex only', () => {
-        savePreferredYoloMode(true)
-
-        expect(resolvePreferredLaunchSettings('codex', null, true).permissionMode).toBe('yolo')
-        expect(resolvePreferredLaunchSettings('copilot', null, true).permissionMode).toBe('default')
-        expect(resolvePreferredLaunchSettings('codex', null, false).permissionMode).toBe('default')
+    it('starts a never-configured Codex-family agent on yolo', () => {
+        expect(resolvePreferredLaunchSettings('codex', null).permissionMode).toBe('yolo')
+        expect(resolvePreferredLaunchSettings('copilot', null).permissionMode).toBe('yolo')
+        expect(resolvePreferredLaunchSettings('opencode', null).permissionMode).toBe('yolo')
     })
 
     it.each([
@@ -204,7 +202,7 @@ describe('NewSession preferences', () => {
             cursorSelectedBase: 'auto',
             effort: 'auto',
             modelReasoningEffort: 'default',
-            permissionMode: 'default'
+            permissionMode: 'yolo'
         })
     })
 })

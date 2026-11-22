@@ -1,4 +1,4 @@
-import type { AgentState, Metadata, Session, TodoItem, WorktreeMetadata } from './schemas'
+import type { AgentState, Metadata, Session, SwarmMembership, TodoItem, WorktreeMetadata } from './schemas'
 import { isKnownFlavor } from './flavors'
 import type { AgentFlavor } from './modes'
 
@@ -46,6 +46,8 @@ export type SessionSummaryMetadata = {
     zeroshotStage?: string
     /** Loopback MCP URL when session CLI happy server is running (#956). */
     hapiMcpUrl?: string
+    /** Set when this session has been promoted to a swarm worker. */
+    swarm?: SwarmMembership
 }
 
 export type SessionSummary = {
@@ -77,10 +79,37 @@ export type SessionSummary = {
     model: string | null
     modelReasoningEffort?: string | null
     effort: string | null
+    /** The worker's real trust level in the swarm view; also drives per-row mode copy. */
+    permissionMode?: string
     /** Fork-local schedule enrichment. Computed server-side in the
      *  /sessions HTTP route only, so anything building a SessionSummary from
      *  a raw Session (SSE patches, fixtures, tests) legitimately omits it. */
     scheduledDueAts?: number[]
+    /** A swarm worker's clock, from its schedule row. Computed in the
+     *  /sessions HTTP route only, like `scheduledDueAts`. */
+    workerRun?: WorkerRun
+    /** Size and freshness of a worker's board. Same provenance as `workerRun`. */
+    workerBoard?: { count: number; updatedAt: number }
+}
+
+export type WorkerRun = {
+    /** Epoch ms of the next run. In the past while the hub is retrying a run. */
+    nextRunAt: number
+    intervalMs: number
+    paused: boolean
+    lastRunAt: number | null
+    /** Why the most recent attempt did not run; null once a run goes through. */
+    lastError: string | null
+    /** Newest first. The evidence that runs happen when the schedule says. */
+    recent: WorkerRunEvent[]
+}
+
+export type WorkerRunEvent = {
+    at: number
+    /** `ran`: the hub delivered the run. `missed`: a whole interval passed without one. */
+    outcome: 'ran' | 'missed'
+    /** How long after its slot the run started. 0 for a missed run. */
+    lateMs: number
 }
 
 // Re-exported as a standalone derivation so SSE patch handlers can recompute
@@ -209,7 +238,8 @@ export function toSessionSummaryMetadata(metadata: Metadata | null | undefined):
         readyForReview: metadata.readyForReview ?? undefined,
         lifecycleState: metadata.lifecycleState,
         zeroshotStage: metadata.zeroshotStage,
-        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined
+        hapiMcpUrl: metadata.hapiMcpUrl ?? undefined,
+        swarm: metadata.swarm
     }
 }
 
@@ -236,6 +266,7 @@ export function toSessionSummary(session: Session): SessionSummary {
         model: session.model,
         modelReasoningEffort: session.modelReasoningEffort,
         effort: session.effort,
+        permissionMode: session.permissionMode,
         scheduledDueAts: []   // computed server-side in the HTTP route; empty here as safe default
     }
 }

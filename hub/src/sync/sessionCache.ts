@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import { AgentStateSchema, MetadataSchema, SessionPatchSchema } from '@hapi/protocol/schemas'
+import { AgentStateSchema, MetadataSchema, SessionPatchSchema, type SwarmMembership } from '@hapi/protocol/schemas'
 import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store, StoredSession } from '../store'
 import { clampAliveTime } from './aliveTime'
@@ -350,12 +350,15 @@ export class SessionCache {
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
         copilotAgentMode?: CopilotAgentMode
+        backgroundTaskCount?: number
     }): void {
         const t = clampAliveTime(payload.time)
         if (!t) return
 
         const session = this.sessions.get(payload.sid) ?? this.refreshSession(payload.sid)
         if (!session) return
+
+        this.applyReportedBackgroundTaskCount(session, payload.backgroundTaskCount)
 
         const wasActive = session.active
         const wasThinking = session.thinking
@@ -517,7 +520,32 @@ export class SessionCache {
         }
     }
 
+    // Sessions whose agent process reports its live background tasks itself.
+    // For those the keepalive count is the truth and the message-text
+    // heuristic below must not also move the counter.
+    private readonly reportedBackgroundTaskSessionIds = new Set<string>()
+
+    private applyReportedBackgroundTaskCount(session: Session, reported: number | undefined): void {
+        if (typeof reported !== 'number' || !Number.isFinite(reported)) {
+            this.reportedBackgroundTaskSessionIds.delete(session.id)
+            return
+        }
+
+        this.reportedBackgroundTaskSessionIds.add(session.id)
+        const next = Math.max(0, Math.floor(reported))
+        if ((session.backgroundTaskCount ?? 0) === next) return
+
+        session.backgroundTaskCount = next
+        this.publisher.emit({
+            type: 'session-updated',
+            sessionId: session.id,
+            data: { backgroundTaskCount: next } satisfies SessionPatch
+        })
+    }
+
     applyBackgroundTaskDelta(sessionId: string, delta: { started: number; completed: number }): void {
+        if (this.reportedBackgroundTaskSessionIds.has(sessionId)) return
+
         const session = this.sessions.get(sessionId)
         if (!session) return
 
@@ -612,6 +640,7 @@ export class SessionCache {
         session.thinkingAt = t
         session.activeTurnStartedAt = null
         session.backgroundTaskCount = 0
+        this.reportedBackgroundTaskSessionIds.delete(session.id)
         this.pendingThinkingUntilBySessionId.delete(session.id)
 
         this.publisher.emit({
@@ -1045,6 +1074,55 @@ export class SessionCache {
         throw new Error('Session was modified concurrently during reopen rollback')
     }
 
+    /**
+     * Promote a session to a swarm worker (a standing post owning one job), or
+     * retire it back to an ordinary session with `null`. The worker's trust
+     * level is its permission mode and is not touched here.
+     */
+    async setSessionSwarm(
+        sessionId: string,
+        worker: Omit<SwarmMembership, 'promotedAt'> | null
+    ): Promise<void> {
+        const session = this.sessions.get(sessionId)
+        if (!session) {
+            throw new Error('Session not found')
+        }
+
+        const currentMetadata = session.metadata ?? { path: '', host: '' }
+        const newMetadata = {
+            ...currentMetadata,
+            // Promoting again only rewrites the job; the original promotion
+            // time is what the swarm view sorts and ages by.
+            swarm: worker === null
+                ? undefined
+                // Unset fields are dropped rather than stored as undefined, so
+                // clearing a name or ending a review really removes it.
+                : {
+                    ...Object.fromEntries(Object.entries(worker).filter(([, value]) => value !== undefined)),
+                    job: worker.job,
+                    promotedAt: currentMetadata.swarm?.promotedAt ?? Date.now()
+                }
+        }
+
+        const result = this.store.sessions.updateSessionMetadata(
+            sessionId,
+            newMetadata,
+            session.metadataVersion,
+            session.namespace,
+            { touchUpdatedAt: false }
+        )
+
+        if (result.result === 'error') {
+            throw new Error('Failed to update session metadata')
+        }
+
+        if (result.result === 'version-mismatch') {
+            throw new Error('Session was modified concurrently. Please try again.')
+        }
+
+        this.refreshSession(sessionId)
+    }
+
     async setSessionReadyForReview(sessionId: string, readyForReview: boolean): Promise<void> {
         const session = this.sessions.get(sessionId)
         if (!session) {
@@ -1256,6 +1334,10 @@ export class SessionCache {
             this.emitScratchlistChanged(oldSessionId)
         }
 
+        // A worker's clock and board belong to the worker, not to one session id.
+        this.store.scheduledMessages.retarget(oldSessionId, newSessionId)
+        this.store.workerRecords.transfer(oldSessionId, newSessionId)
+
         const mergedMetadata = this.mergeSessionMetadata(oldStored.metadata, newStored.metadata)
         if (mergedMetadata !== null && mergedMetadata !== newStored.metadata) {
             for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1420,6 +1502,12 @@ export class SessionCache {
         const newUpdatedAt = typeof newSummary?.updatedAt === 'number' ? newSummary.updatedAt : null
         if (oldUpdatedAt !== null && (newUpdatedAt === null || oldUpdatedAt > newUpdatedAt)) {
             merged.summary = oldSummary
+            changed = true
+        }
+
+        // A worker resumed under a new session id is still that worker.
+        if (oldObj.swarm && !newObj.swarm) {
+            merged.swarm = oldObj.swarm
             changed = true
         }
 

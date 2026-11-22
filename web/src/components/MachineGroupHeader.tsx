@@ -84,7 +84,7 @@ export function MachineGroupHeader(props: {
                     presentation={props.healthPresentation!}
                     layout="inline"
                     compact
-                    className="shrink-0"
+                    className="hidden shrink-0 sm:inline-flex"
                 />
             ) : null}
             <span className="ml-auto shrink-0 text-[11px] tabular-nums text-[var(--app-hint)]">

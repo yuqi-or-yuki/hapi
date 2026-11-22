@@ -51,6 +51,45 @@ export const WorktreeMetadataSchema = z.object({
 
 export type WorktreeMetadata = z.infer<typeof WorktreeMetadataSchema>
 
+/**
+ * Swarm membership.
+ *
+ * A session is promoted to a *worker* when it stops being a conversation
+ * someone drives and becomes a standing post that owns one repeating job.
+ * How much the worker may do before asking is deliberately NOT stored here:
+ * that is the session's own permission mode, which is what actually gates
+ * the agent. Duplicating it would let the badge drift from the real rule.
+ */
+export const SwarmMembershipSchema = z.object({
+    /** The one repeating job this worker owns, in the operator's words. */
+    job: z.string().min(1).max(200),
+    promotedAt: z.number(),
+    /** What the operator calls this worker. Absent: the UI derives one from the avatar seed. */
+    name: z.string().min(1).max(40).optional(),
+    /** Seed for the generated avatar. Absent: the session id is the seed. */
+    avatarSeed: z.string().min(1).max(64).optional(),
+    /** The scheduled message that wakes this worker for its job, if it runs on a clock. */
+    scheduleId: z.string().optional(),
+    /**
+     * How the job is done right now. Sent with every scheduled run, so a change
+     * to the approach takes effect on the next run and survives context compaction.
+     */
+    playbook: z.string().min(1).max(8000).optional(),
+    /**
+     * Review period: until the operator has approved this many more runs, the
+     * worker prepares outward-facing actions as drafts instead of taking them.
+     */
+    review: z.object({ runsLeft: z.number().int().min(1).max(50) }).optional(),
+    /** How the worker's reported rows are presented. Absent: columns follow the rows. */
+    board: z.object({
+        title: z.string().min(1).max(80).optional(),
+        /** Field names, in display order. Fields not listed follow in the order first seen. */
+        columns: z.array(z.string().min(1).max(60)).max(40).optional()
+    }).optional()
+})
+
+export type SwarmMembership = z.infer<typeof SwarmMembershipSchema>
+
 export const MetadataSchema = z.object({
     path: z.string(),
     host: z.string(),
@@ -172,7 +211,8 @@ export const MetadataSchema = z.object({
     // field stores only modelId (shared across all flavors); this preserves
     // the provider so web can resolve the exact model when two providers
     // share a modelId.
-    piSelectedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().optional()
+    piSelectedModel: z.object({ provider: z.string(), modelId: z.string() }).nullable().optional(),
+    swarm: SwarmMembershipSchema.optional()
 })
 
 export type Metadata = z.infer<typeof MetadataSchema>

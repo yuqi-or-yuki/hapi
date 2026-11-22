@@ -19,7 +19,7 @@ type ScheduledMessage = {
     error: string | null
 }
 
-function getFlag(args: string[], name: string): string | undefined {
+export function getFlag(args: string[], name: string): string | undefined {
     const eq = args.find(arg => arg.startsWith(`--${name}=`))
     if (eq) return eq.slice(name.length + 3)
     const idx = args.indexOf(`--${name}`)
@@ -27,7 +27,7 @@ function getFlag(args: string[], name: string): string | undefined {
     return undefined
 }
 
-function hasFlag(args: string[], name: string): boolean {
+export function hasFlag(args: string[], name: string): boolean {
     return args.includes(`--${name}`)
 }
 
@@ -40,7 +40,7 @@ function parseDueAt(value: string | undefined): number {
     return parsed
 }
 
-function parseIntervalMs(value: string | undefined): number | undefined {
+export function parseIntervalMs(value: string | undefined): number | undefined {
     if (value === undefined) return undefined
     const trimmed = value.trim().toLowerCase()
     const match = trimmed.match(/^(\d+)(ms|s|m|h|d)?$/)
@@ -82,7 +82,7 @@ function printJobs(jobs: ScheduledMessage[]): void {
     }
 }
 
-async function request<T>(method: 'get' | 'post' | 'patch' | 'delete', path: string, body?: unknown): Promise<T> {
+export async function request<T>(method: 'get' | 'post' | 'put' | 'patch' | 'delete', path: string, body?: unknown): Promise<T> {
     const token = await getWebAuthToken()
     const response = await axios.request<T>({
         method,

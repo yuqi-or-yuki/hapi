@@ -54,6 +54,7 @@ export class AgentSessionBase<Mode> {
     protected effort?: SessionEffort;
     protected serviceTier?: string | null;
     protected collaborationMode?: SessionCollaborationMode;
+    protected backgroundTaskCount?: number;
 
     constructor(opts: AgentSessionBaseOptions<Mode>) {
         this.path = opts.path;
@@ -90,12 +91,21 @@ export class AgentSessionBase<Mode> {
         this.client.keepAlive(thinking, this.mode, this.getKeepAliveRuntime());
     };
 
+    onBackgroundTaskCountChange = (count: number) => {
+        this.backgroundTaskCount = count;
+        this.client.keepAlive(this.thinking, this.mode, this.getKeepAliveRuntime());
+    };
+
     pushKeepAlive = () => {
         this.client.keepAlive(this.thinking, this.mode, this.getKeepAliveRuntime());
     };
 
     onModeChange = (mode: 'local' | 'remote') => {
         this.mode = mode;
+        if (mode === 'local') {
+            // Only the remote SDK stream reports background tasks.
+            this.backgroundTaskCount = undefined;
+        }
         this.client.keepAlive(this.thinking, mode, this.getKeepAliveRuntime());
         const permissionLabel = this.permissionMode ?? 'unset';
         const modelLabel = this.model === undefined ? 'unset' : (this.model ?? 'auto');
@@ -162,6 +172,7 @@ export class AgentSessionBase<Mode> {
             effort?: SessionEffort
             serviceTier?: string | null
             collaborationMode?: SessionCollaborationMode
+            backgroundTaskCount?: number
         } | undefined {
         if (
             this.permissionMode === undefined
@@ -170,6 +181,7 @@ export class AgentSessionBase<Mode> {
             && this.effort === undefined
             && this.serviceTier === undefined
             && this.collaborationMode === undefined
+            && this.backgroundTaskCount === undefined
         ) {
             return undefined;
         }
@@ -179,7 +191,8 @@ export class AgentSessionBase<Mode> {
             modelReasoningEffort: this.modelReasoningEffort,
             effort: this.effort,
             serviceTier: this.serviceTier,
-            collaborationMode: this.collaborationMode
+            collaborationMode: this.collaborationMode,
+            ...(this.backgroundTaskCount === undefined ? {} : { backgroundTaskCount: this.backgroundTaskCount })
         };
     }
 

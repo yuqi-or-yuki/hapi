@@ -1,6 +1,8 @@
 import { useMemo } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+import { WorkerAvatar } from '@/components/Swarm/WorkerAvatar'
+import { workerSeed } from '@/components/Swarm/worker'
 import { ScheduleIcon } from '@/components/icons'
 import { HoverTooltip, SESSION_ROW_TOOLTIP_FOCUS_CLASS, useSessionRowTooltipIds } from '@/components/HoverTooltip'
 import { getAttentionLabel, SessionAttentionIndicator } from '@/components/SessionAttentionIndicator'
@@ -167,7 +169,9 @@ export function SessionRowSummary(props: {
         <div className={`flex w-full min-w-0 flex-col gap-1 ${className ?? ''}`}>
             <div className={`grid grid-cols-[minmax(9rem,1fr)_minmax(0,max-content)] items-center gap-2 ${!s.active ? 'opacity-50' : ''}`}>
                 <div className="flex min-w-0 items-center gap-2">
-                    <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4 shrink-0 -translate-y-px" />
+                    {s.metadata?.swarm
+                        ? <WorkerAvatar seed={workerSeed(s)} size={20} />
+                        : <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4 shrink-0 -translate-y-px" />}
                     <div
                         className={`min-w-0 flex-1 truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
                         title={sessionName}

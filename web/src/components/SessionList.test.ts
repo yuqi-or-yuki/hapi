@@ -15,7 +15,9 @@ import {
     prepareSidebarSessions,
     sessionMatchesQuery,
     sessionMatchesTimeRange,
-    shouldShowSessionInSidebar
+    shouldShowSessionInSidebar,
+    partitionSessionsByTier,
+    sessionTier,
 } from './SessionList'
 
 function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
@@ -472,29 +474,58 @@ describe('getNextSessionVisibleCount', () => {
 describe('expandSelectedSessionCollapseOverrides', () => {
     it('expands collapsed project and machine, but preserves session preview folding', () => {
         const overrides = new Map<string, boolean>([
-            ['machine-1::/work/hapi', true],
-            ['sessions::machine-1::/work/hapi', true],
-            ['machine::machine-1', true]
+            ['plain::machine-1::/work/hapi', true],
+            ['sessions::plain::machine-1::/work/hapi', true],
+            ['machine::plain::machine-1', true]
         ])
 
         const result = expandSelectedSessionCollapseOverrides(overrides, {
-            key: 'machine-1::/work/hapi',
-            machineId: 'machine-1'
+            key: 'plain::machine-1::/work/hapi',
+            machineKey: 'machine::plain::machine-1'
         })
 
-        expect(result.has('machine-1::/work/hapi')).toBe(false)
-        expect(result.get('sessions::machine-1::/work/hapi')).toBe(true)
-        expect(result.has('machine::machine-1')).toBe(false)
+        expect(result.has('plain::machine-1::/work/hapi')).toBe(false)
+        expect(result.get('sessions::plain::machine-1::/work/hapi')).toBe(true)
+        expect(result.has('machine::plain::machine-1')).toBe(false)
     })
 
     it('leaves missing session preview override unset', () => {
         const overrides = new Map<string, boolean>()
 
         const result = expandSelectedSessionCollapseOverrides(overrides, {
-            key: 'machine-1::/work/hapi',
-            machineId: 'machine-1'
+            key: 'plain::machine-1::/work/hapi',
+            machineKey: 'machine::plain::machine-1'
         })
 
-        expect(result.has('sessions::machine-1::/work/hapi')).toBe(false)
+        expect(result.has('sessions::plain::machine-1::/work/hapi')).toBe(false)
+    })
+})
+
+describe('session tiers', () => {
+    const worker = (id: string, job: string): SessionSummary => ({
+        ...makeSession({ id }),
+        metadata: { path: '/repo', machineId: 'machine-1', swarm: { job, promotedAt: 1 } }
+    })
+    const plain = (id: string): SessionSummary => ({
+        ...makeSession({ id }),
+        metadata: { path: '/repo', machineId: 'machine-1' }
+    })
+
+    it('splits promoted workers from the sessions you drive yourself', () => {
+        const byTier = partitionSessionsByTier([plain('a'), worker('b', 'QA production'), plain('c')])
+
+        expect(byTier.swarm.map(s => s.id)).toEqual(['b'])
+        expect(byTier.plain.map(s => s.id)).toEqual(['a', 'c'])
+    })
+
+    it('treats a swarm record with no job as an ordinary session', () => {
+        const broken: SessionSummary = {
+            ...makeSession({ id: 'x' }),
+            metadata: { path: '/repo', swarm: { job: '', promotedAt: 1 } }
+        }
+
+        expect(sessionTier(broken)).toBe('plain')
+        expect(sessionTier(worker('y', 'Triage leads'))).toBe('swarm')
+        expect(sessionTier(plain('z'))).toBe('plain')
     })
 })

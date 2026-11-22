@@ -62,10 +62,22 @@ export function useSkills(
         return []
     }, [query.data])
 
+    const isStale = query.isStale
+    const isFetching = query.isFetching
+
     const getSuggestions = useCallback(async (queryText: string): Promise<Suggestion[]> => {
+        // Refresh on any "$" query whose cache has gone stale, not only on the
+        // bare "$". Typing "$hapi-wor" quickly (or pasting it) never produces a
+        // lone "$" keystroke for the menu to observe, so the old exact-match
+        // check could leave a skill added since the last fetch invisible
+        // indefinitely. staleTime still caps this at one RPC per window, and
+        // the isFetching guard keeps later keystrokes from restarting it.
+        //
         // Fire-and-forget for the same reason as useSlashCommands: the RPC can
-        // stall behind a wedged CLI, and the menu must not block on it.
-        if (queryText === '$') {
+        // stall behind a wedged CLI, and the menu must not block on it. Fresh
+        // results reach the menu through the query state, which changes this
+        // callback's identity and re-runs the open suggestion request.
+        if (queryText.startsWith('$') && isStale && !isFetching) {
             void query.refetch()
         }
         const currentSkills = skills
@@ -110,7 +122,7 @@ export function useSkills(
                 description: skill.description,
                 source: 'builtin'
             }))
-    }, [query.refetch, skills])
+    }, [query.refetch, isStale, isFetching, skills])
 
     return {
         skills,

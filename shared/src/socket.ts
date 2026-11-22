@@ -269,6 +269,9 @@ export interface ClientToServerEvents {
         serviceTier?: string | null
         collaborationMode?: CodexCollaborationMode
         copilotAgentMode?: CopilotAgentMode
+        // Authoritative count of live background tasks (agents, shells) the
+        // agent process reports. Present only from agents that can report it.
+        backgroundTaskCount?: number
     }) => void
   /** CLI agent finished session/load (or equivalent) and can accept prompts. */
     'session-ready': (data: { sid: string; time: number }) => void

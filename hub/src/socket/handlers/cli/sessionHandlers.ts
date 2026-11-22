@@ -30,6 +30,7 @@ type SessionAlivePayload = {
     serviceTier?: string | null
     collaborationMode?: CodexCollaborationMode
     copilotAgentMode?: CopilotAgentMode
+    backgroundTaskCount?: number
 }
 
 type SessionEndPayload = {
@@ -72,7 +73,9 @@ const updateStateSchema = z.object({
     agentState: z.unknown().nullable()
 })
 
-const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation'] as const
+// `swarm` is set only through the hub API. A CLI that writes back a metadata
+// snapshot taken before the promotion must not demote the worker.
+const HUB_OWNED_METADATA_KEYS = ['supersededBySessionId', 'opencodeClearOperation', 'swarm'] as const
 
 function preserveHubOwnedMetadata(incoming: unknown, current: unknown): unknown {
     if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) return incoming

@@ -13,6 +13,7 @@ import { FcmStore } from './fcmStore'
 import { ScratchlistStore } from './scratchlistStore'
 import { SessionStore } from './sessionStore'
 import { ScheduledMessageStore } from './scheduledMessageStore'
+import { WorkerRecordStore } from './workerRecordStore'
 import { UserStore } from './userStore'
 
 export type {
@@ -37,6 +38,8 @@ export { FcmStore } from './fcmStore'
 export { ScratchlistStore } from './scratchlistStore'
 export { SessionStore } from './sessionStore'
 export { ScheduledMessageStore } from './scheduledMessageStore'
+export { WorkerRecordStore } from './workerRecordStore'
+export type { WorkerRecord } from './workerRecordStore'
 export type { ScheduledMessageHistoryRow, ScheduledMessageRow, ScheduledMessageStatus } from './scheduledMessageStore'
 export { UserStore } from './userStore'
 
@@ -73,6 +76,7 @@ export class Store {
     readonly blobs: BlobStore
     readonly preferences: PreferencesStore
     readonly scheduledMessages: ScheduledMessageStore
+    readonly workerRecords: WorkerRecordStore
     readonly fcm: FcmStore
     readonly scratchlist: ScratchlistStore
 
@@ -138,6 +142,7 @@ export class Store {
         this.blobs = new BlobStore(this.db)
         this.preferences = new PreferencesStore(this.db)
         this.scheduledMessages = new ScheduledMessageStore(this.db)
+        this.workerRecords = new WorkerRecordStore(this.db)
         this.fcm = new FcmStore(this.db)
         this.scratchlist = new ScratchlistStore(this.db)
     }

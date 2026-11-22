@@ -47,6 +47,30 @@ describe('alive incremental events', () => {
         } finally { engine.stop() }
     })
 
+    it('takes the background task count from keepalives and ignores the message heuristic for that session', () => {
+        const store = new Store(':memory:')
+        const events: SyncEvent[] = []
+        const cache = new SessionCache(store, createPublisher(events))
+        const session = cache.getOrCreateSession('bg-count', { path: '/tmp/project', host: 'localhost' }, null, 'default')
+        const patches = () => events
+            .filter((event) => event.type === 'session-updated')
+            .map((event) => (event as { data: { backgroundTaskCount?: number } }).data.backgroundTaskCount)
+            .filter((count) => count !== undefined)
+
+        cache.handleSessionAlive({ sid: session.id, time: Date.now(), backgroundTaskCount: 2 })
+        cache.handleSessionAlive({ sid: session.id, time: Date.now(), backgroundTaskCount: 2 })
+        cache.applyBackgroundTaskDelta(session.id, { started: 1, completed: 0 })
+        expect(cache.getSession(session.id)?.backgroundTaskCount).toBe(2)
+
+        cache.handleSessionAlive({ sid: session.id, time: Date.now(), backgroundTaskCount: 0 })
+        expect(patches()).toEqual([2, 0])
+
+        // An agent that stops reporting falls back to the heuristic.
+        cache.handleSessionAlive({ sid: session.id, time: Date.now() })
+        cache.applyBackgroundTaskDelta(session.id, { started: 1, completed: 0 })
+        expect(cache.getSession(session.id)?.backgroundTaskCount).toBe(1)
+    })
+
     it('includes active=true in session alive updates', () => {
         const store = new Store(':memory:')
         const events: SyncEvent[] = []

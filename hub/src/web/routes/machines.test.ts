@@ -29,6 +29,31 @@ function createMachine(overrides?: Partial<Machine>): Machine {
 }
 
 describe('machines routes', () => {
+    it('rejects runner errors and success without a persisted session', async () => {
+        const machine = createMachine()
+        for (const result of [
+            { type: 'error' as const, message: 'spawn failed' },
+            { type: 'success' as const, sessionId: 'missing' }
+        ]) {
+            const engine = {
+                getMachine: () => machine,
+                getMachineByNamespace: () => machine,
+                hasPersistedSession: () => false,
+                spawnSession: async () => result
+            } as unknown as SyncEngine
+            const app = new Hono<WebAppEnv>()
+            app.use('*', async (c, next) => { c.set('namespace', 'default'); await next() })
+            app.route('/api', createMachinesRoutes(() => engine))
+            const response = await app.request('/api/machines/machine-1/spawn', {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ directory: '/tmp/project' })
+            })
+            expect(response.status).toBe(502)
+            expect((await response.json() as { type: string }).type).toBe('error')
+        }
+    })
+
     it('blocks spawn and availability inspection when the runner needs an upgrade', async () => {
         const machine = createMachine({
             metadata: {
@@ -53,7 +78,7 @@ describe('machines routes', () => {
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ directory: '/tmp/project', agent: 'claude' })
         })
-        expect(spawn.status).toBe(200)
+        expect(spawn.status).toBe(409)
         expect(await spawn.json()).toEqual({
             type: 'error',
             message: 'This runner must be upgraded before creating sessions',
@@ -115,6 +140,7 @@ describe('machines routes', () => {
         const engine = {
             getMachine: () => machine,
             getMachineByNamespace: () => machine,
+            hasPersistedSession: () => true,
             spawnSession: async (
                 _machineId: string,
                 _directory: string,
@@ -254,6 +280,7 @@ describe('machines routes', () => {
         const engine = {
             getMachine: () => machine,
             getMachineByNamespace: () => machine,
+            hasPersistedSession: () => true,
             spawnSession: async (...args: unknown[]) => {
                 captured = args
                 return { type: 'success', sessionId: 's-1' }
@@ -287,6 +314,7 @@ describe('machines routes', () => {
         const engine = {
             getMachine: () => machine,
             getMachineByNamespace: () => machine,
+            hasPersistedSession: () => true,
             spawnSession: async (...args: unknown[]) => {
                 captured = args
                 return { type: 'success', sessionId: 's-agy' }
@@ -313,6 +341,7 @@ describe('machines routes', () => {
         const engine = {
             getMachine: () => machine,
             getMachineByNamespace: () => machine,
+            hasPersistedSession: () => true,
             spawnSession: async (...args: unknown[]) => {
                 captured = args
                 return { type: 'success', sessionId: 's-agy' }

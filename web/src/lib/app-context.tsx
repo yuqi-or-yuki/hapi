@@ -16,6 +16,10 @@ type AppContextValue = {
     unreadDoneOrders: Record<string, number>
     clearUnreadDone: (sessionId: string) => void
     titleSuggestionAvailable?: boolean
+    /** Folded state of the session sidebar, owned by the app shell so the rail
+     *  and the sessions layout stay in step. */
+    sidebarCollapsed: boolean
+    toggleSidebarCollapsed: () => void
 }
 
 const AppContext = createContext<AppContextValue | null>(null)

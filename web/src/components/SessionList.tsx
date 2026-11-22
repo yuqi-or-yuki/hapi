@@ -19,6 +19,8 @@ import { queryKeys } from '@/lib/query-keys'
 import { useSessionGroups, type UserSessionGroup } from '@/hooks/useSessionGroups'
 import { DEFAULT_SESSION_PREVIEW_LIMIT, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
+import { WorkerAvatar } from '@/components/Swarm/WorkerAvatar'
+import { workerSeed } from '@/components/Swarm/worker'
 import { useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
 import { classifySessionAttention } from '@/lib/sessionAttention'
@@ -33,6 +35,7 @@ import { getSessionTitle } from '@/lib/sessionTitle'
 import type { Machine } from '@/types/api'
 import { getMachinePlatform, presentMachineHealth } from '@/lib/machineHealth'
 import { MachineGroupHeader } from '@/components/MachineGroupHeader'
+import { SessionTierHeader } from '@/components/SessionTierHeader'
 import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStatus'
 
 const ZEROSHOT_STAGE_BADGES: Record<string, { label: string; colors: string }> = {
@@ -48,9 +51,35 @@ type SessionGroup = {
     directory: string
     displayName: string
     machineId: string | null
+    /** Collapse key of the machine row this group sits under. */
+    machineKey: string
+    tier: SessionTier
     sessions: SessionSummary[]
     latestUpdatedAt: number
     hasActiveSession: boolean
+}
+
+/**
+ * Top level of the sidebar: workers stand apart from the sessions you drive
+ * yourself. Each tier then repeats the usual machine -> project -> session
+ * structure, with its own collapse state.
+ */
+export type SessionTier = 'swarm' | 'plain'
+
+export const SESSION_TIER_ORDER: readonly SessionTier[] = ['swarm', 'plain']
+
+export function sessionTier(session: SessionSummary): SessionTier {
+    return session.metadata?.swarm?.job ? 'swarm' : 'plain'
+}
+
+export function partitionSessionsByTier(
+    sessions: readonly SessionSummary[]
+): Record<SessionTier, SessionSummary[]> {
+    const byTier: Record<SessionTier, SessionSummary[]> = { swarm: [], plain: [] }
+    for (const session of sessions) {
+        byTier[sessionTier(session)].push(session)
+    }
+    return byTier
 }
 
 export type SessionTimeRange = {
@@ -139,6 +168,8 @@ function SessionsEmptyState(props: {
 type MachineGroup = {
     machineId: string | null
     label: string
+    /** Collapse key, tier-scoped so the same machine can sit in both tiers. */
+    collapseKey: string
     projectGroups: SessionGroup[]
     totalSessions: number
     hasActiveSession: boolean
@@ -246,13 +277,47 @@ export function getNextSessionVisibleCount(current: number, step: number, total:
     return Math.min(current + Math.max(1, step), total)
 }
 
-function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
+type TierSection = {
+    tier: SessionTier
+    groups: SessionGroup[]
+    machineGroups: MachineGroup[]
+    sessionCount: number
+}
+
+/**
+ * Splits sessions into the swarm/plain super-groups and rebuilds the usual
+ * machine -> project tree inside each. A tier with no sessions is dropped, so
+ * an operator with no workers sees exactly the list they had before.
+ */
+function buildTierSections(
+    sessions: SessionSummary[],
+    resolveMachineLabel: (id: string | null) => string
+): TierSection[] {
+    const byTier = partitionSessionsByTier(sessions)
+    return SESSION_TIER_ORDER
+        .filter((tier) => byTier[tier].length > 0)
+        .map((tier) => {
+            const groups = groupSessionsByDirectory(byTier[tier], tier)
+            return {
+                tier,
+                groups,
+                machineGroups: groupByMachine(groups, resolveMachineLabel),
+                sessionCount: byTier[tier].length
+            }
+        })
+}
+
+function machineCollapseKey(tier: SessionTier, machineId: string | null): string {
+    return `machine::${tier}::${machineId ?? UNKNOWN_MACHINE_ID}`
+}
+
+function groupSessionsByDirectory(sessions: SessionSummary[], tier: SessionTier = 'plain'): SessionGroup[] {
     const groups = new Map<string, { directory: string; machineId: string | null; sessions: SessionSummary[] }>()
 
     sessions.forEach(session => {
         const path = session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other'
         const machineId = session.metadata?.machineId ?? null
-        const key = `${machineId ?? UNKNOWN_MACHINE_ID}::${path}`
+        const key = `${tier}::${machineId ?? UNKNOWN_MACHINE_ID}::${path}`
         if (!groups.has(key)) {
             groups.set(key, {
                 directory: path,
@@ -283,6 +348,8 @@ function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
                 directory: group.directory,
                 displayName,
                 machineId: group.machineId,
+                machineKey: machineCollapseKey(tier, group.machineId),
+                tier,
                 sessions: sortedSessions,
                 latestUpdatedAt,
                 hasActiveSession
@@ -299,7 +366,7 @@ function groupSessionsByDirectory(sessions: SessionSummary[]): SessionGroup[] {
 
 export function expandSelectedSessionCollapseOverrides(
     overrides: Map<string, boolean>,
-    group: { key: string; machineId: string | null }
+    group: { key: string; machineKey: string }
 ): Map<string, boolean> {
     const next = new Map(overrides)
     let changed = false
@@ -310,9 +377,8 @@ export function expandSelectedSessionCollapseOverrides(
         changed = true
     }
 
-    const machineKey = `machine::${group.machineId ?? UNKNOWN_MACHINE_ID}`
-    if (overrides.has(machineKey) && overrides.get(machineKey)) {
-        next.delete(machineKey)
+    if (overrides.has(group.machineKey) && overrides.get(group.machineKey)) {
+        next.delete(group.machineKey)
         changed = true
     }
 
@@ -325,12 +391,13 @@ function groupByMachine(
 ): MachineGroup[] {
     const map = new Map<string, MachineGroup>()
     for (const g of groups) {
-        const key = g.machineId ?? UNKNOWN_MACHINE_ID
+        const key = g.machineKey
         let mg = map.get(key)
         if (!mg) {
             mg = {
                 machineId: g.machineId,
                 label: resolveMachineLabel(g.machineId),
+                collapseKey: g.machineKey,
                 projectGroups: [],
                 totalSessions: 0,
                 hasActiveSession: false,
@@ -1016,7 +1083,9 @@ function SessionItem(props: {
                     <div className={`flex items-center justify-between gap-3 ${!s.active ? 'opacity-50' : ''}`}>
                         <div className="flex items-center gap-2 min-w-0">
                             <div className="relative shrink-0">
-                                <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4" />
+                                {s.metadata?.swarm
+                                    ? <WorkerAvatar seed={workerSeed(s)} size={20} />
+                                    : <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4" />}
                                 {readyForReview && !selectionMode ? (
                                     <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500 ring-1 ring-[var(--app-bg)]" />
                                 ) : null}
@@ -1454,13 +1523,17 @@ export function SessionList(props: {
             : allSessions,
         [allSessions, isFiltering, normalizedQuery, timeRange?.start, timeRange?.end, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
     )
-    const allGroups = useMemo(
-        () => groupSessionsByDirectory(allSessions),
-        [allSessions]
+    const allTierSections = useMemo(
+        () => buildTierSections(allSessions, resolveMachineLabel),
+        [allSessions, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
     )
-    const groups = useMemo(
-        () => groupSessionsByDirectory(visibleSessions),
-        [visibleSessions]
+    const allGroups = useMemo(
+        () => allTierSections.flatMap((section) => section.groups),
+        [allTierSections]
+    )
+    const tierSections = useMemo(
+        () => buildTierSections(visibleSessions, resolveMachineLabel),
+        [visibleSessions, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
     )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
@@ -1523,15 +1596,9 @@ export function SessionList(props: {
         )
     }
 
-    const machineGroups = useMemo(
-        () => groupByMachine(groups, resolveMachineLabel),
-        [groups, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
-    )
-
     const isMachineCollapsed = (mg: MachineGroup): boolean => {
         if (isFiltering) return false
-        const key = `machine::${mg.machineId ?? UNKNOWN_MACHINE_ID}`
-        const override = collapseOverrides.get(key)
+        const override = collapseOverrides.get(mg.collapseKey)
         if (override !== undefined) return override
         const hasSelected = selectedSessionId
             ? mg.projectGroups.some(pg => pg.sessions.some(s => s.id === selectedSessionId))
@@ -1540,11 +1607,26 @@ export function SessionList(props: {
     }
 
     const toggleMachine = (mg: MachineGroup) => {
-        const key = `machine::${mg.machineId ?? UNKNOWN_MACHINE_ID}`
         const current = isMachineCollapsed(mg)
         setCollapseOverrides(prev => {
             const next = new Map(prev)
-            next.set(key, !current)
+            next.set(mg.collapseKey, !current)
+            return next
+        })
+    }
+
+    const tierCollapseKey = (tier: SessionTier) => `tier::${tier}`
+
+    const isTierCollapsed = (section: TierSection): boolean => {
+        if (isFiltering) return false
+        return collapseOverrides.get(tierCollapseKey(section.tier)) === true
+    }
+
+    const toggleTier = (section: TierSection) => {
+        const current = isTierCollapsed(section)
+        setCollapseOverrides(prev => {
+            const next = new Map(prev)
+            next.set(tierCollapseKey(section.tier), !current)
             return next
         })
     }
@@ -1576,11 +1658,11 @@ export function SessionList(props: {
         setCollapseOverrides(prev => {
             if (prev.size === 0) return prev
             const next = new Map(prev)
-            const knownKeys = new Set<string>()
+            const knownKeys = new Set<string>(SESSION_TIER_ORDER.map((tier) => `tier::${tier}`))
             for (const g of allGroups) {
                 knownKeys.add(g.key)
                 knownKeys.add(`sessions::${g.key}`)
-                knownKeys.add(`machine::${g.machineId ?? UNKNOWN_MACHINE_ID}`)
+                knownKeys.add(g.machineKey)
             }
             let changed = false
             for (const key of next.keys()) {
@@ -1613,7 +1695,9 @@ export function SessionList(props: {
     const containerRef = useRef<HTMLDivElement | null>(null)
 
     const flatVisibleSessions = useMemo(() => {
-        return machineGroups
+        return tierSections
+            .filter(section => !isTierCollapsed(section))
+            .flatMap(section => section.machineGroups)
             .filter(mg => !isMachineCollapsed(mg))
             .flatMap(mg =>
                 mg.projectGroups
@@ -1636,7 +1720,7 @@ export function SessionList(props: {
                         return [...groupedSessions, ...visibleUngrouped]
                     })
             )
-    }, [machineGroups, collapseOverrides, selectedSessionId, isFiltering, userGroups, sessionVisibleCounts, getGroupsForProject]) // eslint-disable-line react-hooks/exhaustive-deps
+    }, [tierSections, collapseOverrides, selectedSessionId, isFiltering, userGroups, sessionVisibleCounts, getGroupsForProject]) // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleCheckboxClick = useCallback((sessionId: string, shiftKey: boolean) => {
         if (shiftKey && lastCheckedId) {
@@ -1758,7 +1842,26 @@ export function SessionList(props: {
             ) : null}
 
             <div className="flex flex-col gap-3 px-2 pt-1 pb-2">
-                {machineGroups.map((mg) => {
+                {tierSections.map((section) => {
+                // A single tier means the operator has no workers (or only
+                // workers): the header would add a level of nesting that
+                // separates nothing, so the list stays exactly as it was.
+                const showTierHeader = tierSections.length > 1
+                const tierCollapsed = showTierHeader && isTierCollapsed(section)
+                return (
+                <div key={section.tier} className="flex flex-col gap-1.5">
+                {showTierHeader ? (
+                    <SessionTierHeader
+                        tier={section.tier}
+                        sessionCount={section.sessionCount}
+                        collapsed={tierCollapsed}
+                        onToggle={() => toggleTier(section)}
+                    />
+                ) : null}
+                <div className="collapsible-panel" data-open={!tierCollapsed || undefined}>
+                <div className="collapsible-inner">
+                <div className="flex flex-col gap-3">
+                {section.machineGroups.map((mg) => {
                     const machineCollapsed = isMachineCollapsed(mg)
                     const machine = mg.machineId ? machinesById[mg.machineId] : undefined
                     const healthPresentation = presentMachineHealth(
@@ -1766,7 +1869,7 @@ export function SessionList(props: {
                         getMachinePlatform(machine)
                     )
                     return (
-                        <div key={mg.machineId ?? UNKNOWN_MACHINE_ID}>
+                        <div key={mg.collapseKey}>
                             <MachineGroupHeader
                                 label={mg.label}
                                 sessionCount={mg.totalSessions}
@@ -1997,6 +2100,12 @@ export function SessionList(props: {
                             </div>
                         </div>
                     )
+                })}
+                </div>
+                </div>
+                </div>
+                </div>
+                )
                 })}
             </div>
 

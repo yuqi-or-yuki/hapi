@@ -372,7 +372,7 @@ describe('NewSession launch preferences', () => {
         })
     })
 
-    it('does not migrate a legacy YOLO value owned by a non-Codex agent', async () => {
+    it('starts a never-configured Codex on yolo', async () => {
         savePreferredAgent('claude')
         savePreferredYoloMode(true)
 
@@ -390,11 +390,11 @@ describe('NewSession launch preferences', () => {
         fireEvent.click(screen.getByDisplayValue('codex'))
 
         await waitFor(() => {
-            expect(screen.getByTestId('permission-mode')).toHaveTextContent('default')
+            expect(screen.getByTestId('permission-mode')).toHaveTextContent('yolo')
         })
     })
 
-    it('migrates a legacy YOLO value when Codex was the preferred agent', async () => {
+    it('keeps yolo when Codex is the preferred agent', async () => {
         savePreferredAgent('codex')
         savePreferredYoloMode(true)
 
