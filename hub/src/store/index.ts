@@ -14,6 +14,7 @@ import { ScratchlistStore } from './scratchlistStore'
 import { SessionStore } from './sessionStore'
 import { ScheduledMessageStore } from './scheduledMessageStore'
 import { WorkerRecordStore } from './workerRecordStore'
+import { SkillInvocationStore } from './skillInvocations'
 import { UserStore } from './userStore'
 
 export type {
@@ -77,6 +78,7 @@ export class Store {
     readonly preferences: PreferencesStore
     readonly scheduledMessages: ScheduledMessageStore
     readonly workerRecords: WorkerRecordStore
+    readonly skillInvocations: SkillInvocationStore
     readonly fcm: FcmStore
     readonly scratchlist: ScratchlistStore
 
@@ -143,6 +145,7 @@ export class Store {
         this.preferences = new PreferencesStore(this.db)
         this.scheduledMessages = new ScheduledMessageStore(this.db)
         this.workerRecords = new WorkerRecordStore(this.db)
+        this.skillInvocations = new SkillInvocationStore(this.db)
         this.fcm = new FcmStore(this.db)
         this.scratchlist = new ScratchlistStore(this.db)
     }

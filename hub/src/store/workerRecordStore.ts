@@ -1,4 +1,5 @@
 import type { Database } from 'bun:sqlite'
+import { createHash } from 'node:crypto'
 
 /** One row on a worker's board: whatever fields the worker chose to report. */
 export type WorkerRecord = {
@@ -13,6 +14,10 @@ export type WorkerBoardStats = { count: number; updatedAt: number }
 type DbRow = { key: string; data: string; created_at: number; updated_at: number }
 
 export const MAX_WORKER_RECORDS = 5000
+
+function filled(value: unknown): value is string {
+    return typeof value === 'string' && value.trim().length > 0
+}
 
 function mapRow(row: DbRow): WorkerRecord {
     let data: Record<string, unknown> = {}
@@ -45,7 +50,44 @@ export class WorkerRecordStore {
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (session_id, key)
             );
+            CREATE TABLE IF NOT EXISTS worker_review_history (
+                namespace TEXT NOT NULL, session_id TEXT NOT NULL, kind TEXT NOT NULL,
+                event_id TEXT NOT NULL, data TEXT NOT NULL,
+                PRIMARY KEY (session_id, kind, event_id)
+            );
         `)
+    }
+
+    private archiveReviews(namespace: string, sessionId: string, data: Record<string, unknown>): void {
+        const insert = this.db.query('INSERT OR IGNORE INTO worker_review_history (namespace, session_id, kind, event_id, data) VALUES (?, ?, ?, ?, ?)')
+        const upgrade = this.db.query('UPDATE worker_review_history SET data = ? WHERE session_id = ? AND kind = ? AND event_id = ? AND data = ?')
+        const category = filled(data.category) ? data.category.trim() : null
+        for (const kind of ['linkedinReviews', 'approvalReviews']) {
+            const events = data[kind]
+            if (!Array.isArray(events)) continue
+            for (const event of events) {
+                if (!event || typeof event !== 'object' || Array.isArray(event)) continue
+                const json = JSON.stringify(event)
+                const id = typeof event.id === 'string' && event.id ? event.id : createHash('sha256').update(json).digest('hex')
+                // The hit rate is kept per category for good, so each archived
+                // review must carry its own category: the row it came from can
+                // be edited or deleted later. A talent review already names its
+                // role; any other takes the row's category as it is right now.
+                const stamped = category && !filled(event.role) && !filled(event.category)
+                    ? JSON.stringify({ ...event, category })
+                    : json
+                insert.run(namespace, sessionId, kind, id, stamped)
+                // A review archived before its row had a category gains one; it never loses or changes one.
+                if (stamped !== json) upgrade.run(stamped, sessionId, kind, id, json)
+            }
+        }
+    }
+
+    reviewHistory(namespace: string, sessionId: string): WorkerRecord[] {
+        // Backfill pre-existing reviews on first read; new reviews are archived on write.
+        for (const row of this.list(namespace, sessionId)) this.archiveReviews(namespace, sessionId, row.data)
+        const rows = this.db.query<{ kind: string; event_id: string; data: string }, [string, string]>('SELECT kind, event_id, data FROM worker_review_history WHERE namespace = ? AND session_id = ? ORDER BY rowid').all(namespace, sessionId)
+        return rows.map((row) => ({ key: `history:${row.kind}:${row.event_id}`, data: { [row.kind]: [JSON.parse(row.data)] }, createdAt: 0, updatedAt: 0 }))
     }
 
     list(namespace: string, sessionId: string): WorkerRecord[] {
@@ -75,10 +117,12 @@ export class WorkerRecordStore {
             for (const record of records) {
                 const stored = existing.get(sessionId, record.key)
                 const merged: Record<string, unknown> = stored ? mapRow({ key: record.key, data: stored.data, created_at: 0, updated_at: 0 }).data : {}
+                this.archiveReviews(namespace, sessionId, merged)
                 for (const [field, value] of Object.entries(record.data)) {
                     if (value === null) delete merged[field]
                     else merged[field] = value
                 }
+                this.archiveReviews(namespace, sessionId, merged)
                 write.run({ namespace, session_id: sessionId, key: record.key, data: JSON.stringify(merged), now })
             }
             const { count } = this.db.query<{ count: number }, [string]>(
@@ -93,6 +137,8 @@ export class WorkerRecordStore {
     }
 
     remove(namespace: string, sessionId: string, key: string): boolean {
+        const old = this.list(namespace, sessionId).find((row) => row.key === key)
+        if (old) this.archiveReviews(namespace, sessionId, old.data)
         return this.db.query(
             'DELETE FROM worker_records WHERE namespace = ? AND session_id = ? AND key = ?'
         ).run(namespace, sessionId, key).changes > 0
@@ -110,5 +156,7 @@ export class WorkerRecordStore {
     transfer(oldSessionId: string, newSessionId: string): void {
         this.db.query('UPDATE OR IGNORE worker_records SET session_id = ? WHERE session_id = ?').run(newSessionId, oldSessionId)
         this.db.query('DELETE FROM worker_records WHERE session_id = ?').run(oldSessionId)
+        this.db.query('UPDATE OR IGNORE worker_review_history SET session_id = ? WHERE session_id = ?').run(newSessionId, oldSessionId)
+        this.db.query('DELETE FROM worker_review_history WHERE session_id = ?').run(oldSessionId)
     }
 }

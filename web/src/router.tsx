@@ -23,6 +23,7 @@ import { SessionList } from '@/components/SessionList'
 import { SwarmView } from '@/components/Swarm/SwarmView'
 import { SkillsView, skillInvocation } from '@/components/Skills/SkillsView'
 import { useMachineSkills, type UnifiedSkill } from '@/hooks/queries/useMachineSkills'
+import { useSkillUsage } from '@/hooks/queries/useSkillUsage'
 import { saveDraft } from '@/lib/composer-drafts'
 import { SwarmRailIcon, SkillsRailIcon, SecretsRailIcon } from '@/components/AppRail'
 import { SecretsView } from '@/components/Secrets/SecretsView'
@@ -47,6 +48,7 @@ import { useSkills } from '@/hooks/queries/useSkills'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { PromoteToWorkerDialog } from '@/components/Swarm/PromoteToWorkerDialog'
 import { WorkerBoard } from '@/components/Swarm/WorkerBoard'
+import { randomId } from '@/lib/randomId'
 import { WorkerDetails } from '@/components/Swarm/WorkerDetails'
 import type { SetSessionSwarmRequest } from '@hapi/protocol/apiTypes'
 import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
@@ -501,6 +503,7 @@ function SkillsPage() {
     // machine the operator picked.
     const machineId = selectedMachineId ?? machines[0]?.id ?? null
     const { skills, isLoading, failedFlavors, error, refetch } = useMachineSkills(api, machineId)
+    const { usage } = useSkillUsage(api)
 
     const handleCopy = useCallback(async (skill: UnifiedSkill) => {
         const invocation = skillInvocation(skill.name)
@@ -543,6 +546,7 @@ function SkillsPage() {
                     machineId={machineId}
                     onMachineChange={setSelectedMachineId}
                     skills={skills}
+                    usage={usage}
                     isLoading={isLoading}
                     failedFlavors={failedFlavors}
                     error={error}
@@ -740,8 +744,21 @@ function WorkerPage() {
                     <WorkerBoard
                         session={session}
                         records={data?.records ?? []}
+                        reviewHistory={data?.reviewHistory}
                         isLoading={isLoading}
                         error={error instanceof Error ? error.message : null}
+                        onRecord={async (key, fields) => {
+                            await api.updateWorkerRecord(sessionId, key, fields)
+                            try {
+                                await queryClient.invalidateQueries({ queryKey: ['worker-records', sessionId] })
+                                const targetId = session.active ? sessionId : await api.resumeSession(sessionId)
+                                await api.sendMessage(targetId, 'An item review was just saved on the worker board. Follow the playbook: process all unprocessed review feedback and update the relevant criteria where the evidence supports it.', randomId(), undefined, undefined, 'queue')
+                                return true
+                            } catch {
+                                // The review is already durable. The playbook retries it on the next scheduled run.
+                                return false
+                            }
+                        }}
                     />
                     <PromoteToWorkerDialog
                         isOpen={editing}

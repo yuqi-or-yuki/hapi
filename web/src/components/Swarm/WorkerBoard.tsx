@@ -5,6 +5,11 @@ import { formatRelativeTime } from '@/lib/relativeTime'
 import { useTranslation } from '@/lib/use-translation'
 import { boardCell, boardColumns, filterRecords, sortRecords, toCsv, type BoardSort } from './board'
 import { workerName } from './worker'
+import { TalentReview } from './TalentReview'
+import { ApprovalAgreement } from './ApprovalAgreement'
+import { CategoryHitRates } from './CategoryHitRates'
+import { invalidReviewCards, UnfilledCardsNotice } from './UnfilledCardsNotice'
+import { BoardGallery } from './BoardGallery'
 
 function Cell(props: { value: unknown }) {
     const cell = boardCell(props.value)
@@ -17,6 +22,8 @@ function Cell(props: { value: unknown }) {
                 : <span className="text-[var(--app-hint)]">—</span>
         case 'number':
             return <span className="tabular-nums">{cell.value.toLocaleString()}</span>
+        case 'gallery':
+            return <BoardGallery images={cell.images} />
         case 'link':
             return (
                 <a href={cell.href} target="_blank" rel="noreferrer" className="break-all text-[var(--app-link)] hover:underline">
@@ -45,16 +52,22 @@ function downloadCsv(name: string, csv: string): void {
 export function WorkerBoard(props: {
     session: SessionSummary
     records: readonly WorkerRecord[]
+    reviewHistory?: readonly WorkerRecord[]
     isLoading: boolean
     error: string | null
+    onRecord: (key: string, fields: Record<string, unknown>) => Promise<boolean>
 }) {
     const { t } = useTranslation()
     const { session, records } = props
     const swarm = session.metadata?.swarm
     const [query, setQuery] = useState('')
     const [sort, setSort] = useState<BoardSort | null>(null)
+    const [reviewMode, setReviewMode] = useState(false)
+    const talent = swarm?.board?.title === 'Talent intake'
+    const itemApproval = swarm?.board?.columns ? Boolean(swarm.board.columns.includes('suggestedDecision') && swarm.board.columns.includes('suggestedReason')) : talent
+    const invalidCards = useMemo(() => invalidReviewCards(records, swarm?.board), [records, swarm?.board])
 
-    const columns = useMemo(() => boardColumns(records, swarm?.board?.columns), [records, swarm?.board?.columns])
+    const columns = useMemo(() => boardColumns(records, swarm?.board?.columns).filter((column) => column.key !== 'linkedinReviews' && column.key !== 'approvalReviews'), [records, swarm?.board?.columns])
     const visible = useMemo(() => sortRecords(filterRecords(records, query), sort), [records, query, sort])
     const name = workerName(session)
     const updatedAt = records.reduce((latest, record) => Math.max(latest, record.updatedAt), 0)
@@ -79,6 +92,7 @@ export function WorkerBoard(props: {
                         {updated ? ` · ${t('swarm.board.updated', { time: updated })}` : ''}
                     </div>
                 </div>
+                {itemApproval && records.length > 0 && <button type="button" disabled={invalidCards.length > 0} title={invalidCards.length > 0 ? t('swarm.unfilled.title', { n: invalidCards.length }) : undefined} onClick={() => setReviewMode((value) => !value)} className="rounded-full border border-[var(--app-border)] px-4 py-2 text-xs font-medium hover:bg-[var(--app-subtle-bg)] disabled:cursor-not-allowed disabled:opacity-40">{reviewMode ? 'Show table' : talent ? 'Review candidates' : 'Review suggestions'}</button>}
                 <input
                     type="search"
                     value={query}
@@ -112,7 +126,12 @@ export function WorkerBoard(props: {
                 </div>
             ) : null}
 
-            {records.length > 0 ? (
+            {/* One unfilled card invalidates the review: it stays closed until every card is prefilled. */}
+            <UnfilledCardsNotice cards={invalidCards} />
+            {itemApproval && <CategoryHitRates records={props.reviewHistory ?? records} talent={talent} />}
+            {itemApproval && <ApprovalAgreement records={props.reviewHistory ?? records} roleRecords={records} talent={talent} />}
+            {reviewMode && invalidCards.length === 0 && <TalentReview records={visible} talent={talent} onRecord={props.onRecord} onClose={() => setReviewMode(false)} />}
+            {records.length > 0 && !(reviewMode && invalidCards.length === 0) ? (
                 <div className="mt-4 overflow-x-auto rounded-2xl border border-[var(--app-border)]">
                     <table className="w-full min-w-max border-collapse text-left text-sm">
                         <thead className="bg-[var(--app-subtle-bg)] text-xs text-[var(--app-hint)]">

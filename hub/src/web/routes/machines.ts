@@ -8,12 +8,13 @@ import {
 } from '@hapi/protocol'
 import { Hono } from 'hono'
 import { RPC_TARGET_MISSING_ERROR_CODE } from '@hapi/protocol/rpcMethods'
+import type { Store } from '../../store'
 import type { SyncEngine } from '../../sync/syncEngine'
 import { RpcTargetMissingError } from '../../sync/rpcGateway'
 import type { WebAppEnv } from '../middleware/auth'
 import { requireMachine } from './guards'
 
-export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Hono<WebAppEnv> {
+export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null, store?: Store): Hono<WebAppEnv> {
     const app = new Hono<WebAppEnv>()
 
     app.get('/machines', (c) => {
@@ -255,6 +256,20 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null): Ho
                 error: error instanceof Error ? error.message : 'Failed to list Pi models'
             }, 500)
         }
+    })
+
+    // Times each skill has been invoked, derived from the prompts in this
+    // namespace. Machine-independent — a skill's history follows the operator,
+    // not the box — but it lives beside the catalog it annotates.
+    app.get('/skills/usage', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) {
+            return c.json({ success: false, error: 'Not connected' }, 503)
+        }
+        // Answers with what has been counted so far; `complete` tells the web
+        // whether the first pass is still running in the background.
+        const snapshot = store?.skillInvocations.snapshot()
+        return c.json({ success: true, counts: snapshot?.counts ?? {}, complete: snapshot?.complete ?? true })
     })
 
     app.get('/machines/:id/skills', async (c) => {

@@ -25,7 +25,7 @@ export type WorkerDraft = SetSessionSwarmRequest & { job: string }
 type WorkerSubject = {
     id: string
     flavor?: string | null
-    swarm?: { job: string; name?: string; avatarSeed?: string; playbook?: string; review?: { runsLeft: number }; activeWindow?: ActiveWindow } | null
+    swarm?: { job: string; name?: string; avatarSeed?: string; playbook?: string; review?: { runsLeft: number }; activeWindow?: ActiveWindow; board?: { title?: string; columns?: string[] } } | null
     workerRun?: SessionSummary['workerRun']
 }
 
@@ -71,9 +71,11 @@ export function PromoteToWorkerDialog(props: {
     const [activeWindow, setActiveWindow] = useState<ActiveWindow>(worker.swarm?.activeWindow ?? {})
     const [playbook, setPlaybook] = useState(worker.swarm?.playbook ?? '')
     const [reviewRuns, setReviewRuns] = useState(worker.swarm?.review?.runsLeft ?? 0)
+    const savedApproval = Boolean(worker.swarm?.board?.columns?.includes('suggestedDecision') && worker.swarm.board.columns.includes('suggestedReason'))
+    const [itemApproval, setItemApproval] = useState(savedApproval)
     const [error, setError] = useState<string | null>(null)
     const [isPending, setIsPending] = useState(false)
-    const inputRef = useRef<HTMLInputElement>(null)
+    const inputRef = useRef<HTMLTextAreaElement>(null)
 
     useEffect(() => {
         if (!props.isOpen) return
@@ -84,6 +86,7 @@ export function PromoteToWorkerDialog(props: {
         setActiveWindow(worker.swarm?.activeWindow ?? {})
         setPlaybook(worker.swarm?.playbook ?? '')
         setReviewRuns(worker.swarm?.review?.runsLeft ?? 0)
+        setItemApproval(savedApproval)
         setError(null)
         setIsPending(false)
         const timer = setTimeout(() => inputRef.current?.focus(), 100)
@@ -105,6 +108,12 @@ export function PromoteToWorkerDialog(props: {
                 avatarSeed: seed,
                 playbook: playbook.trim(),
                 reviewRuns,
+                board: itemApproval !== savedApproval ? {
+                    ...worker.swarm?.board,
+                    columns: itemApproval
+                        ? [...new Set([...(worker.swarm?.board?.columns ?? ['name']), 'suggestedDecision', 'suggestedReason'])]
+                        : (worker.swarm?.board?.columns ?? []).filter((c) => c !== 'suggestedDecision' && c !== 'suggestedReason')
+                } : undefined,
                 // An empty window means "around the clock", which the hub stores as no window at all.
                 activeWindow: activeWindow.weekdaysOnly || activeWindow.startHour !== undefined ? activeWindow : null,
                 // An untouched schedule is left alone so saving a rename does not re-time the next run.
@@ -122,7 +131,7 @@ export function PromoteToWorkerDialog(props: {
 
     return (
         <Dialog open={props.isOpen} onOpenChange={(open) => !open && props.onClose()}>
-            <DialogContent className="max-h-[92vh] max-w-md overflow-y-auto">
+            <DialogContent className="max-h-[92vh] max-w-md overflow-y-auto sm:max-w-2xl">
                 <DialogHeader className="pr-0">
                     <DialogTitle className="min-h-6 px-10 text-center leading-6">
                         {isEdit ? t('swarm.promote.editTitle') : t('swarm.promote.title')}
@@ -162,14 +171,20 @@ export function PromoteToWorkerDialog(props: {
                         <label htmlFor="swarm-job" className="block text-sm font-medium text-[var(--app-fg)]">
                             {t('swarm.promote.label')}
                         </label>
-                        <input
+                        <textarea
                             id="swarm-job"
                             ref={inputRef}
-                            type="text"
                             value={job}
                             onChange={(event) => setJob(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === 'Enter' && !event.shiftKey) {
+                                    event.preventDefault()
+                                    event.currentTarget.form?.requestSubmit()
+                                }
+                            }}
                             placeholder={t('swarm.promote.placeholder')}
-                            className={`mt-2 w-full ${INPUT_CLASS}`}
+                            rows={2}
+                            className={`mt-2 w-full resize-y text-sm leading-relaxed ${INPUT_CLASS}`}
                             disabled={isPending}
                             maxLength={200}
                         />
@@ -187,10 +202,10 @@ export function PromoteToWorkerDialog(props: {
                             value={playbook}
                             onChange={(event) => setPlaybook(event.target.value)}
                             placeholder={t('swarm.promote.playbookPlaceholder')}
-                            rows={3}
+                            rows={10}
                             maxLength={8000}
                             disabled={isPending}
-                            className={`mt-2 w-full resize-y text-sm ${INPUT_CLASS}`}
+                            className={`mt-2 w-full resize-y font-mono text-[13px] leading-relaxed ${INPUT_CLASS}`}
                         />
                         <p className="mt-2 text-xs text-[var(--app-hint)]">{t('swarm.promote.playbookHint')}</p>
                     </div>
@@ -297,6 +312,10 @@ export function PromoteToWorkerDialog(props: {
                         </p>
                     </fieldset>
 
+                    <div>
+                        <label className="flex items-start gap-2 text-sm font-medium text-[var(--app-fg)]"><input type="checkbox" checked={itemApproval} onChange={(event) => setItemApproval(event.target.checked)} disabled={isPending} className="mt-0.5" /> Item approval and prediction tracking</label>
+                        <p className="mt-2 text-xs text-[var(--app-hint)]">Review suggested yes/no decisions and reasons one item at a time. Track agreement without automatically taking external actions.</p>
+                    </div>
                     <div>
                         <label htmlFor="swarm-review" className="block text-sm font-medium text-[var(--app-fg)]">
                             {t('swarm.promote.reviewLabel')}

@@ -203,6 +203,9 @@ ${chalk.bold('Board rows:')}
   so a rerun updates the row instead of adding a duplicate. Fields merge: recording
   {"emailSent": true} for an existing key changes only that field; null removes a field.
   URLs, emails, numbers and true/false get their own cell style on the board.
+  A field holding an image URL, or a list of them, is shown as pictures rather
+  than links — use it when what the item looks like is the point (a listing,
+  an office, a product, a headshot).
 
 ${chalk.bold('Working hours:')}
   --weekdays and --hours 9-17 (24h, the hub's local time) limit when the schedule fires.
@@ -223,6 +226,7 @@ ${chalk.bold('Examples:')}
       --columns name,linkedin,citations,whyGoodFit,industryExperience,emailSent
   hapi worker record --key "linkedin.com/in/jane" --data '{"name":"Jane Doe","citations":4120,"emailSent":false}'
   hapi worker record --key "linkedin.com/in/jane" --data '{"emailSent":true}'
+  hapi worker record --key "listing/42" --data '{"rent":4200,"photos":["https://…/1.jpg","https://…/2.jpg"]}'
 `)
 }
 

@@ -82,7 +82,7 @@ function estimateBase64Bytes(base64: string): number {
     return Math.floor((len * 3) / 4) - padding
 }
 
-type WorkerBrief = Pick<SwarmMembership, 'job' | 'playbook' | 'review'>
+type WorkerBrief = Pick<SwarmMembership, 'job' | 'playbook' | 'review' | 'board'>
 
 /**
  * What a worker is told on each scheduled run. Rebuilt whenever the worker is
@@ -95,6 +95,9 @@ export function workerPrompt(worker: WorkerBrief): string {
         parts.push(`Current playbook (this is how the job is done now; it replaces any earlier instructions in this conversation):\n${worker.playbook}`)
     }
     parts.push('Do this run now. Put every result on your board with `hapi worker record` (one row per item, a stable --key so reruns update rows instead of duplicating them; `hapi worker rows` shows what is already there).')
+    if (worker.board?.columns?.includes('suggestedDecision') && worker.board.columns.includes('suggestedReason')) {
+        parts.push('Item approval is enabled. Every card awaiting review must be prefilled: a name, suggestedDecision (yes or no) and an evidence-based suggestedReason (and bestFitRole on a talent board). The board rejects a write that leaves any such card unfilled, and the review stays closed while one is. Suggestion hit rate is measured per category, so set the item\'s category (the role on a talent board, a `category` field elsewhere). These are predictions, not user decisions or authorization to act. Read saved approvalReviews (or linkedinReviews on a talent board), process unhandled feedback without inventing preferences, and preserve all history. The dashboard tracks agreement only where the original prediction was captured.')
+    }
     if (worker.review) {
         parts.push(`REVIEW PERIOD (${worker.review.runsLeft} more approved run${worker.review.runsLeft === 1 ? '' : 's'} before you run free): do the work and record the rows, but do not take any action that reaches outside this machine or cannot be undone (sending email or messages, posting, purchasing, deleting, pushing). Prepare those as drafts, list exactly what you would have done, and stop for review.`)
     }
@@ -1093,7 +1096,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
         const sessionResult = requireSessionFromParam(c, engine)
         if (sessionResult instanceof Response) return sessionResult
 
-        return c.json({ records: store?.workerRecords.list(c.get('namespace'), sessionResult.sessionId) ?? [] })
+        return c.json({ records: store?.workerRecords.list(c.get('namespace'), sessionResult.sessionId) ?? [], reviewHistory: store?.workerRecords.reviewHistory(c.get('namespace'), sessionResult.sessionId) ?? [] })
     })
 
     app.post('/sessions/:id/worker-records', async (c) => {

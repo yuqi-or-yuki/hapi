@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react'
 import type { Machine, SessionSummary } from '@/types/api'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
 import { SKILL_FLAVORS, type SkillFlavor, type UnifiedSkill } from '@/hooks/queries/useMachineSkills'
+import type { SkillUsage } from '@/hooks/queries/useSkillUsage'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { useTranslation } from '@/lib/use-translation'
 
@@ -23,12 +24,31 @@ export function filterSkills(skills: readonly UnifiedSkill[], query: string): Un
  * A skill every agent on the machine can see. These live in a shared root
  * (`~/.agents/skills`); anything narrower is a copy one harness owns.
  */
+export type SkillSort = 'used' | 'name'
+
+/**
+ * Orders the library. "Most used" leads with the skills you actually reach
+ * for — the long tail of installed-but-never-run is the usual case, so an
+ * alphabetical list buries the handful that matter.
+ */
+export function sortSkills(
+    skills: readonly UnifiedSkill[],
+    usage: Record<string, SkillUsage>,
+    sort: SkillSort
+): UnifiedSkill[] {
+    const calls = (skill: UnifiedSkill) => usage[skill.name.toLowerCase()]?.calls ?? 0
+    return [...skills].sort((a, b) => sort === 'used'
+        ? (calls(b) - calls(a)) || a.name.localeCompare(b.name)
+        : a.name.localeCompare(b.name))
+}
+
 export function isSharedSkill(skill: UnifiedSkill, knownFlavors: readonly SkillFlavor[]): boolean {
     return knownFlavors.length > 1 && knownFlavors.every((flavor) => skill.flavors.includes(flavor))
 }
 
 function SkillCard(props: {
     skill: UnifiedSkill
+    usage: SkillUsage | undefined
     knownFlavors: readonly SkillFlavor[]
     onCopy: (skill: UnifiedSkill) => void
     onUse: (skill: UnifiedSkill) => void
@@ -66,6 +86,14 @@ function SkillCard(props: {
             ) : null}
 
             <div className="mt-2.5 flex items-center gap-1.5">
+                <span
+                    className={`shrink-0 text-[11px] tabular-nums ${props.usage ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}
+                    title={props.usage
+                        ? t('skills.used.hint', { time: new Date(props.usage.lastUsedAt).toLocaleDateString() })
+                        : t('skills.used.never.hint')}
+                >
+                    {props.usage ? t('skills.used', { n: props.usage.calls }) : t('skills.used.never')}
+                </span>
                 {props.canUse ? (
                     <button
                         type="button"
@@ -94,6 +122,7 @@ export function SkillsView(props: {
     machineId: string | null
     onMachineChange: (machineId: string) => void
     skills: UnifiedSkill[]
+    usage: Record<string, SkillUsage>
     isLoading: boolean
     failedFlavors: SkillFlavor[]
     error: string | null
@@ -105,6 +134,7 @@ export function SkillsView(props: {
     const { t } = useTranslation()
     const [query, setQuery] = useState('')
     const [agentFilter, setAgentFilter] = useState<SkillFlavor | 'all'>('all')
+    const [sort, setSort] = useState<SkillSort>('used')
     const [pendingSkill, setPendingSkill] = useState<UnifiedSkill | null>(null)
 
     const knownFlavors = useMemo(
@@ -115,8 +145,8 @@ export function SkillsView(props: {
         const byAgent = agentFilter === 'all'
             ? props.skills
             : props.skills.filter((skill) => skill.flavors.includes(agentFilter))
-        return filterSkills(byAgent, query)
-    }, [props.skills, agentFilter, query])
+        return sortSkills(filterSkills(byAgent, query), props.usage, sort)
+    }, [props.skills, props.usage, agentFilter, query, sort])
 
     // Sessions the skill can be dropped into: the ones on this machine, most
     // recent first, so the picker leads with where you were just working.
@@ -174,6 +204,16 @@ export function SkillsView(props: {
                     aria-label={t('skills.search')}
                     className="min-h-9 w-full min-w-0 flex-1 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-3 py-1 text-sm text-[var(--app-fg)] placeholder:text-[var(--app-hint)] focus:border-transparent focus:outline-none focus:ring-2 focus:ring-[var(--app-button)] sm:w-auto"
                 />
+
+                <select
+                    value={sort}
+                    onChange={(event) => setSort(event.target.value as SkillSort)}
+                    aria-label={t('skills.sort')}
+                    className="min-h-9 shrink-0 rounded-lg border border-[var(--app-border)] bg-[var(--app-bg)] px-2 py-1 text-xs text-[var(--app-fg)]"
+                >
+                    <option value="used">{t('skills.sort.used')}</option>
+                    <option value="name">{t('skills.sort.name')}</option>
+                </select>
             </div>
 
             <p className="mt-3 flex items-center gap-2 text-xs text-[var(--app-hint)]">
@@ -221,6 +261,7 @@ export function SkillsView(props: {
                     <SkillCard
                         key={skill.name}
                         skill={skill}
+                        usage={props.usage[skill.name.toLowerCase()]}
                         knownFlavors={knownFlavors}
                         onCopy={props.onCopy}
                         onUse={setPendingSkill}

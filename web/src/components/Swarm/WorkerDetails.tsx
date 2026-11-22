@@ -72,6 +72,16 @@ export function WorkerDetails(props: {
             </div>
 
             <dl className="mt-4 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-[auto_1fr]">
+                {/* Always stated, not only while in review: silence would leave
+                    "is it acting on its own?" to be inferred from a missing banner. */}
+                <dt className="text-[var(--app-hint)]">{t('swarm.details.mode')}</dt>
+                <dd className="text-[var(--app-fg)]">
+                    <span className={`font-medium ${swarm?.review ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-400'}`}>
+                        {t(swarm?.review ? 'swarm.mode.review' : 'swarm.mode.free')}
+                    </span>
+                    {' · '}
+                    {swarm?.review ? t('swarm.mode.review.hint', { n: swarm.review.runsLeft }) : t('swarm.mode.free.hint')}
+                </dd>
                 <dt className="text-[var(--app-hint)]">{t('swarm.details.schedule')}</dt>
                 <dd className="text-[var(--app-fg)]">
                     {run

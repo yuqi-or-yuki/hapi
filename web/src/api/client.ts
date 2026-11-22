@@ -1014,6 +1014,11 @@ export class ApiClient {
         )
     }
 
+    /** How often each skill has been invoked, derived from your prompt history. */
+    async getSkillUsage(): Promise<{ success: boolean; counts?: Record<string, { calls: number; lastUsedAt: number }>; error?: string }> {
+        return await this.request('/api/skills/usage')
+    }
+
     /** Skills the runner on this machine can see, for one agent flavor. */
     async getMachineSkills(machineId: string, flavor: string): Promise<SkillsResponse> {
         return await this.request<SkillsResponse>(
@@ -1069,8 +1074,14 @@ export class ApiClient {
         await this.request(`/api/secrets/${encodeURIComponent(name)}`, { method: 'DELETE' })
     }
 
-    async getWorkerRecords(sessionId: string): Promise<{ records: WorkerRecord[] }> {
+    async getWorkerRecords(sessionId: string): Promise<{ records: WorkerRecord[]; reviewHistory?: WorkerRecord[] }> {
         return await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/worker-records`)
+    }
+
+    async updateWorkerRecord(sessionId: string, key: string, data: Record<string, unknown>): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(sessionId)}/worker-records`, {
+            method: 'POST', body: JSON.stringify({ records: [{ key, data }] })
+        })
     }
 
     async setSessionPinMode(sessionId: string, mode: 'none' | 'project' | 'global'): Promise<void> {

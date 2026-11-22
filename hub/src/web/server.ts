@@ -291,7 +291,7 @@ function createWebApp(options: {
     app.route('/api', createScheduledMessagesRoutes(options.store, options.getSyncEngine))
     app.route('/api', createSecretsRoutes(options.store))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
-    app.route('/api', createMachinesRoutes(options.getSyncEngine))
+    app.route('/api', createMachinesRoutes(options.getSyncEngine, options.store))
     app.route('/api', createStorageRoutes(configuration.dbPath))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
     app.route('/api', createGitRoutes(options.getSyncEngine))

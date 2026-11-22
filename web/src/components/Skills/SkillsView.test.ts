@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { UnifiedSkill } from '@/hooks/queries/useMachineSkills'
 import { SKILL_FLAVORS } from '@/hooks/queries/useMachineSkills'
-import { filterSkills, isSharedSkill, skillInvocation } from './SkillsView'
+import { filterSkills, isSharedSkill, skillInvocation, sortSkills } from './SkillsView'
 
 const skills: UnifiedSkill[] = [
     { name: 'pp', description: 'Open a PR back to staging', flavors: ['claude', 'codex', 'grok', 'copilot'] },
@@ -46,5 +46,24 @@ describe('isSharedSkill', () => {
 describe('skillInvocation', () => {
     it('is what you type to run the skill', () => {
         expect(skillInvocation('pp')).toBe('/pp')
+    })
+})
+
+describe('sortSkills', () => {
+    const usage = { pp: { calls: 187, lastUsedAt: 3 }, obsidian: { calls: 2, lastUsedAt: 1 } }
+
+    it('leads with the skills actually used, so the never-run tail sinks', () => {
+        expect(sortSkills(skills, usage, 'used').map(s => s.name)).toEqual(['pp', 'obsidian', 'tenera'])
+    })
+
+    it('falls back to name order for ties and for the A-Z sort', () => {
+        expect(sortSkills(skills, {}, 'used').map(s => s.name)).toEqual(['obsidian', 'pp', 'tenera'])
+        expect(sortSkills(skills, usage, 'name').map(s => s.name)).toEqual(['obsidian', 'pp', 'tenera'])
+    })
+
+    it('does not mutate the list it was given', () => {
+        const input = [...skills]
+        sortSkills(input, usage, 'used')
+        expect(input.map(s => s.name)).toEqual(skills.map(s => s.name))
     })
 })
