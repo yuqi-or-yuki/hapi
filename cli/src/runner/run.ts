@@ -1181,6 +1181,18 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
 
     const cloudVm = await detectCloudVm();
 
+    // Put the skills that ship with HAPI where the agents on this machine find them.
+    try {
+      const [{ BUNDLED_SKILLS }, { installStandardSkills }] = await Promise.all([
+        import('@/skills/bundled'),
+        import('@/skills/standardSkills'),
+      ]);
+      const written = installStandardSkills(BUNDLED_SKILLS);
+      if (written.length > 0) logger.debug(`[RUNNER RUN] Installed standard skills: ${written.join(', ')}`);
+    } catch (error) {
+      logger.debug('[RUNNER RUN] Could not install standard skills', error);
+    }
+
     // Get or create machine (with retry for transient connection errors)
     const machine = await withRetry(
       () => api.getOrCreateMachine({
