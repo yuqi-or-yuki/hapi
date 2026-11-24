@@ -1,25 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import type { SessionSummary } from '@/types/api'
 import { formatFutureRelativeTime } from '@/lib/scheduledTime'
 import { useTranslation } from '@/lib/use-translation'
 import { SwarmRailIcon } from '@/components/AppRail'
 import { RunStrip } from './RunStrip'
-import { SwarmOffice } from './SwarmOffice'
 import { WorkerAvatar } from './WorkerAvatar'
 import { describeSchedule, newToReview, workerName, workerSeed, workerState, type WorkerState } from './worker'
-
-/** The office is the default; the list stays for small screens and for scanning many workers. */
-const VIEW_MODES = ['office', 'list'] as const
-type SwarmViewMode = typeof VIEW_MODES[number]
-const VIEW_KEY = 'hapi.swarm.view.v1'
-
-function readViewMode(): SwarmViewMode {
-    try {
-        return localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'office'
-    } catch {
-        return 'office'
-    }
-}
 
 export type Worker = {
     session: SessionSummary
@@ -139,22 +125,6 @@ export function SwarmView(props: {
 }) {
     const { t } = useTranslation()
     const workers = useMemo(() => selectWorkers(props.sessions), [props.sessions])
-    const [view, setView] = useState<SwarmViewMode>(readViewMode)
-    const chooseView = (mode: SwarmViewMode) => {
-        setView(mode)
-        try {
-            localStorage.setItem(VIEW_KEY, mode)
-        } catch {
-            // The choice simply does not survive a reload.
-        }
-    }
-    const card = (worker: Worker) => (
-        <WorkerCard
-            worker={worker}
-            onOpen={() => props.onOpenWorker(worker.session.id)}
-            onApprove={() => props.onApprove(worker.session)}
-        />
-    )
 
     return (
         <div className="mx-auto w-full max-w-content px-3 py-4 sm:px-4 sm:py-5">
@@ -165,30 +135,16 @@ export function SwarmView(props: {
                     <p className="mx-auto mt-2 max-w-md text-sm text-[var(--app-hint)]">{t('swarm.empty.body')}</p>
                 </div>
             ) : (
-                <>
-                    <div className="mb-3 flex justify-end">
-                        <div className="inline-flex rounded-full bg-[var(--app-subtle-bg)] p-0.5 text-xs" role="group" aria-label={t('swarm.view.label')}>
-                            {VIEW_MODES.map((mode) => (
-                                <button
-                                    key={mode}
-                                    type="button"
-                                    aria-pressed={view === mode}
-                                    onClick={() => chooseView(mode)}
-                                    className={`rounded-full px-3 py-1 ${view === mode ? 'bg-[var(--app-bg)] font-medium text-[var(--app-fg)] shadow-sm' : 'text-[var(--app-hint)] hover:text-[var(--app-fg)]'}`}
-                                >
-                                    {t(`swarm.view.${mode}`)}
-                                </button>
-                            ))}
-                        </div>
-                    </div>
-                    {view === 'office' ? (
-                        <SwarmOffice workers={workers} renderCard={card} onOpenWorker={props.onOpenWorker} />
-                    ) : (
-                        <div className="grid gap-3 lg:grid-cols-2">
-                            {workers.map((worker) => <div key={worker.session.id}>{card(worker)}</div>)}
-                        </div>
-                    )}
-                </>
+                <div className="grid gap-3 lg:grid-cols-2">
+                    {workers.map((worker) => (
+                        <WorkerCard
+                            key={worker.session.id}
+                            worker={worker}
+                            onOpen={() => props.onOpenWorker(worker.session.id)}
+                            onApprove={() => props.onApprove(worker.session)}
+                        />
+                    ))}
+                </div>
             )}
         </div>
     )
