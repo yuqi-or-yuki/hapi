@@ -3,7 +3,7 @@
 # running its own HAPI at http://<name>:3006 (see startup.sh).
 #   scripts/agent-vm/create-vm.sh <name> [machine-type]
 # Set HAPI_VM_HUB_URL to make it a runner for an existing hub instead.
-# To ship a new HAPI build to the VMs: upload-binary.sh, then reboot them.
+# New HAPI builds reach the VMs on their own: see .github/workflows/deploy-gcp.yml.
 set -euo pipefail
 NAME=${1:?usage: create-vm.sh <name> [machine-type]}
 TYPE=${2:-e2-standard-4}

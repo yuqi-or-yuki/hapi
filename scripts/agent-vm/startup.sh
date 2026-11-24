@@ -64,12 +64,55 @@ if ! tailscale status >/dev/null 2>&1; then
     fi
 fi
 
-# HAPI binary: refreshed on every boot, so a new upload + reboot is a deploy.
+# HAPI binary: installed now and re-checked every two minutes, so publishing a
+# new build (CI on push to main, or upload-binary.sh) is a deploy. The updater
+# swaps the binary and restarts only the hub; the runner notices the new binary
+# and hands itself over, which keeps running sessions alive.
 install -d -o "$AGENT" -g "$AGENT" "$AGENT_HOME/.hapi" "$AGENT_HOME/.hapi/bin" "$AGENT_HOME/work"
-if gcloud storage cp "$HAPI_BINARY" /tmp/hapi.new; then
-    install -o "$AGENT" -g "$AGENT" -m 755 /tmp/hapi.new "$AGENT_HOME/.hapi/bin/hapi"
-    rm -f /tmp/hapi.new
-fi
+cat > /usr/local/bin/hapi-update <<'UPDATER'
+#!/bin/bash
+# usage: hapi-update gs://bucket/object
+set -euo pipefail
+SRC=$1
+DEST=/home/agent/.hapi/bin/hapi
+STAMP=/var/lib/hapi-agent-binary-generation
+GEN=$(gcloud storage objects describe "$SRC" --format='value(generation)')
+[ -n "$GEN" ] || exit 1
+[ -x "$DEST" ] && [ "$GEN" = "$(cat "$STAMP" 2>/dev/null)" ] && exit 0
+gcloud storage cp "$SRC" "$DEST.new" >/dev/null 2>&1
+chmod 755 "$DEST.new"
+chown agent:agent "$DEST.new"
+# Never install a build that does not even start.
+sudo -u agent -H "$DEST.new" --version >/dev/null
+mv "$DEST.new" "$DEST"
+echo "$GEN" > "$STAMP"
+systemctl try-restart hapi-hub || true
+echo "installed HAPI build generation $GEN"
+UPDATER
+chmod 755 /usr/local/bin/hapi-update
+/usr/local/bin/hapi-update "$HAPI_BINARY" || echo "!! could not install the HAPI binary from $HAPI_BINARY"
+
+cat > /etc/systemd/system/hapi-update.service <<EOF
+[Unit]
+Description=Install the latest published HAPI build
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/hapi-update $HAPI_BINARY
+EOF
+cat > /etc/systemd/system/hapi-update.timer <<EOF
+[Unit]
+Description=Check for a new HAPI build every two minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+
+[Install]
+WantedBy=timers.target
+EOF
+systemctl daemon-reload
+systemctl enable --now hapi-update.timer
 
 # Runner environment, also sourced by the agent's login shell.
 install -d -m 750 -g "$AGENT" /etc/hapi
@@ -145,6 +188,9 @@ User=$AGENT
 WorkingDirectory=$AGENT_HOME/work
 EnvironmentFile=/etc/hapi/agent.env
 ExecStart=$AGENT_HOME/.hapi/bin/hapi runner start-sync
+# Sessions are children of the runner: stop only the runner itself, so a runner
+# restart (new build, crash) leaves running sessions alive.
+KillMode=process
 Restart=always
 RestartSec=5
 
@@ -153,5 +199,5 @@ WantedBy=multi-user.target
 EOF
 systemctl daemon-reload
 systemctl enable hapi-runner
-systemctl restart hapi-runner
+systemctl is-active --quiet hapi-runner || systemctl start hapi-runner
 echo "== hapi agent startup done $(date -Is)"

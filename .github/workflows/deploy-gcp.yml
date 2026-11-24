@@ -1,0 +1,45 @@
+name: Deploy to GCP agent VMs
+
+# Every push to main publishes a Linux build to the artifact bucket. The agent
+# VMs check that bucket every two minutes and install a new build themselves
+# (scripts/agent-vm/startup.sh), so nothing here needs access to the VMs.
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+concurrency:
+    group: deploy-gcp
+    cancel-in-progress: true
+
+permissions:
+    contents: read
+    id-token: write
+
+env:
+    GCP_PROJECT: tenera-hapi-agents
+    GCP_PROJECT_NUMBER: '704344919200'
+
+jobs:
+    deploy:
+        # The keyless GCP login only trusts these repositories.
+        if: github.repository == 'trytenera-ai/hapi' || github.repository == 'yuqi-or-yuki/hapi'
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: oven-sh/setup-bun@v2
+            - run: bun install --frozen-lockfile
+            - name: Build Linux binary with the web app embedded
+              run: |
+                  bun run download:tunwg
+                  bun run build:web
+                  (cd hub && bun run generate:embedded-web-assets)
+                  (cd cli && bun run scripts/build-executable.ts --target bun-linux-x64-baseline --with-web-assets)
+                  cli/dist-exe/bun-linux-x64-baseline/hapi --version
+            - uses: google-github-actions/auth@v2
+              with:
+                  workload_identity_provider: projects/${{ env.GCP_PROJECT_NUMBER }}/locations/global/workloadIdentityPools/github/providers/github
+                  service_account: hapi-deployer@${{ env.GCP_PROJECT }}.iam.gserviceaccount.com
+            - uses: google-github-actions/setup-gcloud@v2
+            - name: Publish
+              run: gcloud storage cp cli/dist-exe/bun-linux-x64-baseline/hapi "gs://${GCP_PROJECT}-artifacts/hapi-linux-x64"
