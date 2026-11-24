@@ -170,7 +170,7 @@ export function SessionRowSummary(props: {
             <div className={`grid grid-cols-[minmax(9rem,1fr)_minmax(0,max-content)] items-center gap-2 ${!s.active ? 'opacity-50' : ''}`}>
                 <div className="flex min-w-0 items-center gap-2">
                     {s.metadata?.swarm
-                        ? <WorkerAvatar seed={workerSeed(s)} size={20} />
+                        ? <WorkerAvatar seed={workerSeed(s)} size={20} flavor={s.metadata?.flavor} />
                         : <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4 shrink-0 -translate-y-px" />}
                     <div
                         className={`min-w-0 flex-1 truncate text-sm font-medium ${s.active ? 'text-[var(--app-fg)]' : 'text-[var(--app-hint)]'}`}

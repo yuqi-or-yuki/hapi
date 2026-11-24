@@ -1084,7 +1084,7 @@ function SessionItem(props: {
                         <div className="flex items-center gap-2 min-w-0">
                             <div className="relative shrink-0">
                                 {s.metadata?.swarm
-                                    ? <WorkerAvatar seed={workerSeed(s)} size={20} />
+                                    ? <WorkerAvatar seed={workerSeed(s)} size={20} flavor={s.metadata?.flavor} />
                                     : <AgentFlavorIcon flavor={s.metadata?.flavor} className="h-4 w-4" />}
                                 {readyForReview && !selectionMode ? (
                                     <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-blue-500 ring-1 ring-[var(--app-bg)]" />

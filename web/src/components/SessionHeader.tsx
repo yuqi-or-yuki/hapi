@@ -434,7 +434,7 @@ export function SessionHeader(props: {
 
                     {swarm ? (
                         <span title={workerName(session)}>
-                            <WorkerAvatar seed={workerSeed(session)} size={32} />
+                            <WorkerAvatar seed={workerSeed(session)} size={32} flavor={session.metadata?.flavor} />
                         </span>
                     ) : null}
 
