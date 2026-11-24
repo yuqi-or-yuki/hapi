@@ -58,7 +58,8 @@ fi
 if ! tailscale status >/dev/null 2>&1; then
     TS_KEY=$(secret tailscale-authkey)
     if [ -n "$TS_KEY" ]; then
-        tailscale up --authkey "$TS_KEY" --hostname "$(hostname -s)" --ssh
+        tailscale up --authkey "$TS_KEY" --hostname "$(hostname -s)" --ssh \
+            || echo "!! tailscale-authkey was rejected (single-use or expired?): store a reusable key"
     else
         echo "!! no tailscale-authkey secret: run 'sudo tailscale up --ssh' on the VM"
     fi
