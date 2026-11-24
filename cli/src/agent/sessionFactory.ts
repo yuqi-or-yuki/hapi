@@ -52,6 +52,8 @@ export function buildMachineMetadata(options?: {
      * (#1108 bot Major).
      */
     asRunner?: boolean
+    /** Cloud VM this runner lives on, if any (see runner/cloudVm.ts). */
+    vm?: MachineMetadata['vm']
 }): MachineMetadata {
     const installedCliMtimeMs = getInstalledCliMtimeMs()
     const startedCliMtimeMs = options?.startedCliMtimeMs ?? installedCliMtimeMs
@@ -74,6 +76,7 @@ export function buildMachineMetadata(options?: {
         ...(typeof installedCliMtimeMs === 'number' ? { installedCliMtimeMs } : {}),
         // Always boolean so hub merge can clear a prior true on unsupervised restart.
         supervisedRestart: process.env.HAPI_RUNNER_SUPERVISED === '1',
+        ...(options.vm ? { vm: options.vm } : {}),
     }
 }
 

@@ -732,6 +732,15 @@ export const AgentAuthStateSchema = z.object({
 })
 export type AgentAuthState = z.infer<typeof AgentAuthStateSchema>
 
+/** Create another VM like this machine's, whose runner joins the same hub. */
+export const CreateVmRequestSchema = z.object({
+    name: z.string().regex(/^[a-z]([-a-z0-9]{0,40}[a-z0-9])?$/)
+})
+export type CreateVmRequest = z.infer<typeof CreateVmRequestSchema>
+
+export const CreateVmResponseSchema = z.object({ name: z.string(), zone: z.string() })
+export type CreateVmResponse = z.infer<typeof CreateVmResponseSchema>
+
 export const AuthRequestSchema = z.union([
     z.object({ initData: z.string() }),
     z.object({ accessToken: z.string() })

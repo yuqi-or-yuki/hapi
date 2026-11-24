@@ -3859,6 +3859,10 @@ export class SyncEngine {
         return await this.rpcGateway.agentAuth(machineId, request)
     }
 
+    async createVm(machineId: string, name: string): ReturnType<RpcGateway['createVm']> {
+        return await this.rpcGateway.createVm(machineId, name)
+    }
+
     async listMachineDirectory(machineId: string, path: string, includeHidden?: boolean): Promise<RpcListDirectoryResponse> {
         return await this.rpcGateway.listMachineDirectory(machineId, path, includeHidden)
     }

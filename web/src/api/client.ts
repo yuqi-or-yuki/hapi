@@ -844,6 +844,13 @@ export class ApiClient {
         )
     }
 
+    async createMachineVm(machineId: string, name: string): Promise<{ name: string; zone: string }> {
+        return await this.request<{ name: string; zone: string }>(
+            `/api/machines/${encodeURIComponent(machineId)}/create-vm`,
+            { method: 'POST', body: JSON.stringify({ name }) }
+        )
+    }
+
     async machineAgentAuth(machineId: string, body: AgentAuthRequest): Promise<AgentAuthState> {
         return await this.request<AgentAuthState>(
             `/api/machines/${encodeURIComponent(machineId)}/agent-auth`,

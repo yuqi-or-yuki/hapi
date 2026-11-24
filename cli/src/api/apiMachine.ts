@@ -16,6 +16,8 @@ import {
     type AgentAvailabilityResponse,
     type AgentAuthState,
     AgentAuthRequestSchema,
+    CreateVmRequestSchema,
+    type CreateVmResponse,
     type ListCodexSessionsRpcResponse,
     type ListPiSessionsRpcResponse,
     type MachineDirectoryEntry,
@@ -58,6 +60,7 @@ import type { CursorChatStoreStatus } from '@hapi/protocol/apiTypes'
 import { MachinePathPolicy } from './machinePathPolicy'
 import { getAgentAvailabilityResponse } from '@/agent/agentAvailability'
 import { handleAgentAuth } from '@/agent/agentAuth'
+import { createSiblingVm } from '@/runner/cloudVm'
 
 export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 
@@ -129,6 +132,11 @@ export class ApiMachineClient {
         this.rpcHandlerManager.registerHandler<unknown, AgentAuthState>(
             RPC_METHODS.AgentAuth,
             async (params) => await handleAgentAuth(AgentAuthRequestSchema.parse(params))
+        )
+
+        this.rpcHandlerManager.registerHandler<unknown, CreateVmResponse>(
+            RPC_METHODS.CreateVm,
+            async (params) => await createSiblingVm(CreateVmRequestSchema.parse(params).name)
         )
 
         this.rpcHandlerManager.registerHandler<PathExistsRequest, PathExistsResponse>(RPC_METHODS.PathExists, async (params) => {

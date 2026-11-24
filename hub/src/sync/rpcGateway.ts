@@ -4,6 +4,7 @@ import {
     ArchiveCodexSessionRpcResponseSchema,
     AgentAvailabilityResponseSchema,
     AgentAuthStateSchema,
+    CreateVmResponseSchema,
     CursorChatStoreStatusSchema,
     ListCodexSessionsRpcResponseSchema,
     ListPiSessionsRpcResponseSchema
@@ -13,6 +14,7 @@ import type {
     AgentAvailabilityResponse,
     AgentAuthRequest,
     AgentAuthState,
+    CreateVmResponse,
     CodexModelSummary,
     CodexModelsResponse,
     CommandResponse,
@@ -112,6 +114,13 @@ export type RpcListClaudeModelsResponse = {
     success: boolean
     models?: RpcClaudeModel[]
     error?: string
+}
+
+/** A machine RPC handler that throws answers `{ error: message }`. */
+function throwMachineError(result: unknown): void {
+    if (result && typeof result === 'object' && typeof (result as { error?: unknown }).error === 'string') {
+        throw new Error((result as { error: string }).error)
+    }
 }
 
 export class RpcGateway {
@@ -301,7 +310,14 @@ export class RpcGateway {
     async agentAuth(machineId: string, request: AgentAuthRequest): Promise<AgentAuthState> {
         // `start` waits for the CLI to print its sign-in link, `submit` for the code exchange.
         const result = await this.machineRpc(machineId, RPC_METHODS.AgentAuth, request, 45_000)
+        throwMachineError(result)
         return AgentAuthStateSchema.parse(result)
+    }
+
+    async createVm(machineId: string, name: string): Promise<CreateVmResponse> {
+        const result = await this.machineRpc(machineId, RPC_METHODS.CreateVm, { name }, 60_000)
+        throwMachineError(result)
+        return CreateVmResponseSchema.parse(result)
     }
 
     async checkPathsExist(machineId: string, paths: string[]): Promise<PathExistsResponse> {

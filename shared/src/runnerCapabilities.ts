@@ -32,6 +32,7 @@ export const MACHINE_CAPABILITIES = {
     CursorChatStoreStatus: RPC_METHODS.CursorChatStoreStatus,
     StopRunner: RPC_METHODS.StopRunner,
     AgentAuth: RPC_METHODS.AgentAuth,
+    CreateVm: RPC_METHODS.CreateVm,
 } as const
 
 export type MachineCapability =
@@ -43,6 +44,7 @@ export const CURRENT_MACHINE_CAPABILITIES: readonly MachineCapability[] = [
     MACHINE_CAPABILITIES.CursorChatStoreStatus,
     MACHINE_CAPABILITIES.StopRunner,
     MACHINE_CAPABILITIES.AgentAuth,
+    MACHINE_CAPABILITIES.CreateVm,
 ]
 
 /**

@@ -512,6 +512,19 @@ export const ScratchlistEntriesResponseSchema = z.object({
 
 export type ScratchlistEntriesResponse = z.infer<typeof ScratchlistEntriesResponseSchema>
 
+/** Set by a runner that lives on a cloud VM; drives the cost estimate and "Add VM". */
+export const MachineVmSchema = z.object({
+    provider: z.literal('gcp'),
+    name: z.string(),
+    project: z.string(),
+    zone: z.string(),
+    machineType: z.string(),
+    vcpus: z.number(),
+    memoryGb: z.number(),
+    diskGb: z.number(),
+})
+export type MachineVm = z.infer<typeof MachineVmSchema>
+
 export const MachineMetadataSchema = z.object({
     host: z.string(),
     platform: z.string(),
@@ -532,6 +545,7 @@ export const MachineMetadataSchema = z.object({
      * may stop-runner; unsupervised detached runners must not use that path.
      */
     supervisedRestart: z.boolean().optional(),
+    vm: MachineVmSchema.optional(),
 })
 
 export type MachineMetadata = z.infer<typeof MachineMetadataSchema>

@@ -9,6 +9,7 @@ import { SpawnSessionOptions, SpawnSessionResult } from '@/modules/common/rpcTyp
 import { logger } from '@/ui/logger';
 import { authAndSetupMachineIfNeeded } from '@/ui/auth';
 import { configuration } from '@/configuration';
+import { detectCloudVm } from './cloudVm';
 import packageJson from '../../package.json';
 import { getEnvironmentInfo } from '@/ui/doctor';
 import { spawnHappyCLI } from '@/utils/spawnHappyCLI';
@@ -1178,6 +1179,8 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
     const workspaceRoots = resolveWorkspaceRoots(options.workspaceRoots);
     logger.debug(`[RUNNER RUN] Workspace roots: ${workspaceRoots?.join(', ') ?? '(not set)'}`);
 
+    const cloudVm = await detectCloudVm();
+
     // Get or create machine (with retry for transient connection errors)
     const machine = await withRetry(
       () => api.getOrCreateMachine({
@@ -1186,6 +1189,7 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
             workspaceRoots,
             startedCliMtimeMs: startedWithCliMtimeMs,
             asRunner: true,
+            vm: cloudVm,
         }),
         runnerState: initialRunnerState
       }),

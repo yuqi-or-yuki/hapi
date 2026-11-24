@@ -10,6 +10,7 @@ import { getMachineTitle } from '@/hooks/useMachineLabels'
 import { queryKeys } from '@/lib/query-keys'
 import { SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
 import { MachineAgentAccounts } from '@/components/settings/MachineAgentAccounts'
+import { AddVmRow, VmCostLabel } from '@/components/settings/MachineVm'
 
 function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
     const { t } = useTranslation()
@@ -105,6 +106,7 @@ function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
                         <div className="mt-0.5 truncate text-xs leading-snug text-[var(--app-hint)]">{subtitle}</div>
                     ) : null}
                 </div>
+                <VmCostLabel vm={props.machine.metadata?.vm} />
             </div>
             {error ? <div role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">{error}</div> : null}
             <MachineAgentAccounts api={props.api} machine={props.machine} />
@@ -127,6 +129,7 @@ export default function SettingsMachinesPage() {
                         <MachineRow key={machine.id} api={api} machine={machine} />
                     ))
                 )}
+                <AddVmRow api={api} machines={machines} />
             </SettingsSection>
         </SettingsPageContent>
     )
