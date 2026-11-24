@@ -695,6 +695,43 @@ export const AgentAvailabilityResponseSchema = z.object({
 })
 export type AgentAvailabilityResponse = z.infer<typeof AgentAvailabilityResponseSchema>
 
+/**
+ * Signing an agent CLI in on a machine. The runner runs the agent's own login
+ * command and hands back the sign-in link; the person finishes in any browser.
+ * No credential ever passes through the hub.
+ */
+export const AgentAuthAgentSchema = z.enum(['claude', 'codex'])
+export type AgentAuthAgent = z.infer<typeof AgentAuthAgentSchema>
+
+export const AgentAuthRequestSchema = z.object({
+    agent: AgentAuthAgentSchema,
+    action: z.enum(['status', 'start', 'submit', 'cancel', 'logout']),
+    /** Claude only: the code its sign-in page shows at the end. */
+    code: z.string().min(1).max(4096).optional()
+})
+export type AgentAuthRequest = z.infer<typeof AgentAuthRequestSchema>
+
+export const AgentAuthLoginSchema = z.object({
+    status: z.enum(['waiting', 'done', 'failed']),
+    url: z.string().optional(),
+    /** Codex only: the one-time code to type into the sign-in page. */
+    userCode: z.string().optional(),
+    /** True when the sign-in page ends with a code to send back (Claude). */
+    needsCode: z.boolean(),
+    error: z.string().optional()
+})
+export type AgentAuthLogin = z.infer<typeof AgentAuthLoginSchema>
+
+export const AgentAuthStateSchema = z.object({
+    agent: AgentAuthAgentSchema,
+    installed: z.boolean(),
+    loggedIn: z.boolean(),
+    account: z.string().optional(),
+    plan: z.string().optional(),
+    login: AgentAuthLoginSchema.optional()
+})
+export type AgentAuthState = z.infer<typeof AgentAuthStateSchema>
+
 export const AuthRequestSchema = z.union([
     z.object({ initData: z.string() }),
     z.object({ accessToken: z.string() })

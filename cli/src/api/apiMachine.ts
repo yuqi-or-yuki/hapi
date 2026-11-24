@@ -14,6 +14,8 @@ import {
     ListPiSessionsRpcRequestSchema,
     type ArchiveCodexSessionRpcResponse,
     type AgentAvailabilityResponse,
+    type AgentAuthState,
+    AgentAuthRequestSchema,
     type ListCodexSessionsRpcResponse,
     type ListPiSessionsRpcResponse,
     type MachineDirectoryEntry,
@@ -55,6 +57,7 @@ import { homedir } from 'node:os'
 import type { CursorChatStoreStatus } from '@hapi/protocol/apiTypes'
 import { MachinePathPolicy } from './machinePathPolicy'
 import { getAgentAvailabilityResponse } from '@/agent/agentAvailability'
+import { handleAgentAuth } from '@/agent/agentAuth'
 
 export { normalizeWindowsDriveRoot } from './machinePathPolicy'
 
@@ -121,6 +124,11 @@ export class ApiMachineClient {
         this.rpcHandlerManager.registerHandler<unknown, AgentAvailabilityResponse>(
             RPC_METHODS.AgentAvailability,
             async () => getAgentAvailabilityResponse()
+        )
+
+        this.rpcHandlerManager.registerHandler<unknown, AgentAuthState>(
+            RPC_METHODS.AgentAuth,
+            async (params) => await handleAgentAuth(AgentAuthRequestSchema.parse(params))
         )
 
         this.rpcHandlerManager.registerHandler<PathExistsRequest, PathExistsResponse>(RPC_METHODS.PathExists, async (params) => {

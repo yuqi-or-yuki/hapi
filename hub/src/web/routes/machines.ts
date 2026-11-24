@@ -1,4 +1,5 @@
 import {
+    AgentAuthRequestSchema,
     MACHINE_DISPLAY_NAME_MAX_LENGTH,
     MACHINE_CAPABILITIES,
     MachineListDirectoryRequestSchema,
@@ -146,6 +147,32 @@ export function createMachinesRoutes(getSyncEngine: () => SyncEngine | null, sto
             return c.json({
                 error: error instanceof Error ? error.message : 'Failed to inspect Agent availability',
             }, 500)
+        }
+    })
+
+    app.post('/machines/:id/agent-auth', async (c) => {
+        const engine = getSyncEngine()
+        if (!engine) return c.json({ error: 'Not connected' }, 503)
+
+        const machineId = c.req.param('id')
+        const machine = requireMachine(c, engine, machineId)
+        if (machine instanceof Response) return machine
+        if (!machine.metadata?.capabilities?.includes(MACHINE_CAPABILITIES.AgentAuth)) {
+            return c.json({
+                error: 'This runner must be upgraded before accounts can be managed from here',
+                code: 'runner_upgrade_required',
+            }, 409)
+        }
+
+        const parsed = AgentAuthRequestSchema.safeParse(await c.req.json().catch(() => null))
+        if (!parsed.success) return c.json({ error: 'Invalid body' }, 400)
+
+        try {
+            return c.json(await engine.agentAuth(machineId, parsed.data))
+        } catch (error) {
+            return c.json({
+                error: error instanceof Error ? error.message : 'Failed to reach the agent on this machine',
+            }, 502)
         }
     })
 

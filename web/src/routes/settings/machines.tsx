@@ -9,6 +9,7 @@ import { useMachines } from '@/hooks/queries/useMachines'
 import { getMachineTitle } from '@/hooks/useMachineLabels'
 import { queryKeys } from '@/lib/query-keys'
 import { SettingsPageContent, SettingsSection } from '@/components/settings/SettingsPrimitives'
+import { MachineAgentAccounts } from '@/components/settings/MachineAgentAccounts'
 
 function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
     const { t } = useTranslation()
@@ -106,6 +107,7 @@ function MachineRow(props: { api: ApiClient | null; machine: Machine }) {
                 </div>
             </div>
             {error ? <div role="alert" className="mt-1 text-xs text-red-600 dark:text-red-400">{error}</div> : null}
+            <MachineAgentAccounts api={props.api} machine={props.machine} />
         </div>
     )
 }

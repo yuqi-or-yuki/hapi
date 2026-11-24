@@ -51,6 +51,8 @@ import type {
 import type {
     AgyModelsResponse,
     AgentAvailabilityResponse,
+    AgentAuthRequest,
+    AgentAuthState,
     CodexModelsResponse,
     CursorMigrateOutcome,
     CursorMigrateToAcpRequest,
@@ -839,6 +841,13 @@ export class ApiClient {
     async getMachineAgentAvailability(machineId: string): Promise<AgentAvailabilityResponse> {
         return await this.request<AgentAvailabilityResponse>(
             `/api/machines/${encodeURIComponent(machineId)}/agent-availability`
+        )
+    }
+
+    async machineAgentAuth(machineId: string, body: AgentAuthRequest): Promise<AgentAuthState> {
+        return await this.request<AgentAuthState>(
+            `/api/machines/${encodeURIComponent(machineId)}/agent-auth`,
+            { method: 'POST', body: JSON.stringify(body) }
         )
     }
 

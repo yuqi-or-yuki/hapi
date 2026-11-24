@@ -3,6 +3,7 @@ import { RPC_METHODS } from '@hapi/protocol/rpcMethods'
 import {
     ArchiveCodexSessionRpcResponseSchema,
     AgentAvailabilityResponseSchema,
+    AgentAuthStateSchema,
     CursorChatStoreStatusSchema,
     ListCodexSessionsRpcResponseSchema,
     ListPiSessionsRpcResponseSchema
@@ -10,6 +11,8 @@ import {
 import type {
     AgyModelsResponse,
     AgentAvailabilityResponse,
+    AgentAuthRequest,
+    AgentAuthState,
     CodexModelSummary,
     CodexModelsResponse,
     CommandResponse,
@@ -293,6 +296,12 @@ export class RpcGateway {
     async getAgentAvailability(machineId: string): Promise<AgentAvailabilityResponse> {
         const result = await this.machineRpc(machineId, RPC_METHODS.AgentAvailability, {})
         return AgentAvailabilityResponseSchema.parse(result)
+    }
+
+    async agentAuth(machineId: string, request: AgentAuthRequest): Promise<AgentAuthState> {
+        // `start` waits for the CLI to print its sign-in link, `submit` for the code exchange.
+        const result = await this.machineRpc(machineId, RPC_METHODS.AgentAuth, request, 45_000)
+        return AgentAuthStateSchema.parse(result)
     }
 
     async checkPathsExist(machineId: string, paths: string[]): Promise<PathExistsResponse> {

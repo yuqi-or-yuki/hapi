@@ -3855,6 +3855,10 @@ export class SyncEngine {
         return await this.rpcGateway.getAgentAvailability(machineId)
     }
 
+    async agentAuth(machineId: string, request: Parameters<RpcGateway['agentAuth']>[1]): ReturnType<RpcGateway['agentAuth']> {
+        return await this.rpcGateway.agentAuth(machineId, request)
+    }
+
     async listMachineDirectory(machineId: string, path: string, includeHidden?: boolean): Promise<RpcListDirectoryResponse> {
         return await this.rpcGateway.listMachineDirectory(machineId, path, includeHidden)
     }

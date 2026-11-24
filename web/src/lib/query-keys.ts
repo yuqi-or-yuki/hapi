@@ -9,6 +9,7 @@ export const queryKeys = {
     machineClaudeModels: (machineId: string) => ['machine-claude-models', machineId] as const,
     sessionClaudeModels: (sessionId: string) => ['session-claude-models', sessionId] as const,
     machineAgentAvailability: (machineId: string) => ['machine-agent-availability', machineId] as const,
+    machineAgentAuth: (machineId: string, agent: string) => ['machine-agent-auth', machineId, agent] as const,
     sessionCodexModels: (sessionId: string) => ['session-codex-models', sessionId] as const,
     gitStatus: (sessionId: string) => ['git-status', sessionId] as const,
     sessionFiles: (sessionId: string, query: string) => ['session-files', sessionId, query] as const,
