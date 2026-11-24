@@ -1,18 +1,21 @@
 #!/bin/bash
 # GCE startup script for a HAPI agent VM (Ubuntu 24.04). Runs as root on every
 # boot and is idempotent. It installs Claude Code, Codex, Tailscale and Docker,
-# joins the tailnet, and runs the HAPI runner as user `agent` so the machine
-# shows up in the hub.
+# joins the tailnet, and runs HAPI as user `agent`.
 #
-# Everything secret comes from Secret Manager in the VM's own project:
-#   hapi-cli-token      required  hub CLI_API_TOKEN
+# By default the VM is a complete HAPI of its own: hub + runner, opened from
+# any device on the tailnet at http://<vm-name>:3006 with the access token.
+# Sign the agents in from Settings > Machines in that web app.
+# With instance metadata `hapi-api-url` set, it runs only a runner that joins
+# that existing hub instead.
+#
+# Secrets come from Secret Manager in the VM's own project:
+#   hapi-cli-token      required  access token for the hub (web login + runner)
 #   tailscale-authkey   required  reusable Tailscale auth key
 #   claude-oauth-token  optional  output of `claude setup-token`
 #   codex-auth-json     optional  ~/.codex/auth.json after `codex login`
-# Without the optional two the VM still joins HAPI; sign in on the VM once and
-# save the results with save-logins.sh so later VMs start signed in.
 #
-# Instance metadata: hapi-api-url, hapi-binary (gs:// path).
+# Instance metadata: hapi-binary (gs:// path), hapi-api-url (optional).
 set -uo pipefail
 exec > >(tee -a /var/log/hapi-agent-startup.log) 2>&1
 echo "== hapi agent startup $(date -Is)"
@@ -26,6 +29,11 @@ secret() { gcloud secrets versions access latest --secret "$1" 2>/dev/null; }
 as_agent() { sudo -u "$AGENT" -H bash -lc "$1"; }
 
 HAPI_API_URL=$(meta hapi-api-url)
+RUN_HUB=0
+if [ -z "$HAPI_API_URL" ]; then
+    RUN_HUB=1
+    HAPI_API_URL=http://127.0.0.1:3006
+fi
 HAPI_BINARY=$(meta hapi-binary)
 
 if ! id "$AGENT" >/dev/null 2>&1; then
@@ -50,7 +58,7 @@ fi
 if ! tailscale status >/dev/null 2>&1; then
     TS_KEY=$(secret tailscale-authkey)
     if [ -n "$TS_KEY" ]; then
-        tailscale up --authkey "$TS_KEY" --hostname "$(hostname)" --ssh
+        tailscale up --authkey "$TS_KEY" --hostname "$(hostname -s)" --ssh
     else
         echo "!! no tailscale-authkey secret: run 'sudo tailscale up --ssh' on the VM"
     fi
@@ -70,6 +78,7 @@ install -d -m 750 -g "$AGENT" /etc/hapi
     echo "CLI_API_TOKEN=$(secret hapi-cli-token)"
     echo "HAPI_HOME=$AGENT_HOME/.hapi"
     echo "HAPI_RUNNER_SUPERVISED=1"
+    echo "HAPI_LISTEN_HOST=0.0.0.0"
     echo "PATH=$AGENT_HOME/.hapi/bin:$AGENT_HOME/.local/bin:$AGENT_HOME/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     CLAUDE_TOKEN=$(secret claude-oauth-token)
     [ -n "$CLAUDE_TOKEN" ] && echo "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_TOKEN"
@@ -92,6 +101,30 @@ fi
 if [ ! -f "$AGENT_HOME/.claude.json" ]; then
     echo '{"hasCompletedOnboarding":true}' > "$AGENT_HOME/.claude.json"
     chown "$AGENT:$AGENT" "$AGENT_HOME/.claude.json"
+fi
+
+if [ "$RUN_HUB" = 1 ]; then
+    cat > /etc/systemd/system/hapi-hub.service <<EOF
+[Unit]
+Description=HAPI hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$AGENT
+WorkingDirectory=$AGENT_HOME/.hapi
+EnvironmentFile=/etc/hapi/agent.env
+ExecStart=$AGENT_HOME/.hapi/bin/hapi server
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    systemctl daemon-reload
+    systemctl enable hapi-hub
+    systemctl restart hapi-hub
+    for _ in $(seq 1 30); do curl -fsS -m 2 http://127.0.0.1:3006/health >/dev/null 2>&1 && break; sleep 1; done
 fi
 
 cat > /etc/systemd/system/hapi-runner.service <<EOF
