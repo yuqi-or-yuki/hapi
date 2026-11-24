@@ -103,6 +103,13 @@ if [ ! -f "$AGENT_HOME/.claude.json" ]; then
     chown "$AGENT:$AGENT" "$AGENT_HOME/.claude.json"
 fi
 
+# Default Claude Code to the newest model unless this VM already chose one.
+if [ ! -f "$AGENT_HOME/.claude/settings.json" ]; then
+    install -d -o "$AGENT" -g "$AGENT" "$AGENT_HOME/.claude"
+    echo '{"model":"fable"}' > "$AGENT_HOME/.claude/settings.json"
+    chown "$AGENT:$AGENT" "$AGENT_HOME/.claude/settings.json"
+fi
+
 if [ "$RUN_HUB" = 1 ]; then
     cat > /etc/systemd/system/hapi-hub.service <<EOF
 [Unit]
