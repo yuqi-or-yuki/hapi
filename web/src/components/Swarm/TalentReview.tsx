@@ -9,7 +9,7 @@ const roles = [
     'Research Scientist, Modeling', 'Research Scientist, Behavior Modeling', 'Product Designer'
 ]
 
-type Review = { id: string; at: string; role?: string; category?: string; decision: 'yes' | 'no'; reason: string; predictedDecision?: 'yes' | 'no'; predictedReason?: string; predictionRole?: string; decisionUnchanged?: boolean; reasonUnchanged?: boolean; suggestionAccepted?: boolean }
+type Review = { id: string; at: string; role?: string; category?: string; decision: 'yes' | 'no'; reason: string; predictedDecision?: 'yes' | 'no'; predictedReason?: string; predictionRole?: string; decisionUnchanged?: boolean; reasonUnchanged?: boolean; suggestionAccepted?: boolean; draftShown?: string; draftFinal?: string; subjectShown?: string; subjectFinal?: string; draftEdited?: boolean }
 function reviews(record: WorkerRecord, talent: boolean): Review[] {
     const history = talent ? record.data.linkedinReviews : record.data.approvalReviews
     return Array.isArray(history) ? history as Review[] : []
@@ -33,6 +33,9 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
     const [role, setRole] = useState('')
     const [decision, setDecision] = useState<'yes' | 'no' | null>(null)
     const [reason, setReason] = useState('')
+    // A card can carry a message the worker wants to send (`draft`, with a `subject` for email); the reviewer may rewrite it.
+    const [draft, setDraft] = useState('')
+    const [subject, setSubject] = useState('')
     const [saving, setSaving] = useState(false)
     const [error, setError] = useState('')
     const [notice, setNotice] = useState('')
@@ -55,6 +58,9 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
     const suggestion = candidate?.data.suggestedDecision === 'yes' || candidate?.data.suggestedDecision === 'no' ? candidate.data.suggestedDecision : null
     const suggestedReason = typeof candidate?.data.suggestedReason === 'string' ? candidate.data.suggestedReason : ''
     const previous = candidate ? reviews(candidate, talent).at(-1) : undefined
+    const shownDraft = !talent && typeof candidate?.data.draft === 'string' ? candidate.data.draft : ''
+    const shownSubject = !talent && typeof candidate?.data.subject === 'string' ? candidate.data.subject : ''
+    const hasDraft = shownDraft.trim().length > 0
     useEffect(() => {
         const key = candidate?.key ?? null
         if (initializedKey.current !== key) { initializedKey.current = key; userEdited.current = false }
@@ -63,8 +69,10 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
         setRole(previous?.role || suggested)
         setDecision(previous?.decision ?? suggestion)
         setReason(previous?.reason ?? suggestedReason)
+        setDraft(shownDraft)
+        setSubject(shownSubject)
         setError('')
-    }, [candidate?.key, previous?.id, suggestion, suggestedReason, suggested])
+    }, [candidate?.key, previous?.id, suggestion, suggestedReason, suggested, shownDraft, shownSubject])
     function choose(value: 'yes' | 'no') {
         userEdited.current = true
         if (value !== decision && (reason === shownSuggestion.current?.reason || reason === previous?.reason)) setReason('')
@@ -75,10 +83,12 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
         if (!candidate || (talent && !selectedRole) || !decision || !reason.trim()) return
         const shown = shownSuggestion.current
         const comparable = !previous && !!shown?.decision && !!shown.reason && (!talent || selectedRole === shown.role)
-        const review: Review = { id: randomId(), at: new Date().toISOString(), ...(talent ? { role: selectedRole } : typeof candidate.data.category === 'string' && candidate.data.category.trim() ? { category: candidate.data.category.trim() } : {}), decision, reason: reason.trim(), ...(comparable ? { predictedDecision: shown.decision!, predictedReason: shown.reason, ...(talent ? { predictionRole: shown.role } : {}), decisionUnchanged: decision === shown.decision, reasonUnchanged: reason === shown.reason, suggestionAccepted: decision === shown.decision && reason === shown.reason } : {}) }
+        const draftEdited = hasDraft && (draft.trim() !== shownDraft.trim() || subject.trim() !== shownSubject.trim())
+        const message = hasDraft ? { draftShown: shownDraft, draftFinal: draft.trim(), ...(shownSubject || subject.trim() ? { subjectShown: shownSubject, subjectFinal: subject.trim() } : {}), draftEdited } : {}
+        const review: Review = { id: randomId(), at: new Date().toISOString(), ...message, ...(talent ? { role: selectedRole } : typeof candidate.data.category === 'string' && candidate.data.category.trim() ? { category: candidate.data.category.trim() } : {}), decision, reason: reason.trim(), ...(comparable ? { predictedDecision: shown.decision!, predictedReason: shown.reason, ...(talent ? { predictionRole: shown.role } : {}), decisionUnchanged: decision === shown.decision, reasonUnchanged: reason === shown.reason, suggestionAccepted: decision === shown.decision && reason === shown.reason } : {}) }
         setSaving(true); setError('')
         try {
-            const fields = talent ? { linkedinReviews: [...reviews(candidate, true), review], linkedinDecision: decision === 'yes' ? 'Would connect' : 'Would not connect', reviewRole: selectedRole, reviewReason: review.reason } : { approvalReviews: [...reviews(candidate, false), review], approvalDecision: decision, reviewReason: review.reason }
+            const fields = talent ? { linkedinReviews: [...reviews(candidate, true), review], linkedinDecision: decision === 'yes' ? 'Would connect' : 'Would not connect', reviewRole: selectedRole, reviewReason: review.reason } : { approvalReviews: [...reviews(candidate, false), review], approvalDecision: decision, reviewReason: review.reason, ...(hasDraft && draftEdited ? { draft: draft.trim(), ...(shownSubject || subject.trim() ? { subject: subject.trim() } : {}), draftOriginal: typeof candidate.data.draftOriginal === 'string' ? candidate.data.draftOriginal : shownDraft } : {}) }
             const triggered = await onRecord(candidate.key, fields)
             setNotice(triggered ? 'Saved. The worker was notified to review the scorecard.' : 'Saved, but the worker could not be notified. It will process the feedback on its next scheduled run.')
             setSkipped((keys) => [...keys, candidate.key])
@@ -103,10 +113,16 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
             <p className="text-sm text-[var(--app-hint)]">{value(candidate.data.fitRationale) || 'No assessment rationale available yet.'}</p>
             {typeof candidate.data.bestFitScore === 'number' && <p className="text-sm">Preliminary score: {candidate.data.bestFitScore}/100</p>}
             {talent && <label className="block text-sm font-medium">Review for role<select value={selectedRole} onChange={(e) => { userEdited.current = true; const next = e.target.value; setRole(next); if (next !== shownSuggestion.current?.role) { setDecision(null); setReason('') } }} className={`${control} mt-2`}><option value="">Choose a role</option>{roles.map((r) => <option key={r} value={r}>{r}</option>)}</select></label>}
+            {hasDraft && <div className="space-y-2 rounded-xl border border-[var(--app-border)] bg-[var(--app-bg)] p-3">
+                <p className="text-xs text-[var(--app-hint)]">{[value(candidate.data.channel), value(candidate.data.email)].filter(Boolean).join(' · ') || 'Message'} · This is exactly what would be sent. Edit it if you want it different; your version is what gets approved.</p>
+                {(shownSubject || value(candidate.data.channel).toLowerCase() === 'email') && <label className="block text-xs font-medium">Subject<input value={subject} onChange={(e) => { userEdited.current = true; setSubject(e.target.value) }} maxLength={300} className={`${control} mt-1 font-normal`} /></label>}
+                <label className="block text-xs font-medium">Message<textarea value={draft} onChange={(e) => { userEdited.current = true; setDraft(e.target.value) }} maxLength={8000} className={`${control} mt-1 min-h-40 font-normal`} /></label>
+                {(draft.trim() !== shownDraft.trim() || subject.trim() !== shownSubject.trim()) && <p className="text-xs text-amber-700 dark:text-amber-300">Edited. The worker will see your version next to its own and learn from the change. <button type="button" className="underline" onClick={() => { setDraft(shownDraft); setSubject(shownSubject) }}>Undo edits</button></p>}
+            </div>}
             <div><p className="text-sm font-medium">{talent ? 'Would you send a LinkedIn request?' : value(candidate.data.approvalQuestion) || 'Do you approve?'}</p><p className="mt-1 text-xs text-[var(--app-hint)]">{previous ? 'Your previous review is shown; you can change it.' : suggestion ? 'Suggested choice and reason are pre-filled. Change either before saving.' : 'Choose an answer, or swipe left for no or right for yes.'}</p><div className="mt-2 grid grid-cols-2 gap-3">{(['no', 'yes'] as const).map((v) => <button type="button" key={v} aria-pressed={decision === v} onClick={() => choose(v)} className={`rounded-xl border p-4 text-sm font-medium ${decision === v ? 'border-teal-600 bg-teal-500/15' : 'border-[var(--app-border)] bg-[var(--app-bg)]'}`}>{v === 'yes' ? 'Yes' : 'No'}</button>)}</div></div>
             <label className="block text-sm font-medium">Why?<textarea value={reason} onChange={(e) => { userEdited.current = true; setReason(e.target.value) }} maxLength={4000} className={`${control} mt-2 min-h-24 font-normal`} placeholder="What influenced your decision?" /></label>
             {error && <p role="alert" className="text-sm text-red-600">{error}</p>}
-            <div className="flex items-center justify-between gap-3"><button type="button" onClick={() => { setSkipped((keys) => [...keys, candidate.key]); reset() }} className="text-sm underline">Skip for now</button><button type="button" disabled={saving || (talent && !selectedRole) || !decision || !reason.trim()} onClick={() => void save()} className="rounded-xl bg-teal-700 px-4 py-3 text-sm font-medium text-white disabled:opacity-50">{saving ? 'Saving…' : 'Save and next'}</button></div>
+            <div className="flex items-center justify-between gap-3"><button type="button" onClick={() => { setSkipped((keys) => [...keys, candidate.key]); reset() }} className="text-sm underline">Skip for now</button><button type="button" disabled={saving || (talent && !selectedRole) || !decision || !reason.trim() || (hasDraft && decision === 'yes' && !draft.trim())} onClick={() => void save()} className="rounded-xl bg-teal-700 px-4 py-3 text-sm font-medium text-white disabled:opacity-50">{saving ? 'Saving…' : 'Save and next'}</button></div>
         </div>}
     </section>
 }

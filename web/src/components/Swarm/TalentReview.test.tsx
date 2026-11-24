@@ -58,6 +58,29 @@ describe('TalentReview', () => {
         await waitFor(() => expect(onRecord).toHaveBeenCalledTimes(1))
         expect(onRecord.mock.calls[0][1].approvalReviews[0]).toMatchObject({ decision: 'yes', reason: 'Relevant to the job.', predictedDecision: 'yes', predictedReason: 'Relevant to the job.', decisionUnchanged: true, reasonUnchanged: true })
     })
+    it('shows the message a worker wants to send, and saves the edited version next to the original', async () => {
+        const onRecord = vi.fn().mockResolvedValue(true)
+        render(<TalentReview talent={false} records={[{ key: 'ann', createdAt: 1, updatedAt: 1, data: { name: 'Ann', channel: 'email', email: 'ann@example.com', subject: 'Your ChatBench paper', draft: 'Hi Ann, long pitch.', approvalQuestion: 'Send this email to ann@example.com?', suggestedDecision: 'yes', suggestedReason: 'Fits Evaluations.' } }]} onRecord={onRecord} onClose={() => {}} />)
+        expect(screen.getByText('Send this email to ann@example.com?')).toBeInTheDocument()
+        expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Hi Ann, long pitch.')
+        fireEvent.change(screen.getByRole('textbox', { name: 'Message' }), { target: { value: 'Hi Ann, short note.' } })
+        expect(screen.getByRole('textbox', { name: 'Why?' })).toHaveValue('Fits Evaluations.')
+        fireEvent.click(screen.getByRole('button', { name: 'Save and next' }))
+        await waitFor(() => expect(onRecord).toHaveBeenCalledTimes(1))
+        const fields = onRecord.mock.calls[0][1]
+        expect(fields).toMatchObject({ draft: 'Hi Ann, short note.', draftOriginal: 'Hi Ann, long pitch.', subject: 'Your ChatBench paper', approvalDecision: 'yes' })
+        expect(fields.approvalReviews[0]).toMatchObject({ decision: 'yes', draftShown: 'Hi Ann, long pitch.', draftFinal: 'Hi Ann, short note.', draftEdited: true, subjectFinal: 'Your ChatBench paper' })
+    })
+    it('records an approved message as unedited and leaves the row text alone', async () => {
+        const onRecord = vi.fn().mockResolvedValue(true)
+        render(<TalentReview talent={false} records={[{ key: 'bo', createdAt: 1, updatedAt: 1, data: { name: 'Bo', channel: 'LinkedIn', draft: 'Hi Bo.', suggestedDecision: 'yes', suggestedReason: 'Good fit.' } }]} onRecord={onRecord} onClose={() => {}} />)
+        expect(screen.queryByRole('textbox', { name: 'Subject' })).not.toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: 'Save and next' }))
+        await waitFor(() => expect(onRecord).toHaveBeenCalledTimes(1))
+        const fields = onRecord.mock.calls[0][1]
+        expect(fields.draft).toBeUndefined()
+        expect(fields.approvalReviews[0]).toMatchObject({ draftShown: 'Hi Bo.', draftFinal: 'Hi Bo.', draftEdited: false })
+    })
     it('prefills an editable suggestion without recording it until saved', async () => {
         const onRecord = vi.fn().mockResolvedValue(true)
         render(<TalentReview records={[{ key: 'candidate-suggestion', createdAt: 1, updatedAt: 1, data: { name: 'Example Candidate', bestFitRole: 'Forward Deployment', suggestedDecision: 'no', suggestedReason: 'PM background is unverified.' } }]} onRecord={onRecord} onClose={() => {}} />)
