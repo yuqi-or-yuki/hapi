@@ -12,7 +12,6 @@ import { Button } from '@/components/ui/button'
 import { useTranslation } from '@/lib/use-translation'
 import { WorkerAvatar } from './WorkerAvatar'
 import {
-    defaultWorkerName,
     draftFromRun,
     draftToRequest,
     randomSeed,
@@ -159,7 +158,7 @@ export function PromoteToWorkerDialog(props: {
                                 type="text"
                                 value={name}
                                 onChange={(event) => setName(event.target.value)}
-                                placeholder={defaultWorkerName(seed)}
+                                placeholder={t('swarm.promote.namePlaceholder')}
                                 className={`mt-2 w-full ${INPUT_CLASS}`}
                                 disabled={isPending}
                                 maxLength={40}

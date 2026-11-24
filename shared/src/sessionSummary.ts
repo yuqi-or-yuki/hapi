@@ -89,7 +89,7 @@ export type SessionSummary = {
      *  /sessions HTTP route only, like `scheduledDueAts`. */
     workerRun?: WorkerRun
     /** Size and freshness of a worker's board. Same provenance as `workerRun`. */
-    workerBoard?: { count: number; updatedAt: number }
+    workerBoard?: { count: number; updatedAt: number; unreviewed: number; newestUnreviewedAt: number }
 }
 
 export type WorkerRun = {

@@ -1,10 +1,11 @@
+import { useEffect } from 'react'
 import type { SessionSummary } from '@/types/api'
 import type { PermissionAutonomy } from '@hapi/protocol/modes'
 import { formatRelativeTime } from '@/lib/relativeTime'
 import { useTranslation } from '@/lib/use-translation'
 import { WorkerAvatar } from './WorkerAvatar'
 import { RunStrip } from './RunStrip'
-import { describeSchedule, trustLevel, workerName, workerSeed } from './worker'
+import { describeSchedule, markReviewSeen, trustLevel, workerName, workerSeed } from './worker'
 
 const TRUST_STYLES: Record<PermissionAutonomy | 'unknown', string> = {
     asks: 'border-[var(--app-border)] text-[var(--app-hint)]',
@@ -48,6 +49,9 @@ export function WorkerDetails(props: {
     const run = session.workerRun
     const trust = trustLevel(session)
     const lastRun = run?.lastRunAt ? formatRelativeTime(run.lastRunAt, t) : null
+    // Opening a worker's page is what clears its "new to review" dot on the swarm page.
+    const newestUnreviewedAt = session.workerBoard?.newestUnreviewedAt
+    useEffect(() => { markReviewSeen(session.id) }, [session.id, newestUnreviewedAt])
 
     return (
         <div className="mx-auto w-full max-w-[1400px] px-3 pt-4 sm:px-4 sm:pt-5">

@@ -48,6 +48,19 @@ describe('WorkerRecordStore', () => {
         expect(workerRecords.reviewHistory('default', 's1')[0].data.linkedinReviews).toEqual([review])
     })
 
+    it('counts rows nobody has reviewed yet, and recounts after a write', () => {
+        const { workerRecords } = new Store(':memory:')
+        workerRecords.upsert('default', 's1', [
+            { key: 'a', data: { name: 'Ann' } },
+            { key: 'b', data: { name: 'Bo', approvalReviews: [{ id: 'r1', decision: 'yes', reason: 'ok' }] } }
+        ])
+        expect(workerRecords.stats('default').get('s1')).toMatchObject({ count: 2, unreviewed: 1 })
+        expect(workerRecords.stats('default').get('s1')?.newestUnreviewedAt).toBeGreaterThan(0)
+
+        workerRecords.upsert('default', 's1', [{ key: 'a', data: { approvalReviews: [{ id: 'r2', decision: 'no', reason: 'no' }] } }])
+        expect(workerRecords.stats('default').get('s1')).toMatchObject({ unreviewed: 0, newestUnreviewedAt: 0 })
+    })
+
     it('moves a board to the session id a worker was resumed under', () => {
         const { workerRecords } = new Store(':memory:')
         workerRecords.upsert('default', 'old', [{ key: 'a', data: { n: 1 } }])

@@ -2,26 +2,23 @@ import type { SwarmScheduleRequest } from '@hapi/protocol/apiTypes'
 import type { ActiveWindow } from '@hapi/protocol/schemas'
 import { permissionAutonomy, type PermissionAutonomy } from '@hapi/protocol/modes'
 import { nextDailyRun } from '@hapi/protocol/workerSchedule'
+import { isItemApprovalBoard } from '@hapi/protocol/workerReview'
 import type { SessionSummary } from '@/types/api'
 
 type Translate = (key: string, params?: Record<string, string | number>) => string
 type WorkerRun = NonNullable<SessionSummary['workerRun']>
 type WorkerIdentitySource = {
     id: string
-    metadata?: { swarm?: { name?: string; avatarSeed?: string } } | null
+    metadata?: {
+        name?: string
+        summary?: { text: string }
+        swarm?: { name?: string; job?: string; avatarSeed?: string }
+    } | null
 }
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 const DAY = 24 * HOUR
-
-// Short, easy to tell apart at a glance, and not tied to any one culture.
-const WORKER_NAMES = [
-    'Juno', 'Atlas', 'Pixel', 'Maple', 'Otto', 'Nova', 'Remy', 'Sage', 'Finch', 'Koda',
-    'Luma', 'Milo', 'Wren', 'Echo', 'Tavi', 'Rune', 'Pico', 'Iris', 'Bram', 'Zuri',
-    'Orla', 'Kip', 'Vera', 'Dash', 'Nico', 'Hazel', 'Ravi', 'Tess', 'Arlo', 'Mika',
-    'Cleo', 'Jett', 'Suki', 'Ozzy', 'Fern', 'Lars', 'Yuki', 'Beau', 'Nell', 'Quill'
-] as const
 
 /** FNV-1a: small, stable across devices, and good enough to spread seeds over a palette. */
 export function hashSeed(seed: string): number {
@@ -37,13 +34,17 @@ export function workerSeed(session: WorkerIdentitySource): string {
     return session.metadata?.swarm?.avatarSeed ?? session.id
 }
 
-export function defaultWorkerName(seed: string): string {
-    return WORKER_NAMES[hashSeed(seed) % WORKER_NAMES.length]
-}
-
-/** Every worker has a name: the operator's, or one that follows from its avatar. */
+/**
+ * A worker is called by what it does ("Talent Intake", "Laptop Cleaner"), in
+ * two or three words, so the swarm reads as a list of functions. Until one is
+ * set, fall back to something that still says what it does, never to an
+ * invented personal name: the session's title, then the start of its job.
+ */
 export function workerName(session: WorkerIdentitySource): string {
-    return session.metadata?.swarm?.name ?? defaultWorkerName(workerSeed(session))
+    const meta = session.metadata
+    const title = meta?.swarm?.name?.trim() || meta?.name?.trim() || meta?.summary?.text?.trim()
+    if (title) return title
+    return (meta?.swarm?.job ?? '').split(/\s+/).filter(Boolean).slice(0, 3).join(' ')
 }
 
 export function randomSeed(): string {
@@ -131,6 +132,38 @@ export function workerState(session: SessionSummary): WorkerState {
  */
 export function trustLevel(session: SessionSummary): PermissionAutonomy | 'unknown' {
     return permissionAutonomy(session.permissionMode)
+}
+
+const SEEN_KEY = 'hapi.swarm.reviewSeen.v1'
+
+function readSeen(): Record<string, number> {
+    try {
+        const parsed: unknown = JSON.parse(localStorage.getItem(SEEN_KEY) ?? '{}')
+        return parsed && typeof parsed === 'object' ? parsed as Record<string, number> : {}
+    } catch {
+        return {}
+    }
+}
+
+/**
+ * How many cards a worker has waiting that the user has not looked at yet.
+ * "New" is judged against the last time this browser opened the worker's
+ * page, so the dot clears by looking, not by finishing every review: a board
+ * with a hundred pending cards should not shout forever.
+ */
+export function newToReview(session: SessionSummary): number {
+    const board = session.workerBoard
+    if (!board?.unreviewed || !isItemApprovalBoard(session.metadata?.swarm?.board)) return 0
+    return board.newestUnreviewedAt > (readSeen()[session.id] ?? 0) ? board.unreviewed : 0
+}
+
+/** Called when the worker's page is shown: everything on its board up to now counts as seen. */
+export function markReviewSeen(sessionId: string): void {
+    try {
+        localStorage.setItem(SEEN_KEY, JSON.stringify({ ...readSeen(), [sessionId]: Date.now() }))
+    } catch {
+        // Private mode or a full store: the dot simply stays until the next visit.
+    }
 }
 
 /** On time means the run started within a few scheduler ticks of its slot. */

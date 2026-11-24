@@ -222,7 +222,7 @@ ${chalk.bold('Review period:')}
   one run down; at 0 it runs free.
 
 ${chalk.bold('Examples:')}
-  hapi worker promote --job "Keep the researcher pipeline topped up" --name Scout --daily 09:00 \\
+  hapi worker promote --job "Keep the researcher pipeline topped up" --name "Researcher Sourcing" --daily 09:00 \\
       --columns name,linkedin,citations,whyGoodFit,industryExperience,emailSent
   hapi worker record --key "linkedin.com/in/jane" --data '{"name":"Jane Doe","citations":4120,"emailSent":false}'
   hapi worker record --key "linkedin.com/in/jane" --data '{"emailSent":true}'

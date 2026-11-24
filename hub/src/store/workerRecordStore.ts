@@ -9,7 +9,13 @@ export type WorkerRecord = {
     updatedAt: number
 }
 
-export type WorkerBoardStats = { count: number; updatedAt: number }
+export type WorkerBoardStats = {
+    count: number
+    updatedAt: number
+    /** Rows with no saved review, and when the newest of them was added. */
+    unreviewed: number
+    newestUnreviewedAt: number
+}
 
 type DbRow = { key: string; data: string; created_at: number; updated_at: number }
 
@@ -39,6 +45,8 @@ function mapRow(row: DbRow): WorkerRecord {
  * version bump on a large live database.
  */
 export class WorkerRecordStore {
+    private readonly statsCache = new Map<string, Map<string, WorkerBoardStats>>()
+
     constructor(private readonly db: Database) {
         this.db.exec(`
             CREATE TABLE IF NOT EXISTS worker_records (
@@ -133,10 +141,12 @@ export class WorkerRecordStore {
             }
         })
         run()
+        this.statsCache.clear()
         return records.length
     }
 
     remove(namespace: string, sessionId: string, key: string): boolean {
+        this.statsCache.clear()
         const old = this.list(namespace, sessionId).find((row) => row.key === key)
         if (old) this.archiveReviews(namespace, sessionId, old.data)
         return this.db.query(
@@ -144,16 +154,36 @@ export class WorkerRecordStore {
         ).run(namespace, sessionId, key).changes > 0
     }
 
+    /**
+     * Per-board totals for the session list, including how many rows no one
+     * has reviewed yet. Counting those means reading every row's JSON, and the
+     * session list is requested constantly, so the result is cached and only
+     * dropped when a board is written.
+     */
     stats(namespace: string): Map<string, WorkerBoardStats> {
-        const rows = this.db.query<{ session_id: string; count: number; updated_at: number }, [string]>(`
-            SELECT session_id, COUNT(*) AS count, MAX(updated_at) AS updated_at
+        const cached = this.statsCache.get(namespace)
+        if (cached) return cached
+        const unreviewed = `COALESCE(json_array_length(data, '$.linkedinReviews'), 0) = 0
+            AND COALESCE(json_array_length(data, '$.approvalReviews'), 0) = 0`
+        const rows = this.db.query<{ session_id: string; count: number; updated_at: number; unreviewed: number; newest_unreviewed: number | null }, [string]>(`
+            SELECT session_id, COUNT(*) AS count, MAX(updated_at) AS updated_at,
+                SUM(CASE WHEN ${unreviewed} THEN 1 ELSE 0 END) AS unreviewed,
+                MAX(CASE WHEN ${unreviewed} THEN created_at END) AS newest_unreviewed
             FROM worker_records WHERE namespace = ? GROUP BY session_id
         `).all(namespace)
-        return new Map(rows.map((row) => [row.session_id, { count: row.count, updatedAt: row.updated_at }]))
+        const stats = new Map(rows.map((row) => [row.session_id, {
+            count: row.count,
+            updatedAt: row.updated_at,
+            unreviewed: row.unreviewed,
+            newestUnreviewedAt: row.newest_unreviewed ?? 0
+        }]))
+        this.statsCache.set(namespace, stats)
+        return stats
     }
 
     /** A worker resumed under a new session id keeps its board. */
     transfer(oldSessionId: string, newSessionId: string): void {
+        this.statsCache.clear()
         this.db.query('UPDATE OR IGNORE worker_records SET session_id = ? WHERE session_id = ?').run(newSessionId, oldSessionId)
         this.db.query('DELETE FROM worker_records WHERE session_id = ?').run(oldSessionId)
         this.db.query('UPDATE OR IGNORE worker_review_history SET session_id = ? WHERE session_id = ?').run(newSessionId, oldSessionId)

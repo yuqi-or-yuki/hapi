@@ -5,7 +5,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { SwarmRailIcon } from '@/components/AppRail'
 import { RunStrip } from './RunStrip'
 import { WorkerAvatar } from './WorkerAvatar'
-import { describeSchedule, workerName, workerSeed, workerState, type WorkerState } from './worker'
+import { describeSchedule, newToReview, workerName, workerSeed, workerState, type WorkerState } from './worker'
 
 export type Worker = {
     session: SessionSummary
@@ -56,11 +56,22 @@ function WorkerCard(props: { worker: Worker; onOpen: () => void; onApprove: () =
     const line = useStateLine(session, state)
     const review = session.metadata?.swarm?.review
     const rows = session.workerBoard?.count ?? 0
+    const toReview = newToReview(session)
 
     return (
         <div className="relative min-w-0 rounded-2xl border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-4 transition-colors hover:border-[var(--app-hint)]">
             <div className="flex items-start gap-3">
-                <WorkerAvatar seed={workerSeed(session)} size={44} flavor={session.metadata?.flavor} />
+                <span className="relative shrink-0">
+                    <WorkerAvatar seed={workerSeed(session)} size={44} flavor={session.metadata?.flavor} />
+                    {toReview > 0 ? (
+                        <span
+                            role="status"
+                            aria-label={t('swarm.toReview', { n: toReview })}
+                            title={t('swarm.toReview', { n: toReview })}
+                            className="absolute -right-1 -top-1 h-3 w-3 rounded-full bg-red-500 ring-2 ring-[var(--app-subtle-bg)]"
+                        />
+                    ) : null}
+                </span>
                 <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
                         {/* The stretched button makes the whole card the way in, while
@@ -72,7 +83,9 @@ function WorkerCard(props: { worker: Worker; onOpen: () => void; onApprove: () =
                         >
                             {workerName(session)}
                         </button>
-                        {rows > 0 ? <span className="shrink-0 text-xs text-[var(--app-hint)]">{t('swarm.board.count', { n: rows })}</span> : null}
+                        {toReview > 0
+                            ? <span className="shrink-0 text-xs font-medium text-red-600 dark:text-red-400">{t('swarm.toReview', { n: toReview })}</span>
+                            : rows > 0 ? <span className="shrink-0 text-xs text-[var(--app-hint)]">{t('swarm.board.count', { n: rows })}</span> : null}
                     </div>
                     <p className="truncate text-sm text-[var(--app-fg)]">{job}</p>
                     <p className={`mt-1.5 flex items-center gap-1.5 text-xs ${STATE_STYLES[state]}`}>

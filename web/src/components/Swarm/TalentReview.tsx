@@ -22,6 +22,11 @@ function linkedinUrl(value: unknown): string | null {
     } catch { return null }
 }
 
+function secureUrl(value: unknown): string | null {
+    if (typeof value !== 'string') return null
+    try { const url = new URL(value); return url.protocol === 'https:' ? url.href : null } catch { return null }
+}
+
 export function TalentReview({ records, onRecord, onClose, talent = true }: { records: readonly WorkerRecord[]; onRecord: (key: string, fields: Record<string, unknown>) => Promise<boolean>; onClose: () => void; talent?: boolean }) {
     const [skipped, setSkipped] = useState<string[]>([])
     const [revisit, setRevisit] = useState(false)
@@ -35,12 +40,18 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
     const initializedKey = useRef<string | null>(null)
     const userEdited = useRef(false)
     const shownSuggestion = useRef<{ decision: 'yes' | 'no' | null; reason: string; role: string } | null>(null)
-    const queue = useMemo(() => records.filter((r) => !skipped.includes(r.key) && (revisit || reviews(r, talent).length === 0)), [records, skipped, revisit, talent])
+    const queue = useMemo(() => {
+        const pending = records.filter((r) => !skipped.includes(r.key) && (revisit || reviews(r, talent).length === 0))
+        // Preserve the existing order within each group; research cards lead on talent boards.
+        return talent ? [...pending].sort((a, b) => Number(!String(a.data.bestFitRole ?? '').startsWith('Research Scientist')) - Number(!String(b.data.bestFitRole ?? '').startsWith('Research Scientist'))) : pending
+    }, [records, skipped, revisit, talent])
     const candidate = queue[0]
     const suggested = typeof candidate?.data.bestFitRole === 'string' && roles.includes(candidate.data.bestFitRole) ? candidate.data.bestFitRole : ''
     const selectedRole = role || suggested
     const listing = boardCell(candidate?.data.url)
     const profile = linkedinUrl(candidate?.data.profileUrl)
+    const talentPoolUrl = secureUrl(candidate?.data.talentPoolUrl) ?? (talent && typeof candidate?.data.name === 'string' && candidate.data.name.trim() ? `https://tenera-talent-pool.vercel.app/pool?q=${encodeURIComponent(candidate.data.name.trim())}` : null)
+    const candidateWebsiteUrl = secureUrl(candidate?.data.candidateWebsiteUrl)
     const suggestion = candidate?.data.suggestedDecision === 'yes' || candidate?.data.suggestedDecision === 'no' ? candidate.data.suggestedDecision : null
     const suggestedReason = typeof candidate?.data.suggestedReason === 'string' ? candidate.data.suggestedReason : ''
     const previous = candidate ? reviews(candidate, talent).at(-1) : undefined
@@ -84,7 +95,11 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
             <div className="flex justify-between gap-3"><div><h3 className="text-lg font-semibold">{value(candidate.data.name) || value(candidate.data.title) || candidate.key}</h3><p className="mt-1 text-sm text-[var(--app-hint)]">{value(candidate.data.currentRole) || value(candidate.data.description)}</p></div><span className="text-xs text-[var(--app-hint)]">{queue.length} remaining</span></div>
             {gallery.length > 0 && <BoardGallery images={gallery} size="lg" alt={value(candidate.data.name) || candidate.key} />}
             {!talent && listing.kind === 'link' && /^https?:/.test(listing.href) && <a className="text-sm text-[var(--app-link)] underline" href={listing.href} target="_blank" rel="noopener noreferrer">View listing ↗</a>}
-            {profile && <a className="text-sm text-[var(--app-link)] underline" href={profile} target="_blank" rel="noreferrer">View LinkedIn profile ↗</a>}
+            {(talent || profile) && <div className="flex flex-wrap gap-x-4 gap-y-2">
+                {talentPoolUrl && <a className="text-sm text-[var(--app-link)] underline" href={talentPoolUrl} target="_blank" rel="noopener noreferrer">Find in talent pool ↗</a>}
+                {profile && <a className="text-sm text-[var(--app-link)] underline" href={profile} target="_blank" rel="noopener noreferrer">View LinkedIn profile ↗</a>}
+                {candidateWebsiteUrl && <a className="text-sm text-[var(--app-link)] underline" href={candidateWebsiteUrl} target="_blank" rel="noopener noreferrer">View candidate website ↗</a>}
+            </div>}
             <p className="text-sm text-[var(--app-hint)]">{value(candidate.data.fitRationale) || 'No assessment rationale available yet.'}</p>
             {typeof candidate.data.bestFitScore === 'number' && <p className="text-sm">Preliminary score: {candidate.data.bestFitScore}/100</p>}
             {talent && <label className="block text-sm font-medium">Review for role<select value={selectedRole} onChange={(e) => { userEdited.current = true; const next = e.target.value; setRole(next); if (next !== shownSuggestion.current?.role) { setDecision(null); setReason('') } }} className={`${control} mt-2`}><option value="">Choose a role</option>{roles.map((r) => <option key={r} value={r}>{r}</option>)}</select></label>}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { SessionSummary } from '@/types/api'
 import { selectWorkers } from './SwarmView'
-import { draftFromRun, draftToRequest, runMark, trustLevel, workerState } from './worker'
+import { draftFromRun, draftToRequest, markReviewSeen, newToReview, runMark, trustLevel, workerName, workerState } from './worker'
 
 function session(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
     return {
@@ -108,5 +108,35 @@ describe('runMark', () => {
         expect(runMark({ at: 1, outcome: 'ran', lateMs: 40_000 })).toBe('onTime')
         expect(runMark({ at: 1, outcome: 'ran', lateMs: 20 * 60_000 })).toBe('late')
         expect(runMark({ at: 1, outcome: 'missed', lateMs: 0 })).toBe('missed')
+    })
+})
+
+describe('newToReview', () => {
+    const approval = { path: '/repo', swarm: { job: 'Review leads', promotedAt: 1, board: { columns: ['name', 'suggestedDecision', 'suggestedReason'] } } }
+    const board = { count: 5, updatedAt: 10, unreviewed: 3, newestUnreviewedAt: Date.now() - 1000 }
+
+    it('flags cards added since the worker page was last opened, and clears once it is opened', () => {
+        localStorage.clear()
+        const worker = session({ id: 'w1', metadata: approval, workerBoard: board })
+        expect(newToReview(worker)).toBe(3)
+        markReviewSeen('w1')
+        expect(newToReview(worker)).toBe(0)
+        // A card added after the visit raises it again.
+        expect(newToReview(session({ id: 'w1', metadata: approval, workerBoard: { ...board, newestUnreviewedAt: Date.now() + 60_000 } }))).toBe(3)
+    })
+
+    it('stays quiet for boards that are not reviewed item by item, and when nothing is waiting', () => {
+        localStorage.clear()
+        expect(newToReview(session({ id: 'w2', metadata: { path: '/repo', swarm: { job: 'Log', promotedAt: 1 } }, workerBoard: board }))).toBe(0)
+        expect(newToReview(session({ id: 'w3', metadata: approval, workerBoard: { ...board, unreviewed: 0, newestUnreviewedAt: 0 } }))).toBe(0)
+    })
+})
+
+describe('workerName', () => {
+    it('uses the functional name, then the session title, then the start of the job, never an invented name', () => {
+        const swarm = { job: 'Check Mac disk usage every two hours', promotedAt: 1 }
+        expect(workerName(session({ id: 'a', metadata: { path: '/r', name: 'Disk check', swarm: { ...swarm, name: 'Laptop Cleaner' } } }))).toBe('Laptop Cleaner')
+        expect(workerName(session({ id: 'a', metadata: { path: '/r', summary: { text: 'Check laptop disk space' }, swarm } }))).toBe('Check laptop disk space')
+        expect(workerName(session({ id: 'a', metadata: { path: '/r', swarm } }))).toBe('Check Mac disk')
     })
 })

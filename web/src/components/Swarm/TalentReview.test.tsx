@@ -3,6 +3,24 @@ import { describe, expect, it, vi } from 'vitest'
 import { TalentReview } from './TalentReview'
 
 describe('TalentReview', () => {
+    it('shows the candidate pool link and website without inventing a LinkedIn profile', () => {
+        const records = [{ key: 'p', createdAt: 1, updatedAt: 1, data: { name: 'Researcher', bestFitRole: 'Research Scientist, Modeling', suggestedDecision: 'no', suggestedReason: 'Check evidence', talentPoolUrl: 'https://tenera-talent-pool.vercel.app/pool?q=Researcher', candidateWebsiteUrl: 'https://researcher.example/' } }]
+        render(<TalentReview records={records} onRecord={vi.fn()} onClose={() => {}} />)
+        expect(screen.getByRole('link', { name: /Find in talent pool/ })).toHaveAttribute('href', 'https://tenera-talent-pool.vercel.app/pool?q=Researcher')
+        expect(screen.getByRole('link', { name: /View candidate website/ })).toHaveAttribute('href', 'https://researcher.example/')
+        expect(screen.queryByRole('link', { name: /LinkedIn/ })).not.toBeInTheDocument()
+    })
+    it('prioritizes research candidates while retaining their relative order', () => {
+        const records = [
+            { key: 'd', createdAt: 1, updatedAt: 1, data: { name: 'Designer', bestFitRole: 'Product Designer', suggestedDecision: 'no', suggestedReason: 'Design' } },
+            { key: 'r1', createdAt: 1, updatedAt: 1, data: { name: 'Research one', bestFitRole: 'Research Scientist, Modeling', suggestedDecision: 'yes', suggestedReason: 'Research one' } },
+            { key: 'r2', createdAt: 1, updatedAt: 1, data: { name: 'Research two', bestFitRole: 'Research Scientist, Evaluations', suggestedDecision: 'yes', suggestedReason: 'Research two' } },
+        ]
+        render(<TalentReview records={records} onRecord={vi.fn()} onClose={() => {}} />)
+        expect(screen.getByRole('heading', { name: 'Research one' })).toBeInTheDocument()
+        fireEvent.click(screen.getByText('Skip for now'))
+        expect(screen.getByRole('heading', { name: 'Research two' })).toBeInTheDocument()
+    })
     it('keeps the next suggestion when the board advances before save finishes', async () => {
         const first = { key: 'first', createdAt: 1, updatedAt: 1, data: { name: 'First', bestFitRole: 'Forward Deployment', suggestedDecision: 'yes', suggestedReason: 'First reason' } }
         const second = { key: 'second', createdAt: 1, updatedAt: 1, data: { name: 'Second', bestFitRole: 'Product Designer', suggestedDecision: 'no', suggestedReason: 'Second reason' } }
