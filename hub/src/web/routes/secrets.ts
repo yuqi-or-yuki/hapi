@@ -1,10 +1,10 @@
 import { Hono } from 'hono'
 import { z } from 'zod'
-import { deleteSecret, isSecretVaultSupported, readSecret, SECRET_NAME_PATTERN, writeSecret } from '@hapi/protocol/secretVault'
+import { deleteSecret, isSecretVaultSupported, readSecret, secretStorage, SECRET_NAME_PATTERN, writeSecret } from '@hapi/protocol/secretVault'
 import type { Store } from '../../store'
 import type { WebAppEnv } from '../middleware/auth'
 
-/** What the hub knows about a secret. The password itself is only ever in the Keychain. */
+/** What the hub knows about a secret. The password itself is only ever in the machine's vault (see secretVault). */
 export type SecretEntry = {
     name: string
     username?: string
@@ -31,7 +31,7 @@ const usedBodySchema = z.object({ sessionId: z.string().max(100).optional() })
 /**
  * Stored logins for agents. Deliberately has no route that returns a password:
  * the web can add, replace and remove secrets, and agents read them from the
- * Keychain on the machine itself (`hapi secret get`), so a value never travels
+ * vault on the machine itself (`hapi secret get`), so a value never travels
  * back out over HTTP.
  */
 export function createSecretsRoutes(store: Store): Hono<WebAppEnv> {
@@ -46,7 +46,7 @@ export function createSecretsRoutes(store: Store): Hono<WebAppEnv> {
     }
 
     app.get('/secrets', (c) => {
-        return c.json({ supported: isSecretVaultSupported(), secrets: loadIndex(c.get('namespace')) })
+        return c.json({ supported: isSecretVaultSupported(), storage: secretStorage(), secrets: loadIndex(c.get('namespace')) })
     })
 
     app.put('/secrets/:name', async (c) => {

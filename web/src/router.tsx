@@ -660,6 +660,7 @@ function SecretsPage() {
                 <SecretsView
                     secrets={data?.secrets ?? []}
                     supported={data?.supported ?? true}
+                    storage={data?.storage}
                     isLoading={isLoading}
                     error={error instanceof Error ? error.message : null}
                     sessionTitles={sessionTitles}

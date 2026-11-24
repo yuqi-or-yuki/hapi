@@ -1090,7 +1090,7 @@ export class ApiClient {
         })
     }
 
-    async getSecrets(): Promise<{ supported: boolean; secrets: SecretEntry[] }> {
+    async getSecrets(): Promise<{ supported: boolean; storage?: 'keychain' | 'file' | null; secrets: SecretEntry[] }> {
         return await this.request('/api/secrets')
     }
 

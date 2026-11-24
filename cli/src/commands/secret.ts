@@ -32,7 +32,7 @@ async function handleSecretCommand(args: string[]): Promise<void> {
     if (sub === 'get') {
         const name = args[1]
         if (!name) throw new Error('Missing secret name')
-        // Read straight from the Keychain on this machine: the hub has no route
+        // Read straight from the vault on this machine: the hub has no route
         // that returns a password, so nothing sensitive crosses the network.
         const secret = readSecret(NAMESPACE, name)
         if (!secret) throw new Error(`No stored secret named "${name}" (see: hapi secret list)`)
@@ -73,7 +73,7 @@ async function handleSecretCommand(args: string[]): Promise<void> {
 
 function showHelp(): void {
     console.log(`
-${chalk.bold('hapi secret')} - Logins the user has stored for agents (macOS Keychain)
+${chalk.bold('hapi secret')} - Logins the user has stored for agents (kept on this machine)
 
 ${chalk.bold('Usage:')}
   hapi secret list                                   names, usernames and sites (never passwords)

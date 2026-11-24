@@ -6,6 +6,7 @@ const vault = new Map<string, { password: string; username?: string }>()
 mock.module('@hapi/protocol/secretVault', () => ({
     SECRET_NAME_PATTERN: /^[a-z0-9][a-z0-9._-]{0,62}$/,
     isSecretVaultSupported: () => true,
+    secretStorage: () => 'keychain',
     writeSecret: (_namespace: string, name: string, fields: { password: string }) => { vault.set(name, fields) },
     readSecret: (_namespace: string, name: string) => vault.get(name) ?? null,
     deleteSecret: (_namespace: string, name: string) => vault.delete(name)

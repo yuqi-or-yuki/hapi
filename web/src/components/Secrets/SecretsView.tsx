@@ -125,6 +125,8 @@ function SecretDialog(props: {
 export function SecretsView(props: {
     secrets: readonly SecretEntry[]
     supported: boolean
+    /** Where the hub's machine keeps the passwords: the macOS Keychain, or encrypted files on a Linux server. */
+    storage?: 'keychain' | 'file' | null
     isLoading: boolean
     error: string | null
     sessionTitles: Record<string, string>
@@ -141,7 +143,7 @@ export function SecretsView(props: {
     return (
         <div className="mx-auto w-full max-w-content px-3 py-4 sm:px-4 sm:py-5">
             <div className="flex items-center justify-between gap-3">
-                <p className="text-xs text-[var(--app-hint)]">{t('secrets.storedIn')}</p>
+                <p className="text-xs text-[var(--app-hint)]">{t(props.storage === 'file' ? 'secrets.storedInFile' : 'secrets.storedIn')}</p>
                 <Button type="button" onClick={() => setDialog(null)} disabled={!props.supported}>{t('secrets.add')}</Button>
             </div>
 
