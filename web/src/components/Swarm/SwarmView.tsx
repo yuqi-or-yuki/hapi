@@ -5,6 +5,7 @@ import { useTranslation } from '@/lib/use-translation'
 import { SwarmRailIcon } from '@/components/AppRail'
 import { RunStrip } from './RunStrip'
 import { SwarmOffice } from './SwarmOffice'
+import { SwarmPipelines } from './SwarmPipelines'
 import { WorkerAvatar } from './WorkerAvatar'
 import { describeSchedule, newToReview, workerName, workerSeed, workerState, type WorkerState } from './worker'
 
@@ -185,9 +186,7 @@ export function SwarmView(props: {
                     {view === 'office' ? (
                         <SwarmOffice workers={workers} renderCard={card} onOpenWorker={props.onOpenWorker} />
                     ) : (
-                        <div className="grid gap-3 lg:grid-cols-2">
-                            {workers.map((worker) => <div key={worker.session.id}>{card(worker)}</div>)}
-                        </div>
+                        <SwarmPipelines workers={workers} renderCard={card} />
                     )}
                 </>
             )}

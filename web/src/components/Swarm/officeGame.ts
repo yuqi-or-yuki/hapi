@@ -10,7 +10,14 @@ const INDOOR_COLS = 27
 /** Pixels per second. A stroll, not a sprint. */
 const SPEED = 30
 
-export type OfficeWorker = { id: string; seed: string; flavor: string | null; room: RoomId }
+export type OfficeWorker = {
+    id: string
+    seed: string
+    flavor: string | null
+    room: RoomId
+    /** The worker ahead of this one in its pipeline: it walks one tile behind them instead of wandering. */
+    follows?: string
+}
 
 export type OfficeGame = {
     setWorkers: (workers: readonly OfficeWorker[]) => void
@@ -47,6 +54,8 @@ type Actor = {
     body: Phaser.GameObjects.Container
     figure: Phaser.GameObjects.Container
     tile: Tile
+    /** The tile it stood on before this one: where the worker following it heads. */
+    prev: Tile | null
     path: Tile[]
     /** Wall-clock time of the next wander, so it survives the loop being asleep. */
     moveAt: number
@@ -126,7 +135,7 @@ class OfficeScene extends Phaser.Scene {
                 this.actors.set(worker.id, this.spawn(worker))
                 continue
             }
-            const moved = actor.worker.room !== worker.room
+            const moved = actor.worker.room !== worker.room || (!worker.follows && actor.moveAt === Infinity)
             actor.worker = worker
             // A change of state sends the worker to its new room straight away.
             if (moved) actor.moveAt = 0
@@ -152,7 +161,7 @@ class OfficeScene extends Phaser.Scene {
             this.add.image(0, 0, 'characters', frame(CHARACTER_SHEET.cols, cell)).setOrigin(0.5, 1))
         const figure = this.add.container(0, 0, parts)
         const body = this.add.container(at.x, at.y, [figure]).setDepth(at.y)
-        return { worker, body, figure, tile, path: [], moveAt: Date.now() + restMs(worker.room) * Math.random() }
+        return { worker, body, figure, tile, prev: null, path: [], moveAt: Date.now() + restMs(worker.room) * Math.random() }
     }
 
     private takenTiles(except: string | null): Tile[] {
@@ -168,7 +177,14 @@ class OfficeScene extends Phaser.Scene {
                 actor.figure.y = 0
                 continue
             }
-            if (actor.path.length === 0 && now >= actor.moveAt) {
+            const leader = actor.worker.follows ? this.actors.get(actor.worker.follows) : undefined
+            if (leader) {
+                // Part of a train: head for the tile the worker ahead just left.
+                const spot = leader.prev ?? findPath(actor.tile, leader.tile).at(-2) ?? null
+                const heading = actor.path.at(-1) ?? actor.tile
+                if (spot && (spot.x !== heading.x || spot.y !== heading.y)) actor.path = findPath(actor.tile, spot)
+                actor.moveAt = Infinity
+            } else if (actor.path.length === 0 && now >= actor.moveAt) {
                 actor.path = findPath(actor.tile, pickSpot(actor.worker.room, this.takenTiles(actor.worker.id)))
                 // Nowhere to go (boxed in): try again later rather than every frame.
                 if (actor.path.length === 0) actor.moveAt = now + restMs(actor.worker.room)
@@ -183,11 +199,13 @@ class OfficeScene extends Phaser.Scene {
             const dx = target.x - actor.body.x
             const dy = target.y - actor.body.y
             const distance = Math.hypot(dx, dy)
-            const stride = (SPEED * delta) / 1000
+            // A follower that has fallen behind hurries to close the gap.
+            const stride = (SPEED * (leader && actor.path.length > 2 ? 1.6 : 1) * delta) / 1000
             if (distance <= stride) {
                 actor.body.setPosition(target.x, target.y)
+                actor.prev = actor.tile
                 actor.tile = actor.path.shift()!
-                if (actor.path.length === 0) actor.moveAt = now + restMs(actor.worker.room)
+                if (actor.path.length === 0 && !leader) actor.moveAt = now + restMs(actor.worker.room)
             } else {
                 actor.body.setPosition(actor.body.x + (dx / distance) * stride, actor.body.y + (dy / distance) * stride)
                 if (dx !== 0) actor.figure.setScale(dx < 0 ? -1 : 1, 1)

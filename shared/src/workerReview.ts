@@ -56,6 +56,20 @@ export function unfilledCards(rows: readonly { key: string; data: Row }[], board
         .filter((card) => card.missing.length > 0)
 }
 
+/**
+ * The operator's standing decision on a row: their latest saved review, or
+ * null when nobody has reviewed it. A pipeline hands a row on only when this
+ * is "yes" (see hub workerPipelines).
+ */
+export function finalDecision(row: Row): 'yes' | 'no' | null {
+    const events = [row.approvalReviews, row.linkedinReviews]
+        .flatMap((value) => (Array.isArray(value) ? value : []))
+        .filter((event): event is { decision: unknown; at?: unknown } => !!event && typeof event === 'object')
+    if (events.length === 0) return null
+    const latest = events.reduce((a, b) => (String(b.at ?? '') >= String(a.at ?? '') ? b : a))
+    return latest.decision === 'yes' ? 'yes' : latest.decision === 'no' ? 'no' : null
+}
+
 export const UNCATEGORIZED = 'Uncategorized'
 
 /**

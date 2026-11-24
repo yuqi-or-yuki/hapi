@@ -18,6 +18,7 @@ import { createAuthRoutes } from './routes/auth'
 import { createBindRoutes } from './routes/bind'
 import { createEventsRoutes } from './routes/events'
 import { createSessionsRoutes } from './routes/sessions'
+import { createWorkerPipelineRoutes } from './routes/workerPipelines'
 import { createMessagesRoutes } from './routes/messages'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
@@ -287,6 +288,7 @@ function createWebApp(options: {
     app.use('/api/*', createAuthMiddleware(options.jwtSecret))
     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
     app.route('/api', createSessionsRoutes(options.getSyncEngine, options.store))
+    app.route('/api', createWorkerPipelineRoutes(options.getSyncEngine, options.store))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createScheduledMessagesRoutes(options.store, options.getSyncEngine))
     app.route('/api', createSecretsRoutes(options.store))

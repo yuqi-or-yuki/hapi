@@ -40,6 +40,7 @@ import { loadScratchlistAttachmentLimitsFromEnv } from '../../config/scratchlist
 import { validateScratchlistAttachmentsForWrite, scratchlistSessionBytesBeforeForPut } from '../../scratchlistAttachments/validate'
 import { TitleSuggestionError } from '../../sync/titleSuggestion'
 import { requireSessionFromParam, requireSyncEngine } from './guards'
+import { handOffApprovedRows } from './workerPipelines'
 
 const reviewSchema = z.object({
     readyForReview: z.boolean()
@@ -1053,6 +1054,7 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
             const { job, schedule } = parsed.data
             if (job === null) {
                 if (current?.scheduleId) store?.scheduledMessages.cancel(c.get('namespace'), current.scheduleId)
+                store?.workerPipelines.removeWorker(c.get('namespace'), sessionResult.sessionId)
                 await engine.setSessionSwarm(sessionResult.sessionId, null)
                 return c.json({ ok: true })
             }
@@ -1128,6 +1130,8 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
 
         try {
             const count = store.workerRecords.upsert(c.get('namespace'), sessionResult.sessionId, parsed.data.records)
+            // A row the operator just approved moves on to the workers linked downstream.
+            handOffApprovedRows(store, c.get('namespace'), sessionResult.session, parsed.data.records.map((record) => record.key), engine.getSessionsByNamespace(c.get('namespace')))
             return c.json({ ok: true, count })
         } catch (error) {
             return c.json({ error: error instanceof Error ? error.message : 'Failed to save rows' }, 400)

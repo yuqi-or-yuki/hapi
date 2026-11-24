@@ -1337,6 +1337,7 @@ export class SessionCache {
         // A worker's clock and board belong to the worker, not to one session id.
         this.store.scheduledMessages.retarget(oldSessionId, newSessionId)
         this.store.workerRecords.transfer(oldSessionId, newSessionId)
+        this.store.workerPipelines.transfer(oldSessionId, newSessionId)
 
         const mergedMetadata = this.mergeSessionMetadata(oldStored.metadata, newStored.metadata)
         if (mergedMetadata !== null && mergedMetadata !== newStored.metadata) {

@@ -844,6 +844,18 @@ export class ApiClient {
         )
     }
 
+    async getSwarmLinks(): Promise<{ links: { from: string; to: string; pending: number; handled: number }[] }> {
+        return await this.request('/api/swarm/links')
+    }
+
+    /** Make `toSessionId` take the items approved on `fromSessionId`'s board, or stop doing so. */
+    async setWorkerLink(toSessionId: string, fromSessionId: string, remove: boolean): Promise<void> {
+        await this.request(`/api/sessions/${encodeURIComponent(toSessionId)}/worker-links`, {
+            method: remove ? 'DELETE' : 'PUT',
+            body: JSON.stringify({ from: fromSessionId })
+        })
+    }
+
     async createMachineVm(machineId: string, name: string): Promise<{ name: string; zone: string }> {
         return await this.request<{ name: string; zone: string }>(
             `/api/machines/${encodeURIComponent(machineId)}/create-vm`,

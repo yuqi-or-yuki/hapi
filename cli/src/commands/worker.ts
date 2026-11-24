@@ -16,6 +16,8 @@ type Swarm = {
     board?: { title?: string; columns?: string[] }
 }
 
+type PipelineEnd = { id: string; name: string; pending: number; handled: number }
+
 const DAY_MS = 86_400_000
 
 function sessionPath(args: string[]): string {
@@ -107,6 +109,43 @@ async function handleWorkerCommand(args: string[]): Promise<void> {
         }
         if (swarm.board?.columns) console.log(`  board columns: ${swarm.board.columns.join(', ')}`)
         if (swarm.playbook) console.log(`  playbook:\n${swarm.playbook.replace(/^/gm, '    ')}`)
+        const links = await request<{ upstream: PipelineEnd[]; downstream: PipelineEnd[] }>('get', `${path}/worker-links`)
+        for (const up of links.upstream) console.log(`  pipeline: takes approved items from ${chalk.bold(up.name)} (${up.pending} waiting in your inbox, ${up.handled} handled)`)
+        for (const down of links.downstream) console.log(`  pipeline: your approved items go to ${chalk.bold(down.name)} (${down.pending} waiting there)`)
+        return
+    }
+
+    if (sub === 'link' || sub === 'unlink') {
+        const from = getFlag(args, 'from')
+        const to = getFlag(args, 'to')
+        if (!from === !to) throw new Error(`Pass exactly one of --from "<worker>" (take its approved items) or --to "<worker>" (hand yours on)`)
+        const result = await request<{ from: string; to: string }>(sub === 'link' ? 'put' : 'delete', `${path}/worker-links`, from ? { from } : { to })
+        console.log(sub === 'link'
+            ? `${chalk.green('Linked:')} items approved on ${result.from}'s board now go to ${result.to}`
+            : `${chalk.green('Unlinked:')} ${result.from} no longer feeds ${result.to}`)
+        return
+    }
+
+    if (sub === 'inbox') {
+        const { items } = await request<{ items: unknown[] }>('get', `${path}/worker-inbox`)
+        console.log(JSON.stringify(items, null, 2))
+        return
+    }
+
+    if (sub === 'done') {
+        const keys = args.flatMap((arg, index) => (arg === '--key' && args[index + 1] !== undefined ? [args[index + 1]] : []))
+        if (keys.length === 0) throw new Error('Missing --key "<key>" (repeat --key for several)')
+        const { count } = await request<{ count: number }>('post', `${path}/worker-inbox/handled`, { keys })
+        console.log(chalk.green('Handled:'), `${count} item${count === 1 ? '' : 's'} left the inbox`)
+        return
+    }
+
+    if (sub === 'tell') {
+        const to = getFlag(args, 'to')
+        const text = args.slice(1).filter((arg, index, rest) => !arg.startsWith('--') && !rest[index - 1]?.startsWith('--')).join(' ').trim()
+        if (!to || !text) throw new Error('Usage: hapi worker tell --to "<worker>" "<message>"')
+        const result = await request<{ to: string }>('post', `${path}/worker-tell`, { to, text })
+        console.log(chalk.green('Sent to'), result.to)
         return
     }
 
@@ -220,6 +259,16 @@ ${chalk.bold('Review period:')}
   --review 3 means the next 3 runs are reviewed: the worker records its rows but drafts
   outward-facing actions (email, posts, deletes) instead of taking them. Each approval counts
   one run down; at 0 it runs free.
+
+${chalk.bold('Pipelines:')}
+  hapi worker link --from "<worker>"     take the items the operator approves on that worker's board
+  hapi worker link --to "<worker>"       hand your own approved items on to that worker
+  hapi worker unlink --from|--to "<worker>"
+  hapi worker inbox                      approved items handed to you and not handled yet (JSON)
+  hapi worker done --key "<key>"         you finished that item; it leaves your inbox (repeat --key)
+  hapi worker tell --to "<worker>" "<message>"   a note to a worker you are linked with
+  An item is handed on when the operator's saved review of it is "yes", and the receiving
+  worker is woken shortly after. Nothing unapproved is ever handed on.
 
 ${chalk.bold('Examples:')}
   hapi worker promote --job "Keep the researcher pipeline topped up" --name "Researcher Sourcing" --daily 09:00 \\

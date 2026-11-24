@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from '@/lib/use-translation'
 import { GRID, ROOMS, roomFor } from './office'
 import type { OfficeGame, OfficeWorker } from './officeGame'
+import { trainOrder } from './pipeline'
+import { useSwarmLinks } from './SwarmPipelines'
 import { newToReview, workerName, workerSeed, workerState } from './worker'
 import type { Worker } from './SwarmView'
 
@@ -68,12 +70,15 @@ export function SwarmOffice(props: {
     const onOpen = useRef(props.onOpenWorker)
     onOpen.current = props.onOpenWorker
 
+    const links = useSwarmLinks()
+    const follows = useMemo(() => trainOrder(props.workers, links, (worker) => worker.session.id), [props.workers, links])
     const officeWorkers = useMemo<OfficeWorker[]>(() => props.workers.map((worker) => ({
         id: worker.session.id,
         seed: workerSeed(worker.session),
         flavor: worker.session.metadata?.flavor ?? null,
-        room: roomFor(worker.session)
-    })), [props.workers])
+        room: roomFor(worker.session),
+        follows: follows.get(worker.session.id)
+    })), [props.workers, follows])
     const latest = useRef(officeWorkers)
     latest.current = officeWorkers
 
