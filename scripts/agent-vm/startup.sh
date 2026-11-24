@@ -122,6 +122,10 @@ install -d -m 750 -g "$AGENT" /etc/hapi
     echo "CLI_API_TOKEN=$(secret hapi-cli-token)"
     echo "HAPI_HOME=$AGENT_HOME/.hapi"
     echo "HAPI_RUNNER_SUPERVISED=1"
+    # After an update the runner hands over to a new process of its own; the
+    # one systemd then starts must wait behind it instead of exiting, or
+    # Restart=always would relaunch it every few seconds.
+    echo "HAPI_RUNNER_STANDBY=1"
     echo "HAPI_LISTEN_HOST=0.0.0.0"
     echo "PATH=$AGENT_HOME/.hapi/bin:$AGENT_HOME/.local/bin:$AGENT_HOME/.bun/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
     CLAUDE_TOKEN=$(secret claude-oauth-token)
