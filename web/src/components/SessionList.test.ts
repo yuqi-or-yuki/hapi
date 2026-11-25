@@ -20,6 +20,8 @@ import {
     sessionTier,
     sessionsHeldByUserGroups,
     userGroupKeyFor,
+    buildTierSections,
+    pipelineMembership,
 } from './SessionList'
 
 function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
@@ -559,5 +561,42 @@ describe('sessionsHeldByUserGroups', () => {
 
     it('files a custom group by machine and folder only, the same key it was created with', () => {
         expect(userGroupKeyFor('m1', '/repo/app')).toBe('m1::/repo/app')
+    })
+})
+
+describe('pipelines in the swarm section', () => {
+    const worker = (id: string, name: string, path: string, updatedAt: number) => makeSession({
+        id, updatedAt, metadata: { path, machineId: 'm1', swarm: { job: `${name} job`, promotedAt: 1, name } }
+    })
+    const intake = worker('intake', 'Talent Intake', '/home', 1)
+    const outreach = worker('outreach', 'Talent Outreach', '/work', 9)
+    const cleaner = worker('cleaner', 'Laptop Cleaner', '/home', 5)
+    const links = [{ from: 'intake', to: 'outreach', pending: 0, handled: 3 }]
+
+    it('lists linked workers as one group, in the order work flows, even across folders', () => {
+        const [swarm] = buildTierSections([outreach, cleaner, intake], () => 'Mac', links)
+        const pipeline = swarm.groups.find((group) => group.pipeline)!
+        expect(pipeline.displayName).toBe('Talent Intake \u2192 Talent Outreach')
+        expect(pipeline.sessions.map((item) => item.id)).toEqual(['intake', 'outreach'])
+        // The worker that is not linked stays under its folder, on its own.
+        const folders = swarm.groups.filter((group) => !group.pipeline)
+        expect(folders.map((group) => group.sessions.map((item) => item.id))).toEqual([['cleaner']])
+        expect(swarm.sessionCount).toBe(3)
+    })
+
+    it('leaves the list as it was when nothing is linked, or a link points at a worker that is gone', () => {
+        const [swarm] = buildTierSections([intake, cleaner], () => 'Mac', links)
+        expect(swarm.groups.some((group) => group.pipeline)).toBe(false)
+        expect(pipelineMembership([intake, cleaner], links).size).toBe(0)
+    })
+
+    it('shortens a long pipeline to its ends', () => {
+        const middle = worker('mid', 'Scorer', '/home', 2)
+        const membership = pipelineMembership([intake, middle, outreach], [
+            { from: 'intake', to: 'mid', pending: 0, handled: 0 },
+            { from: 'mid', to: 'outreach', pending: 0, handled: 0 }
+        ])
+        expect(membership.get('mid')?.label).toBe('Talent Intake \u2192 \u2026 \u2192 Talent Outreach')
+        expect(membership.get('outreach')?.order).toBe(2)
     })
 })

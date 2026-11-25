@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent, ReactNode, RefObject } from 'react'
 import type { SessionSummary } from '@/types/api'
 import type { ApiClient } from '@/api/client'
-import { useQueryClient } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useLongPress } from '@/hooks/useLongPress'
 import { usePlatform } from '@/hooks/usePlatform'
 import { CloneSessionDialog } from '@/components/CloneSessionDialog'
@@ -20,7 +20,8 @@ import { useSessionGroups, type UserSessionGroup } from '@/hooks/useSessionGroup
 import { DEFAULT_SESSION_PREVIEW_LIMIT, useSessionPreviewLimit } from '@/hooks/useSessionPreviewLimit'
 import { AgentFlavorIcon } from '@/components/AgentFlavorIcon'
 import { WorkerAvatar } from '@/components/Swarm/WorkerAvatar'
-import { workerSeed } from '@/components/Swarm/worker'
+import { workerName, workerSeed } from '@/components/Swarm/worker'
+import { buildPipelines, type PipelineLink } from '@/components/Swarm/pipeline'
 import { useSessionListStatusMode } from '@/hooks/useSessionListStatusMode'
 import { useShowActiveSessionsOnly } from '@/hooks/useShowActiveSessionsOnly'
 import { classifySessionAttention } from '@/lib/sessionAttention'
@@ -54,6 +55,12 @@ type SessionGroup = {
      * sidebar, so it must still match after a session is promoted to a worker.
      */
     userGroupKey: string
+    /**
+     * Set when this group is a swarm pipeline (workers linked so one's approved
+     * output feeds the next) and not a folder. Its sessions are in the order
+     * work flows, and it has no path to copy or to start a session in.
+     */
+    pipeline?: boolean
     directory: string
     displayName: string
     machineId: string | null
@@ -295,15 +302,17 @@ type TierSection = {
  * machine -> project tree inside each. A tier with no sessions is dropped, so
  * an operator with no workers sees exactly the list they had before.
  */
-function buildTierSections(
+export function buildTierSections(
     sessions: SessionSummary[],
-    resolveMachineLabel: (id: string | null) => string
+    resolveMachineLabel: (id: string | null) => string,
+    links: readonly PipelineLink[] = []
 ): TierSection[] {
     const byTier = partitionSessionsByTier(sessions)
     return SESSION_TIER_ORDER
         .filter((tier) => byTier[tier].length > 0)
         .map((tier) => {
-            const groups = groupSessionsByDirectory(byTier[tier], tier)
+            // Linked workers are listed together, the same way the Swarm page draws them.
+            const groups = groupSessionsByDirectory(byTier[tier], tier, tier === 'swarm' ? pipelineMembership(byTier[tier], links) : undefined)
             return {
                 tier,
                 groups,
@@ -316,6 +325,8 @@ function buildTierSections(
 function machineCollapseKey(tier: SessionTier, machineId: string | null): string {
     return `machine::${tier}::${machineId ?? UNKNOWN_MACHINE_ID}`
 }
+
+const NO_LINKS: readonly PipelineLink[] = []
 
 export function userGroupKeyFor(machineId: string | null, directory: string): string {
     return `${machineId ?? UNKNOWN_MACHINE_ID}::${directory}`
@@ -358,18 +369,45 @@ export function sessionsHeldByUserGroups(
     return held
 }
 
-function groupSessionsByDirectory(sessions: SessionSummary[], tier: SessionTier = 'plain'): SessionGroup[] {
-    const groups = new Map<string, { directory: string; machineId: string | null; sessions: SessionSummary[] }>()
+type PipelineMembership = Map<string, { key: string; label: string; order: number }>
+
+/**
+ * Which pipeline each linked worker belongs to, with its place in the flow.
+ * A pipeline is named by its ends ("Talent Intake -> Talent Outreach") so it
+ * is recognisable without opening it.
+ */
+export function pipelineMembership(sessions: readonly SessionSummary[], links: readonly PipelineLink[]): PipelineMembership {
+    const membership: PipelineMembership = new Map()
+    for (const pipeline of buildPipelines(sessions, links, (session) => session.id).pipelines) {
+        const line = pipeline.stages.flat()
+        const first = workerName(line[0])
+        const last = workerName(line[line.length - 1])
+        const label = line.length > 2 ? `${first} \u2192 \u2026 \u2192 ${last}` : `${first} \u2192 ${last}`
+        line.forEach((session, order) => membership.set(session.id, { key: line[0].id, label, order }))
+    }
+    return membership
+}
+
+function groupSessionsByDirectory(
+    sessions: SessionSummary[],
+    tier: SessionTier = 'plain',
+    pipelines?: PipelineMembership
+): SessionGroup[] {
+    const groups = new Map<string, { directory: string; machineId: string | null; sessions: SessionSummary[]; pipeline?: boolean }>()
 
     sessions.forEach(session => {
-        const path = session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other'
+        const member = pipelines?.get(session.id)
+        const path = member ? member.label : session.metadata?.worktree?.basePath ?? session.metadata?.path ?? 'Other'
         const machineId = session.metadata?.machineId ?? null
-        const key = `${tier}::${machineId ?? UNKNOWN_MACHINE_ID}::${path}`
+        // A pipeline is one group even when its workers run in different folders;
+        // it sits under the machine of whichever member is met first.
+        const key = member ? `${tier}::pipeline::${member.key}` : `${tier}::${machineId ?? UNKNOWN_MACHINE_ID}::${path}`
         if (!groups.has(key)) {
             groups.set(key, {
                 directory: path,
                 machineId,
-                sessions: []
+                sessions: [],
+                pipeline: member ? true : undefined
             })
         }
         groups.get(key)!.sessions.push(session)
@@ -378,6 +416,8 @@ function groupSessionsByDirectory(sessions: SessionSummary[], tier: SessionTier 
     return Array.from(groups.entries())
         .map(([key, group]) => {
             const sortedSessions = [...group.sessions].sort((a, b) => {
+                // A pipeline reads in the order work flows, not by who was active last.
+                if (group.pipeline) return (pipelines?.get(a.id)?.order ?? 0) - (pipelines?.get(b.id)?.order ?? 0)
                 const rankA = a.active && a.thinking ? 0 : a.active ? (a.pendingRequestsCount > 0 ? 1 : 2) : 3
                 const rankB = b.active && b.thinking ? 0 : b.active ? (b.pendingRequestsCount > 0 ? 1 : 2) : 3
                 if (rankA !== rankB) return rankA - rankB
@@ -388,11 +428,13 @@ function groupSessionsByDirectory(sessions: SessionSummary[], tier: SessionTier 
                 -Infinity
             )
             const hasActiveSession = group.sessions.some(s => s.active)
-            const displayName = getGroupDisplayName(group.directory)
+            const displayName = group.pipeline ? group.directory : getGroupDisplayName(group.directory)
 
             return {
                 key,
-                userGroupKey: userGroupKeyFor(group.machineId, group.directory),
+                // Custom groups are filed under folders; a pipeline's key matches none of them.
+                userGroupKey: group.pipeline ? key : userGroupKeyFor(group.machineId, group.directory),
+                pipeline: group.pipeline,
                 directory: group.directory,
                 displayName,
                 machineId: group.machineId,
@@ -1571,17 +1613,24 @@ export function SessionList(props: {
             : allSessions,
         [allSessions, isFiltering, normalizedQuery, timeRange?.start, timeRange?.end, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
     )
+    // Same cache entry as the Swarm page, so the two always agree on who is linked.
+    const { data: swarmLinks = NO_LINKS } = useQuery({
+        queryKey: ['swarm-links'],
+        queryFn: async () => (api ? (await api.getSwarmLinks()).links : []),
+        enabled: Boolean(api),
+        refetchInterval: 15_000
+    })
     const allTierSections = useMemo(
-        () => buildTierSections(allSessions, resolveMachineLabel),
-        [allSessions, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
+        () => buildTierSections(allSessions, resolveMachineLabel, swarmLinks),
+        [allSessions, machineLabelsById, swarmLinks] // eslint-disable-line react-hooks/exhaustive-deps
     )
     const allGroups = useMemo(
         () => allTierSections.flatMap((section) => section.groups),
         [allTierSections]
     )
     const tierSections = useMemo(
-        () => buildTierSections(visibleSessions, resolveMachineLabel),
-        [visibleSessions, machineLabelsById] // eslint-disable-line react-hooks/exhaustive-deps
+        () => buildTierSections(visibleSessions, resolveMachineLabel, swarmLinks),
+        [visibleSessions, machineLabelsById, swarmLinks] // eslint-disable-line react-hooks/exhaustive-deps
     )
     const [collapseOverrides, setCollapseOverrides] = useState<Map<string, boolean>>(
         () => new Map()
@@ -1938,7 +1987,7 @@ export function SessionList(props: {
                                     {mg.projectGroups.map((group) => {
                                         const isCollapsed = isGroupCollapsed(group)
                                         const ungroupedVisibleLimit = getGroupVisibleCount(group)
-                                        const canStartInGroupDirectory = group.directory !== 'Other'
+                                        const canStartInGroupDirectory = group.directory !== 'Other' && !group.pipeline
                                         const projectUserGroups = getGroupsForProject(group.userGroupKey)
                                         // A session that moved folders stays in its custom group, but only
                                         // while that group is drawn somewhere in this section; otherwise it
@@ -1961,9 +2010,10 @@ export function SessionList(props: {
                                                 >
                                                     <ChevronIcon className="h-3.5 w-3.5 text-[var(--app-hint)] shrink-0" collapsed={isCollapsed} />
                                                     <span className="font-medium text-sm truncate flex-1">
+                                                        {group.pipeline ? <span aria-hidden="true" className="mr-1 text-[var(--app-link)]">{'\u21e2'}</span> : null}
                                                         {group.displayName}
                                                     </span>
-                                                    <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />
+                                                    {group.pipeline ? null : <CopyPathButton path={group.directory} className="opacity-0 group-hover/project:opacity-100 transition-opacity duration-150" />}
                                                     {onNewSessionInDirectory && canStartInGroupDirectory ? (
                                                         <button
                                                             type="button"
