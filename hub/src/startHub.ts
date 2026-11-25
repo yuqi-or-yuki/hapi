@@ -26,6 +26,7 @@ import { waitForTunnelTlsReady } from './tunnel/tlsGate'
 import { ServerChanChannel } from './serverchan/channel'
 import { NtfyChannel } from './ntfy/channel'
 import { ScheduledMessageService } from './scheduled/scheduledMessageService'
+import { WorkerRevivalService } from './swarm/workerRevival'
 import QRCode from 'qrcode'
 import type { Server as BunServer } from 'bun'
 import type { WebSocketData } from '@socket.io/bun-engine'
@@ -117,6 +118,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     let visibilityTracker: VisibilityTracker | null = null
     let notificationHub: NotificationHub | null = null
     let scheduledMessageService: ScheduledMessageService | null = null
+    let workerRevivalService: WorkerRevivalService | null = null
     let tunnelManager: TunnelManager | null = null
 
     // Load configuration (async - loads from env/file with persistence)
@@ -294,6 +296,9 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
     })
     scheduledMessageService.start()
 
+    workerRevivalService = new WorkerRevivalService(() => syncEngine)
+    workerRevivalService.start()
+
     // Start HTTP service first (before tunnel, so tunnel has something to forward to)
     webServer = await startWebServer({
         getSyncEngine: () => syncEngine,
@@ -411,6 +416,7 @@ export async function startHub(options: StartHubOptions = {}): Promise<HubInstan
             await tunnelManager?.stop()
             await happyBot?.stop()
             scheduledMessageService?.stop()
+            workerRevivalService?.stop()
             scheduledMessageService = null
             notificationHub?.stop()
             syncEngine?.stop()
