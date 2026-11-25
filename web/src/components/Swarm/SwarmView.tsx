@@ -34,6 +34,9 @@ export function selectWorkers(sessions: readonly SessionSummary[]): Worker[] {
         .flatMap((session) => {
             const swarm = session.metadata?.swarm
             if (!swarm?.job) return []
+            // Archiving a worker takes it off the swarm without forgetting its job,
+            // schedule or board: reopening the session puts it straight back.
+            if (session.metadata?.lifecycleState === 'archived') return []
             return [{ session, job: swarm.job, promotedAt: swarm.promotedAt ?? 0 }]
         })
         .sort((a, b) => b.promotedAt - a.promotedAt)

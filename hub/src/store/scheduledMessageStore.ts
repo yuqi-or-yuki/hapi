@@ -372,6 +372,19 @@ export class ScheduledMessageStore {
         `).run({ id, due_at: dueAt, updated_at: Date.now() })
     }
 
+    /**
+     * Pass over the slot that is due without running it or recording anything,
+     * for a repeating job that must stay quiet for now (its worker is archived).
+     */
+    skipSlot(id: string, now: number): void {
+        const job = this.getById(id)
+        if (!job || job.status !== 'pending' || !job.intervalMs) return
+        this.db.query(`
+            UPDATE scheduled_messages SET due_at = $due_at, updated_at = $updated_at
+            WHERE id = $id AND status = 'pending'
+        `).run({ id, due_at: nextSlotAfter(job.dueAt, job.intervalMs, now), updated_at: now })
+    }
+
     /** Pending jobs follow a session that was resumed under a new id. */
     retarget(oldSessionId: string, newSessionId: string): void {
         this.db.query(`

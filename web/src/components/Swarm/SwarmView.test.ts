@@ -140,3 +140,12 @@ describe('workerName', () => {
         expect(workerName(session({ id: 'a', metadata: { path: '/r', swarm } }))).toBe('Check Mac disk')
     })
 })
+
+describe('selectWorkers and archiving', () => {
+    it('leaves an archived worker off the swarm, and shows it again once reopened', () => {
+        const swarm = { job: 'Draft the report', promotedAt: 5 }
+        const archived = session({ id: 'gone', metadata: { path: '/repo', lifecycleState: 'archived', swarm } })
+        const reopened = session({ id: 'back', metadata: { path: '/repo', lifecycleState: 'running', swarm } })
+        expect(selectWorkers([archived, reopened]).map((worker) => worker.session.id)).toEqual(['back'])
+    })
+})

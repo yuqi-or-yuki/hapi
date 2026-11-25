@@ -63,6 +63,7 @@ export class ScheduledMessageService {
                 if (!dueIds.has(id)) this.attempts.delete(id)
             }
             for (const job of due) {
+                if (this.restArchivedWorker(engine, job, now)) continue
                 if (this.deferToWindow(engine, job)) continue
                 await this.runJob(engine, this.settleMissedSlot(engine, job, now))
             }
@@ -75,6 +76,20 @@ export class ScheduledMessageService {
     private windowFor(engine: SyncEngine, job: ScheduledMessageRow): ActiveWindow | undefined {
         const swarm = engine.getSession(job.sourceSessionId)?.metadata?.swarm
         return swarm?.scheduleId === job.id ? swarm.activeWindow : undefined
+    }
+
+    /**
+     * An archived worker is off the swarm: its schedule must not wake it. The
+     * schedule is kept and simply passes over each slot, so reopening the
+     * session resumes the job at its next run with nothing to set up again.
+     */
+    private restArchivedWorker(engine: SyncEngine, job: ScheduledMessageRow, now: number): boolean {
+        const session = engine.getSession(job.sourceSessionId)
+        const isWorkerSchedule = session?.metadata?.swarm?.scheduleId === job.id
+        if (!isWorkerSchedule || session?.metadata?.lifecycleState !== 'archived' || !isRepeating(job)) return false
+        this.store.scheduledMessages.skipSlot(job.id, now)
+        this.attempts.delete(job.id)
+        return true
     }
 
     /**

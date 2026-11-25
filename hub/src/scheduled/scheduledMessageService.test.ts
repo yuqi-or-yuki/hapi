@@ -142,4 +142,20 @@ describe('ScheduledMessageService repeating jobs', () => {
         // A live worker's schedule is untouched.
         expect(row().status).toBe('pending')
     })
+
+    it('does not wake an archived worker, and runs again once it is reopened', async () => {
+        const { service, session, sent, alerts, row } = setup({ active: false })
+        session.metadata = { path: '/repo', host: 'h', lifecycleState: 'archived', swarm: { job: 'Job', promotedAt: 1, scheduleId: row().id } }
+
+        await service.tick()
+        expect(sent).toHaveLength(0)
+        expect(alerts).toHaveLength(0)
+        expect(row().status).toBe('pending')
+        expect(row().dueAt).toBe(T0 + HOUR)
+
+        session.metadata = { ...session.metadata, lifecycleState: 'running' }
+        setSystemTime(new Date(T0 + HOUR))
+        await service.tick()
+        expect(sent).toEqual(['run'])
+    })
 })
