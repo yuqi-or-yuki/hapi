@@ -48,6 +48,12 @@ const ZEROSHOT_STAGE_BADGES: Record<string, { label: string; colors: string }> =
 
 type SessionGroup = {
     key: string
+    /**
+     * The key custom groups are filed under: machine and folder, without the
+     * tier. A custom group belongs to a folder, not to a section of the
+     * sidebar, so it must still match after a session is promoted to a worker.
+     */
+    userGroupKey: string
     directory: string
     displayName: string
     machineId: string | null
@@ -311,6 +317,47 @@ function machineCollapseKey(tier: SessionTier, machineId: string | null): string
     return `machine::${tier}::${machineId ?? UNKNOWN_MACHINE_ID}`
 }
 
+export function userGroupKeyFor(machineId: string | null, directory: string): string {
+    return `${machineId ?? UNKNOWN_MACHINE_ID}::${directory}`
+}
+
+/**
+ * The sessions a custom group actually shows, and which are therefore left
+ * out of their folder's plain list.
+ *
+ * A session is only "in" a custom group when that group can be drawn in the
+ * session's own section, under a folder the group is filed against. A group
+ * with a missing or stale key, or one filed under a folder that is not in the
+ * session's section, hides nothing: its sessions fall back to their folder.
+ * Without this rule such sessions were dropped from both places and vanished.
+ */
+export function sessionsHeldByUserGroups(
+    userGroups: readonly { sessionIds: readonly string[]; projectGroupKey?: string }[],
+    sections: readonly { tier: SessionTier; machineGroups: readonly { projectGroups: readonly { userGroupKey: string; sessions: readonly { id: string }[] }[] }[] }[]
+): Set<string> {
+    const foldersByTier = new Map<SessionTier, Set<string>>()
+    const tierBySession = new Map<string, SessionTier>()
+    for (const section of sections) {
+        const folders = foldersByTier.get(section.tier) ?? new Set<string>()
+        foldersByTier.set(section.tier, folders)
+        for (const machine of section.machineGroups) {
+            for (const project of machine.projectGroups) {
+                folders.add(project.userGroupKey)
+                for (const session of project.sessions) tierBySession.set(session.id, section.tier)
+            }
+        }
+    }
+    const held = new Set<string>()
+    for (const group of userGroups) {
+        if (!group.projectGroupKey) continue
+        for (const id of group.sessionIds) {
+            const tier = tierBySession.get(id)
+            if (tier && foldersByTier.get(tier)?.has(group.projectGroupKey)) held.add(id)
+        }
+    }
+    return held
+}
+
 function groupSessionsByDirectory(sessions: SessionSummary[], tier: SessionTier = 'plain'): SessionGroup[] {
     const groups = new Map<string, { directory: string; machineId: string | null; sessions: SessionSummary[] }>()
 
@@ -345,6 +392,7 @@ function groupSessionsByDirectory(sessions: SessionSummary[], tier: SessionTier 
 
             return {
                 key,
+                userGroupKey: userGroupKeyFor(group.machineId, group.directory),
                 directory: group.directory,
                 displayName,
                 machineId: group.machineId,
@@ -1694,6 +1742,11 @@ export function SessionList(props: {
 
     const containerRef = useRef<HTMLDivElement | null>(null)
 
+    const heldByUserGroups = useMemo(
+        () => sessionsHeldByUserGroups(userGroups, tierSections),
+        [userGroups, tierSections]
+    )
+
     const flatVisibleSessions = useMemo(() => {
         return tierSections
             .filter(section => !isTierCollapsed(section))
@@ -1703,9 +1756,8 @@ export function SessionList(props: {
                 mg.projectGroups
                     .filter(pg => !isGroupCollapsed(pg))
                     .flatMap(pg => {
-                        const projectUserGroups = getGroupsForProject(pg.key)
-                        const allGroupedIds = new Set(userGroups.flatMap(g => g.sessionIds))
-                        const ungrouped = pg.sessions.filter(s => !allGroupedIds.has(s.id))
+                        const projectUserGroups = getGroupsForProject(pg.userGroupKey)
+                        const ungrouped = pg.sessions.filter(s => !heldByUserGroups.has(s.id))
 
                         const groupedSessions = projectUserGroups
                             .filter(ug => !ug.collapsed)
@@ -1720,7 +1772,7 @@ export function SessionList(props: {
                         return [...groupedSessions, ...visibleUngrouped]
                     })
             )
-    }, [tierSections, collapseOverrides, selectedSessionId, isFiltering, userGroups, sessionVisibleCounts, getGroupsForProject]) // eslint-disable-line react-hooks/exhaustive-deps
+    }, [tierSections, collapseOverrides, selectedSessionId, isFiltering, userGroups, heldByUserGroups, sessionVisibleCounts, getGroupsForProject]) // eslint-disable-line react-hooks/exhaustive-deps
 
     const handleCheckboxClick = useCallback((sessionId: string, shiftKey: boolean) => {
         if (shiftKey && lastCheckedId) {
@@ -1887,11 +1939,11 @@ export function SessionList(props: {
                                         const isCollapsed = isGroupCollapsed(group)
                                         const ungroupedVisibleLimit = getGroupVisibleCount(group)
                                         const canStartInGroupDirectory = group.directory !== 'Other'
-                                        const projectUserGroups = getGroupsForProject(group.key)
-                                        // Use all user groups (not just this project's) so a session that moved
-                                        // project groups is still excluded from ungrouped and stays in its group.
-                                        const allGroupedIds = new Set(userGroups.flatMap(ug => ug.sessionIds))
-                                        const ungroupedSessions = group.sessions.filter(s => !allGroupedIds.has(s.id))
+                                        const projectUserGroups = getGroupsForProject(group.userGroupKey)
+                                        // A session that moved folders stays in its custom group, but only
+                                        // while that group is drawn somewhere in this section; otherwise it
+                                        // is listed here (see sessionsHeldByUserGroups).
+                                        const ungroupedSessions = group.sessions.filter(s => !heldByUserGroups.has(s.id))
                                         const visibleUngroupedSessions = getVisibleSessionPreview(ungroupedSessions, {
                                             expanded: isFiltering,
                                             selectedSessionId,
@@ -1948,7 +2000,9 @@ export function SessionList(props: {
                                                                 // Fall back to allSessions if the session moved to a different
                                                                 // project group (e.g. after a rename that changes metadata).
                                                                 .map(id => group.sessions.find(s => s.id === id) ?? allSessions.find(s => s.id === id))
-                                                                .filter((s): s is SessionSummary => !!s)
+                                                                // The same folder can appear in both sections; each copy of the
+                                                                // custom group shows only that section's sessions.
+                                                                .filter((s): s is SessionSummary => !!s && sessionTier(s) === group.tier)
                                                             // Hide a user group whose members are all filtered out (archived,
                                                             // deleted, or hidden by the active-only toggle). Previously this only
                                                             // applied while searching, so an emptied group kept rendering a stale

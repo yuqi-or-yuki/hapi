@@ -18,6 +18,8 @@ import {
     shouldShowSessionInSidebar,
     partitionSessionsByTier,
     sessionTier,
+    sessionsHeldByUserGroups,
+    userGroupKeyFor,
 } from './SessionList'
 
 function makeSession(overrides: Partial<SessionSummary> & { id: string }): SessionSummary {
@@ -527,5 +529,35 @@ describe('session tiers', () => {
         expect(sessionTier(broken)).toBe('plain')
         expect(sessionTier(worker('y', 'Triage leads'))).toBe('swarm')
         expect(sessionTier(plain('z'))).toBe('plain')
+    })
+})
+
+describe('sessionsHeldByUserGroups', () => {
+    const folder = userGroupKeyFor('m1', '/repo/app')
+    const section = (tier: 'swarm' | 'plain', ids: string[], key = folder) => ({
+        tier,
+        machineGroups: [{ projectGroups: [{ userGroupKey: key, sessions: ids.map((id) => ({ id })) }] }]
+    })
+
+    it('holds a session whose custom group is filed under a folder in its own section', () => {
+        const held = sessionsHeldByUserGroups([{ sessionIds: ['a', 'w'], projectGroupKey: folder }], [section('plain', ['a']), section('swarm', ['w'])])
+        expect([...held].sort()).toEqual(['a', 'w'])
+    })
+
+    it('never hides a session whose custom group has no folder, so it cannot vanish', () => {
+        const held = sessionsHeldByUserGroups([{ sessionIds: ['w1', 'w2'] }], [section('swarm', ['w1', 'w2'])])
+        expect(held.size).toBe(0)
+    })
+
+    it('does not hold a worker when its group is only drawn in the other section', () => {
+        const held = sessionsHeldByUserGroups(
+            [{ sessionIds: ['w'], projectGroupKey: folder }],
+            [section('plain', ['a']), section('swarm', ['w'], userGroupKeyFor('m1', '/repo/elsewhere'))]
+        )
+        expect(held.has('w')).toBe(false)
+    })
+
+    it('files a custom group by machine and folder only, the same key it was created with', () => {
+        expect(userGroupKeyFor('m1', '/repo/app')).toBe('m1::/repo/app')
     })
 })
