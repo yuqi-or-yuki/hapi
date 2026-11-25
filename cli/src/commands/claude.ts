@@ -14,6 +14,7 @@ import { maybeAutoStartServer } from '@/utils/autoStartServer'
 import { withBunRuntimeEnv } from '@/utils/bunRuntime'
 import { extractErrorInfo } from '@/utils/errorUtils'
 import type { CommandDefinition } from './types'
+import { yoloByDefault } from './yoloDefault'
 
 export const claudeCommand: CommandDefinition = {
     name: 'default',
@@ -84,6 +85,11 @@ export const claudeCommand: CommandDefinition = {
                     unknownArgs.push(args[++i])
                 }
             }
+        }
+
+        if (!showHelp && await yoloByDefault(options)) {
+            options.permissionMode = 'bypassPermissions'
+            unknownArgs.push('--dangerously-skip-permissions')
         }
 
         if (unknownArgs.length > 0) {

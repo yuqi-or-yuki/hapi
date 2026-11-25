@@ -17,6 +17,8 @@ interface Settings {
   machineId?: string
   machineIdConfirmedByServer?: boolean
   runnerAutoStartWhenRunningHappy?: boolean
+  // Start terminal sessions with permissions bypassed when no permission flag is given.
+  yoloByDefault?: boolean
   cliApiToken?: string
   // API URL for server connections (priority: env HAPI_API_URL > this > default)
   apiUrl?: string

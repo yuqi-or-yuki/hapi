@@ -9,6 +9,7 @@ import { CodexCollaborationModeSchema } from '@hapi/protocol/schemas'
 import type { ReasoningEffort } from '@/codex/appServerTypes'
 import { assertCodexLocalSupported } from '@/codex/utils/codexVersion'
 import { parseReasoningEffortValue } from '@/codex/utils/reasoningEffort'
+import { yoloByDefault } from './yoloDefault'
 
 // Mirror the web /service-tier endpoint's enum so the internal resume spawn
 // path can never seed/persist an unsupported tier string.
@@ -108,6 +109,11 @@ export const codexCommand: CommandDefinition = {
                     unknownArgs.push(arg)
                 }
             }
+            if (await yoloByDefault(options)) {
+                options.permissionMode = 'yolo'
+                unknownArgs.push('--yolo')
+            }
+
             if (unknownArgs.length > 0) {
                 options.codexArgs = unknownArgs
             }
