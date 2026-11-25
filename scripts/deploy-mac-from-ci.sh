@@ -6,7 +6,7 @@
 # binary and hands it to ~/.hapi/bin/hapi-deploy, which signs it, swaps it in
 # and restarts only the hub.
 set -euo pipefail
-REPO=${HAPI_CI_REPO:-yuqi-or-yuki/hapi}
+REPO=${HAPI_CI_REPO:-trytenera-ai/hapi}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 SHA=${1:-$(git -C "$ROOT" ls-remote "https://github.com/$REPO.git" refs/heads/main | cut -f1)}
 [ -n "$SHA" ] || { echo "could not resolve the commit to deploy" >&2; exit 1; }
