@@ -553,7 +553,10 @@ export async function startRunner(options: { workspaceRoots?: string[] } = {}): 
           code: 'outside_workspace_roots'
         };
       }
-      const yolo = options.yolo === true;
+      // Yolo is the default for every session HAPI starts: they are expected to
+      // get on with the work unattended. Only an explicit `yolo: false`, or an
+      // explicit permission mode (which wins below), asks for prompts.
+      const yolo = options.yolo !== false;
       const sessionType = options.sessionType ?? 'simple';
       const worktreeName = options.worktreeName;
       let directoryCreated = false;
