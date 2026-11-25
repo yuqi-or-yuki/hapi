@@ -117,4 +117,29 @@ describe('ScheduledMessageService repeating jobs', () => {
         expect(new Date(row().dueAt).getHours()).toBe(startHour)
         expect(row().dueAt).toBeGreaterThan(T0)
     })
+
+    it('ends the schedule of a deleted session instead of retrying it forever', async () => {
+        const { service, row } = setup()
+        const store = new Store(':memory:')
+        const engine = { getSession: () => undefined } as unknown as SyncEngine
+        const orphanService = new ScheduledMessageService(store, () => engine)
+        const orphan = store.scheduledMessages.create({
+            namespace: 'default',
+            sourceSessionId: 'deleted-session',
+            text: 'run',
+            dueAt: T0,
+            cloneBeforeSend: false,
+            intervalMs: HOUR,
+            maxOccurrences: null
+        })
+
+        await orphanService.tick()
+        expect(store.scheduledMessages.getById(orphan.id)!.status).toBe('failed')
+
+        // Terminal: no longer due, so later polls do no work at all.
+        setSystemTime(new Date(T0 + 10 * HOUR))
+        expect(store.scheduledMessages.due(Date.now()).map((job) => job.id)).toEqual([])
+        // A live worker's schedule is untouched.
+        expect(row().status).toBe('pending')
+    })
 })

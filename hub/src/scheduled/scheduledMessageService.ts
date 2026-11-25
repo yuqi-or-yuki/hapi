@@ -115,7 +115,8 @@ export class ScheduledMessageService {
         try {
             const source = engine.getSession(job.sourceSessionId)
             if (!source) {
-                throw new Error('Source session not found')
+                this.abandonJob(job, 'Source session no longer exists')
+                return
             }
             if (this.isSessionBusy(source)) {
                 this.deferBusyJob(job, 'Source session is currently running')
@@ -173,6 +174,20 @@ export class ScheduledMessageService {
         if (attempt.failures >= ALERT_AFTER_FAILURES) {
             this.raise(engine, job, attempt, `Scheduled run keeps failing (${attempt.failures} tries): ${message}`)
         }
+    }
+
+    /**
+     * The session this job belongs to is gone for good, so there is nothing to
+     * retry: end the schedule instead of failing every poll forever.
+     *
+     * `engine.getSession` already falls back to the store, so a miss is a
+     * deleted session and not a cold cache. Deleting a worker leaves its
+     * schedule behind; without this, each orphan kept waking the scheduler,
+     * writing a failure row and retrying for as long as the hub ran.
+     */
+    private abandonJob(job: ScheduledMessageRow, reason: string): void {
+        this.store.scheduledMessages.markFailed(job.id, reason)
+        this.attempts.delete(job.id)
     }
 
     private deferBusyJob(job: ScheduledMessageRow, reason: string): void {
