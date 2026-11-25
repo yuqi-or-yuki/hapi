@@ -82,6 +82,9 @@ export type SessionTier = 'swarm' | 'plain'
 export const SESSION_TIER_ORDER: readonly SessionTier[] = ['swarm', 'plain']
 
 export function sessionTier(session: SessionSummary): SessionTier {
+    // An archived worker has left the swarm (the Swarm page drops it too); it is
+    // listed with ordinary sessions until it is reopened.
+    if (session.metadata?.lifecycleState === 'archived') return 'plain'
     return session.metadata?.swarm?.job ? 'swarm' : 'plain'
 }
 

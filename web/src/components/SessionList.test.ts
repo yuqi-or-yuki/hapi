@@ -600,3 +600,11 @@ describe('pipelines in the swarm section', () => {
         expect(membership.get('outreach')?.order).toBe(2)
     })
 })
+
+describe('sessionTier and archiving', () => {
+    it('lists an archived worker with ordinary sessions, and a reopened one with the swarm again', () => {
+        const swarm = { job: 'Draft the report', promotedAt: 1 }
+        expect(sessionTier(makeSession({ id: 'a', metadata: { path: '/r', lifecycleState: 'archived', swarm } }))).toBe('plain')
+        expect(sessionTier(makeSession({ id: 'b', metadata: { path: '/r', lifecycleState: 'running', swarm } }))).toBe('swarm')
+    })
+})
