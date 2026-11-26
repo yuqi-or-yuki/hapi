@@ -67,12 +67,11 @@ function useStateLine(session: SessionSummary, state: WorkerState): string {
  * Everything else (machine, permissions, editing) is one click
  * away on the worker's page, so a healthy swarm reads as a quiet list.
  */
-function WorkerCard(props: { worker: Worker; onOpen: () => void; onApprove: () => void }) {
+function WorkerCard(props: { worker: Worker; onOpen: () => void }) {
     const { t } = useTranslation()
     const { session, job } = props.worker
     const state = workerState(session)
     const line = useStateLine(session, state)
-    const review = session.metadata?.swarm?.review
     const rows = session.workerBoard?.count ?? 0
     const toReview = newToReview(session)
 
@@ -119,18 +118,6 @@ function WorkerCard(props: { worker: Worker; onOpen: () => void; onApprove: () =
                 </div>
             </div>
 
-            {review ? (
-                <div className="relative mt-3 flex items-center justify-between gap-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs">
-                    <span className="font-medium text-amber-700 dark:text-amber-300">{t('swarm.review.title', { n: review.runsLeft })}</span>
-                    <button
-                        type="button"
-                        onClick={props.onApprove}
-                        className="shrink-0 rounded-full bg-amber-600 px-3 py-1 font-medium text-white hover:opacity-90"
-                    >
-                        {t('swarm.review.approve')}
-                    </button>
-                </div>
-            ) : null}
         </div>
     )
 }
@@ -138,8 +125,6 @@ function WorkerCard(props: { worker: Worker; onOpen: () => void; onApprove: () =
 export function SwarmView(props: {
     sessions: readonly SessionSummary[]
     onOpenWorker: (sessionId: string) => void
-    /** Approve the last reviewed run of a worker in its review period. */
-    onApprove: (session: SessionSummary) => void
 }) {
     const { t } = useTranslation()
     const workers = useMemo(() => selectWorkers(props.sessions), [props.sessions])
@@ -156,7 +141,6 @@ export function SwarmView(props: {
         <WorkerCard
             worker={worker}
             onOpen={() => props.onOpenWorker(worker.session.id)}
-            onApprove={() => props.onApprove(worker.session)}
         />
     )
 

@@ -83,12 +83,12 @@ function estimateBase64Bytes(base64: string): number {
     return Math.floor((len * 3) / 4) - padding
 }
 
-type WorkerBrief = Pick<SwarmMembership, 'job' | 'playbook' | 'review' | 'board'>
+type WorkerBrief = Pick<SwarmMembership, 'job' | 'playbook' | 'board'>
 
 /**
  * What a worker is told on each scheduled run. Rebuilt whenever the worker is
- * edited, so the next run always carries the current job, playbook and review
- * state instead of whatever was true when the schedule was created.
+ * edited, so the next run always carries the current job and playbook
+ * instead of whatever was true when the schedule was created.
  */
 export function workerPrompt(worker: WorkerBrief): string {
     const parts = [`Scheduled run of your standing job: ${worker.job}`]
@@ -98,9 +98,6 @@ export function workerPrompt(worker: WorkerBrief): string {
     parts.push('Do this run now. Put every result on your board with `hapi worker record` (one row per item, a stable --key so reruns update rows instead of duplicating them; `hapi worker rows` shows what is already there).')
     if (worker.board?.columns?.includes('suggestedDecision') && worker.board.columns.includes('suggestedReason')) {
         parts.push('Item approval is enabled. Every card awaiting review must be prefilled: a name, suggestedDecision (yes or no) and an evidence-based suggestedReason (and bestFitRole on a talent board). The board rejects a write that leaves any such card unfilled, and the review stays closed while one is. Suggestion hit rate is measured per category, so set the item\'s category (the role on a talent board, a `category` field elsewhere). These are predictions, not user decisions or authorization to act. Read saved approvalReviews (or linkedinReviews on a talent board), process unhandled feedback without inventing preferences, and preserve all history. The dashboard tracks agreement only where the original prediction was captured.')
-    }
-    if (worker.review) {
-        parts.push(`REVIEW PERIOD (${worker.review.runsLeft} more approved run${worker.review.runsLeft === 1 ? '' : 's'} before you run free): do the work and record the rows, but do not take any action that reaches outside this machine or cannot be undone (sending email or messages, posting, purchasing, deleting, pushing). Prepare those as drafts, list exactly what you would have done, and stop for review.`)
     }
     parts.push('Then report in a few lines what changed and anything that needs my attention.')
     return parts.join('\n\n')
@@ -1059,13 +1056,12 @@ export function createSessionsRoutes(getSyncEngine: () => SyncEngine | null, sto
                 return c.json({ ok: true })
             }
 
-            const { name, playbook, reviewRuns } = parsed.data
+            const { name, playbook } = parsed.data
             const worker = {
                 job,
                 name: name === undefined ? current?.name : name || undefined,
                 avatarSeed: parsed.data.avatarSeed ?? current?.avatarSeed,
                 playbook: playbook === undefined ? current?.playbook : playbook || undefined,
-                review: reviewRuns === undefined ? current?.review : reviewRuns > 0 ? { runsLeft: reviewRuns } : undefined,
                 board: parsed.data.board ?? current?.board,
                 activeWindow: parsed.data.activeWindow === undefined ? current?.activeWindow : parsed.data.activeWindow ?? undefined
             }

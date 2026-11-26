@@ -24,7 +24,7 @@ export type WorkerDraft = SetSessionSwarmRequest & { job: string }
 type WorkerSubject = {
     id: string
     flavor?: string | null
-    swarm?: { job: string; name?: string; avatarSeed?: string; playbook?: string; review?: { runsLeft: number }; activeWindow?: ActiveWindow; board?: { title?: string; columns?: string[] } } | null
+    swarm?: { job: string; name?: string; avatarSeed?: string; playbook?: string; activeWindow?: ActiveWindow; board?: { title?: string; columns?: string[] } } | null
     workerRun?: SessionSummary['workerRun']
 }
 
@@ -35,8 +35,6 @@ const HOURS = Array.from({ length: 25 }, (_, hour) => hour)
 function hourLabel(hour: number): string {
     return new Date(2000, 0, 1, hour % 24).toLocaleTimeString(undefined, { hour: 'numeric' })
 }
-
-const REVIEW_CHOICES = [0, 1, 3, 5] as const
 
 const SCHEDULE_MODES: readonly ScheduleDraft['mode'][] = ['none', 'every', 'daily']
 
@@ -69,7 +67,6 @@ export function PromoteToWorkerDialog(props: {
     const [schedule, setSchedule] = useState<ScheduleDraft>(savedSchedule)
     const [activeWindow, setActiveWindow] = useState<ActiveWindow>(worker.swarm?.activeWindow ?? {})
     const [playbook, setPlaybook] = useState(worker.swarm?.playbook ?? '')
-    const [reviewRuns, setReviewRuns] = useState(worker.swarm?.review?.runsLeft ?? 0)
     const savedApproval = Boolean(worker.swarm?.board?.columns?.includes('suggestedDecision') && worker.swarm.board.columns.includes('suggestedReason'))
     const [itemApproval, setItemApproval] = useState(savedApproval)
     const [error, setError] = useState<string | null>(null)
@@ -84,7 +81,6 @@ export function PromoteToWorkerDialog(props: {
         setSchedule(savedSchedule)
         setActiveWindow(worker.swarm?.activeWindow ?? {})
         setPlaybook(worker.swarm?.playbook ?? '')
-        setReviewRuns(worker.swarm?.review?.runsLeft ?? 0)
         setItemApproval(savedApproval)
         setError(null)
         setIsPending(false)
@@ -106,7 +102,6 @@ export function PromoteToWorkerDialog(props: {
                 name: name.trim(),
                 avatarSeed: seed,
                 playbook: playbook.trim(),
-                reviewRuns,
                 board: itemApproval !== savedApproval ? {
                     ...worker.swarm?.board,
                     columns: itemApproval
@@ -315,26 +310,6 @@ export function PromoteToWorkerDialog(props: {
                         <label className="flex items-start gap-2 text-sm font-medium text-[var(--app-fg)]"><input type="checkbox" checked={itemApproval} onChange={(event) => setItemApproval(event.target.checked)} disabled={isPending} className="mt-0.5" /> Item approval and prediction tracking</label>
                         <p className="mt-2 text-xs text-[var(--app-hint)]">Review suggested yes/no decisions and reasons one item at a time. Track agreement without automatically taking external actions.</p>
                     </div>
-                    <div>
-                        <label htmlFor="swarm-review" className="block text-sm font-medium text-[var(--app-fg)]">
-                            {t('swarm.promote.reviewLabel')}
-                        </label>
-                        <select
-                            id="swarm-review"
-                            value={reviewRuns}
-                            onChange={(event) => setReviewRuns(Number(event.target.value))}
-                            disabled={isPending}
-                            className={`mt-2 w-full text-sm ${INPUT_CLASS}`}
-                        >
-                            {[...new Set([...REVIEW_CHOICES, reviewRuns])].sort((a, b) => a - b).map((runs) => (
-                                <option key={runs} value={runs}>
-                                    {runs === 0 ? t('swarm.promote.review.none') : t('swarm.promote.review.runs', { n: runs })}
-                                </option>
-                            ))}
-                        </select>
-                        <p className="mt-2 text-xs text-[var(--app-hint)]">{t('swarm.promote.reviewHint')}</p>
-                    </div>
-
                     {error ? (
                         <div className="rounded-md bg-red-50 p-3 text-sm text-red-600 dark:bg-red-900/20 dark:text-red-400">
                             {error}

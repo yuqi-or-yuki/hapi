@@ -11,7 +11,6 @@ type Swarm = {
     job: string
     name?: string
     playbook?: string
-    review?: { runsLeft: number }
     activeWindow?: { weekdaysOnly?: boolean; startHour?: number; endHour?: number }
     board?: { title?: string; columns?: string[] }
 }
@@ -54,15 +53,6 @@ function parsePlaybook(args: string[]): string | undefined {
     return file ? readFileSync(file, 'utf8') : getFlag(args, 'playbook')
 }
 
-function parseReviewRuns(args: string[]): number | undefined {
-    if (hasFlag(args, 'no-review')) return 0
-    const value = getFlag(args, 'review')
-    if (value === undefined) return undefined
-    const runs = Number(value)
-    if (!Number.isInteger(runs) || runs < 0 || runs > 50) throw new Error(`Invalid --review value: ${value} (expected a number of runs, 0-50)`)
-    return runs
-}
-
 function parseList(value: string | undefined): string[] | undefined {
     const items = value?.split(',').map((item) => item.trim()).filter(Boolean)
     return items?.length ? items : undefined
@@ -100,9 +90,6 @@ async function handleWorkerCommand(args: string[]): Promise<void> {
             return
         }
         console.log(`${chalk.green('Worker')}${swarm.name ? ` ${chalk.bold(swarm.name)}` : ''}: ${swarm.job}`)
-        console.log(swarm.review
-            ? chalk.yellow(`  review period: ${swarm.review.runsLeft} more approved run(s) before running free - draft outward-facing actions, do not take them`)
-            : '  running free (no review period)')
         if (swarm.activeWindow) {
             const { weekdaysOnly, startHour, endHour } = swarm.activeWindow
             console.log(`  scheduled runs only: ${[weekdaysOnly ? 'weekdays' : '', startHour !== undefined ? `${startHour}:00-${endHour}:00` : ''].filter(Boolean).join(', ')} (hub local time)`)
@@ -160,23 +147,9 @@ async function handleWorkerCommand(args: string[]): Promise<void> {
             schedule: parseSchedule(args, Date.now()),
             activeWindow: parseActiveWindow(args),
             playbook: parsePlaybook(args),
-            reviewRuns: parseReviewRuns(args),
             board: columns || title ? { title, columns } : undefined
         })
         console.log(chalk.green('Worker set:'), job)
-        return
-    }
-
-    if (sub === 'approve') {
-        const swarm = await currentSwarm(path)
-        if (!swarm) throw new Error('This session is not a swarm worker')
-        if (!swarm.review) {
-            console.log(chalk.gray('No review period: this worker already runs free.'))
-            return
-        }
-        const runsLeft = hasFlag(args, 'all') ? 0 : swarm.review.runsLeft - 1
-        await request('put', `${path}/swarm`, { job: swarm.job, reviewRuns: runsLeft })
-        console.log(chalk.green('Approved.'), runsLeft > 0 ? `${runsLeft} more run(s) to review.` : 'Review period over: the worker now runs free.')
         return
     }
 
@@ -227,10 +200,9 @@ ${chalk.bold('Usage:')}
   hapi worker status
   hapi worker promote [--job <text>] [--name <name>] [--every 6h | --daily 09:00 | --on-demand]
                       [--weekdays] [--hours 9-17] [--any-time]
-                      [--playbook <text> | --playbook-file <path>] [--review <runs> | --no-review]
+                      [--playbook <text> | --playbook-file <path>]
                       [--columns a,b,c] [--board-title <text>]
                       Only the flags you pass change; the schedule keeps running through edits.
-  hapi worker approve [--all]                              approve the last run (or end the review period)
   hapi worker retire
   hapi worker record --key <id> --data '<json object>'     add a board row, or patch that row's fields
   hapi worker record --file rows.json                      many rows: [{ "key": "...", "field": ... }]
@@ -254,21 +226,6 @@ ${chalk.bold('Working hours:')}
 ${chalk.bold('Playbook:')}
   How the job is done right now. It is sent with every scheduled run, so when the approach
   changes, rewrite the playbook and the next run follows it. The schedule is untouched.
-
-${chalk.bold('Review period:')}
-  --review 3 means the next 3 runs are reviewed: the worker records its rows but drafts
-  outward-facing actions (email, posts, deletes) instead of taking them. Each approval counts
-  one run down; at 0 it runs free.
-
-${chalk.bold('Pipelines:')}
-  hapi worker link --from "<worker>"     take the items the operator approves on that worker's board
-  hapi worker link --to "<worker>"       hand your own approved items on to that worker
-  hapi worker unlink --from|--to "<worker>"
-  hapi worker inbox                      approved items handed to you and not handled yet (JSON)
-  hapi worker done --key "<key>"         you finished that item; it leaves your inbox (repeat --key)
-  hapi worker tell --to "<worker>" "<message>"   a note to a worker you are linked with
-  An item is handed on when the operator's saved review of it is "yes", and the receiving
-  worker is woken shortly after. Nothing unapproved is ever handed on.
 
 ${chalk.bold('Examples:')}
   hapi worker promote --job "Keep the researcher pipeline topped up" --name "Researcher Sourcing" --daily 09:00 \\

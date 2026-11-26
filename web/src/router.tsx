@@ -615,10 +615,6 @@ function SwarmPage() {
                 <SwarmView
                     sessions={sessions}
                     onOpenWorker={(sessionId) => navigate({ to: '/swarm/$sessionId', params: { sessionId } })}
-                    onApprove={(session) => {
-                        const swarm = session.metadata?.swarm
-                        if (swarm?.review) void updateWorker(session.id, { job: swarm.job, reviewRuns: swarm.review.runsLeft - 1 })
-                    }}
                 />
             </div>
         </div>
@@ -740,7 +736,6 @@ function WorkerPage() {
                     <WorkerDetails
                         session={session}
                         machineLabel={session.metadata?.machineId ? machineLabelsById[session.metadata.machineId] ?? null : null}
-                        onReview={(runsLeft) => void updateWorker(session.id, { job: swarm.job, reviewRuns: runsLeft })}
                     />
                     <WorkerBoard
                         session={session}

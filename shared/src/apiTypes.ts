@@ -366,8 +366,6 @@ export const SetSessionSwarmRequestSchema = z.object({
     activeWindow: ActiveWindowSchema.nullable().optional(),
     /** Omit to keep the current playbook; empty string clears it. */
     playbook: z.string().trim().max(8000).optional(),
-    /** Runs still to be approved before the worker runs free. Omit to keep; 0 ends the review period. */
-    reviewRuns: z.number().int().min(0).max(50).optional(),
     /** Omit to keep the current board layout. */
     board: z.object({
         title: z.string().trim().min(1).max(80).optional(),

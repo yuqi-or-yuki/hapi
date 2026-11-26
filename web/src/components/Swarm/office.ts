@@ -105,7 +105,7 @@ export function roomFor(session: SessionSummary): RoomId {
     const state = workerState(session)
     if (state === 'failing') return 'repair'
     if (state === 'working') return 'desks'
-    if (session.metadata?.swarm?.review || newToReview(session) > 0) return 'review'
+    if (newToReview(session) > 0) return 'review'
     return 'lounge'
 }
 

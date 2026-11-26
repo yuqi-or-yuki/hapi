@@ -94,11 +94,6 @@ export const SwarmMembershipSchema = z.object({
      * to the approach takes effect on the next run and survives context compaction.
      */
     playbook: z.string().min(1).max(8000).optional(),
-    /**
-     * Review period: until the operator has approved this many more runs, the
-     * worker prepares outward-facing actions as drafts instead of taking them.
-     */
-    review: z.object({ runsLeft: z.number().int().min(1).max(50) }).optional(),
     /** How the worker's reported rows are presented. Absent: columns follow the rows. */
     board: z.object({
         title: z.string().min(1).max(80).optional(),

@@ -20,7 +20,7 @@ describe('roomFor', () => {
         expect(roomFor(worker({ active: true, thinking: true }))).toBe('desks')
         expect(roomFor(worker({ workerRun: run }))).toBe('lounge')
         expect(roomFor(worker({ workerRun: { ...run, lastError: 'runner offline' } }))).toBe('repair')
-        expect(roomFor(worker({ metadata: { path: '/r', swarm: { job: 'Job', promotedAt: 1, review: { runsLeft: 2 } } } }))).toBe('review')
+        expect(roomFor(worker({ metadata: { path: '/r', swarm: { job: 'Job', promotedAt: 1, board: { columns: ['name', 'suggestedDecision', 'suggestedReason'] } } }, workerBoard: { count: 2, updatedAt: 1, unreviewed: 2, newestUnreviewedAt: Date.now() } }))).toBe('review')
     })
 })
 

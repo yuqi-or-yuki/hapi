@@ -40,8 +40,6 @@ function RunHistory(props: { recent: Run['recent']; nextRunAt: number | null }) 
 export function WorkerDetails(props: {
     session: SessionSummary
     machineLabel: string | null
-    /** Sets how many runs are still to be reviewed; 0 lets the worker run free. */
-    onReview: (runsLeft: number) => void
 }) {
     const { t } = useTranslation()
     const { session } = props
@@ -76,16 +74,6 @@ export function WorkerDetails(props: {
             </div>
 
             <dl className="mt-4 grid gap-x-6 gap-y-2 text-xs sm:grid-cols-[auto_1fr]">
-                {/* Always stated, not only while in review: silence would leave
-                    "is it acting on its own?" to be inferred from a missing banner. */}
-                <dt className="text-[var(--app-hint)]">{t('swarm.details.mode')}</dt>
-                <dd className="text-[var(--app-fg)]">
-                    <span className={`font-medium ${swarm?.review ? 'text-amber-700 dark:text-amber-300' : 'text-emerald-700 dark:text-emerald-400'}`}>
-                        {t(swarm?.review ? 'swarm.mode.review' : 'swarm.mode.free')}
-                    </span>
-                    {' · '}
-                    {swarm?.review ? t('swarm.mode.review.hint', { n: swarm.review.runsLeft }) : t('swarm.mode.free.hint')}
-                </dd>
                 <dt className="text-[var(--app-hint)]">{t('swarm.details.schedule')}</dt>
                 <dd className="text-[var(--app-fg)]">
                     {run
@@ -106,24 +94,6 @@ export function WorkerDetails(props: {
                 ) : null}
             </dl>
 
-            {swarm?.review ? (
-                <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2 rounded-xl bg-amber-500/10 px-3 py-2 text-xs">
-                    <div className="min-w-0 flex-1">
-                        <p className="font-medium text-amber-700 dark:text-amber-300">{t('swarm.review.title', { n: swarm.review.runsLeft })}</p>
-                        <p className="text-[var(--app-hint)]">{t('swarm.review.body')}</p>
-                    </div>
-                    <button
-                        type="button"
-                        onClick={() => props.onReview(swarm.review!.runsLeft - 1)}
-                        className="rounded-full bg-amber-600 px-3 py-1 font-medium text-white hover:opacity-90"
-                    >
-                        {t('swarm.review.approve')}
-                    </button>
-                    <button type="button" onClick={() => props.onReview(0)} className="text-[var(--app-hint)] hover:text-[var(--app-fg)]">
-                        {t('swarm.review.end')}
-                    </button>
-                </div>
-            ) : null}
         </div>
     )
 }

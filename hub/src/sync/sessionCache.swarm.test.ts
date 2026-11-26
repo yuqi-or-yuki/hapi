@@ -50,15 +50,13 @@ describe('setSessionSwarm', () => {
         expect(after?.scheduleId).toBeUndefined()
     })
 
-    it('ends a review period and keeps the playbook when the job is edited', async () => {
+    it('replaces the playbook when the worker is edited', async () => {
         const { cache, session } = createCache()
 
-        await cache.setSessionSwarm(session.id, { job: 'Source talent', playbook: 'From NeurIPS authors', review: { runsLeft: 2 } })
-        await cache.setSessionSwarm(session.id, { job: 'Source talent', playbook: 'From ICLR authors', review: undefined })
+        await cache.setSessionSwarm(session.id, { job: 'Source talent', playbook: 'From NeurIPS authors' })
+        await cache.setSessionSwarm(session.id, { job: 'Source talent', playbook: 'From ICLR authors' })
 
-        const after = cache.getSession(session.id)?.metadata?.swarm
-        expect(after?.playbook).toBe('From ICLR authors')
-        expect(after && 'review' in after).toBe(false)
+        expect(cache.getSession(session.id)?.metadata?.swarm?.playbook).toBe('From ICLR authors')
     })
 
     it('leaves the rest of the metadata untouched', async () => {

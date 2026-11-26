@@ -26,12 +26,10 @@ function Sign(props: { worker: Worker }) {
         return <><span className={`${board} border-red-900 bg-red-500 text-white`}>{t('swarm.office.sign.failing')}</span>{stick}</>
     }
     const toReview = newToReview(session)
-    if (toReview > 0 || session.metadata?.swarm?.review) {
+    if (toReview > 0) {
         return (
             <>
-                <span className={`${board} border-amber-900 bg-amber-300 text-amber-950`}>
-                    {toReview > 0 ? t('swarm.office.sign.reviewCount', { n: toReview }) : t('swarm.office.sign.review')}
-                </span>
+                <span className={`${board} border-amber-900 bg-amber-300 text-amber-950`}>{t('swarm.office.sign.reviewCount', { n: toReview })}</span>
                 {stick}
             </>
         )
