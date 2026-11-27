@@ -72,6 +72,31 @@ export function unfilledCards(rows: readonly { key: string; data: Row }[], board
         .filter((card) => card.missing.length > 0)
 }
 
+/** The review history that counts on this board: a talent board keeps its own list. */
+function reviewsFor(row: Row, talent: boolean): unknown[] {
+    const history = talent ? row.linkedinReviews : row.approvalReviews
+    return Array.isArray(history) ? history : []
+}
+
+/**
+ * The cards still awaiting review, in the exact order the reviewer meets them.
+ *
+ * The hub, the CLI and the web all have to agree on this order: it is what
+ * "the card after next" means when a worker is told which card to re-score
+ * after feedback, and a worker that counted differently would re-score the
+ * card the reviewer is about to open and leave them waiting on the run.
+ */
+export function reviewQueue<T extends { key: string; data: Row }>(rows: readonly T[], board: BoardConfig): T[] {
+    if (!isItemApprovalBoard(board)) return []
+    const talent = isTalentBoard(board)
+    // A held card is not up for review, so it never takes a place in the queue.
+    const pending = rows.filter((row) => reviewsFor(row.data, talent).length === 0 && (talent || row.data.channel !== 'hold'))
+    // Research cards lead on a talent board; sort is stable, so the rest keep board order.
+    return talent
+        ? [...pending].sort((a, b) => Number(!String(a.data.bestFitRole ?? '').startsWith('Research Scientist')) - Number(!String(b.data.bestFitRole ?? '').startsWith('Research Scientist')))
+        : [...pending]
+}
+
 /**
  * The operator's standing decision on a row: their latest saved review, or
  * null when nobody has reviewed it. A pipeline hands a row on only when this

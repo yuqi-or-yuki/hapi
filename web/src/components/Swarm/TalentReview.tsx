@@ -3,6 +3,7 @@ import type { WorkerRecord } from '@/api/client'
 import { boardCell, recordImages } from './board'
 import { BoardGallery } from './BoardGallery'
 import { randomId } from '@/lib/randomId'
+import { reviewQueue } from '@hapi/protocol/workerReview'
 
 const roles = [
     'Deployment Strategist', 'Forward Deployment', 'Research Scientist, Evaluations',
@@ -43,10 +44,13 @@ export function TalentReview({ records, onRecord, onClose, talent = true }: { re
     const initializedKey = useRef<string | null>(null)
     const userEdited = useRef(false)
     const shownSuggestion = useRef<{ decision: 'yes' | 'no' | null; reason: string; role: string } | null>(null)
+    // The order itself is shared with the hub and the CLI, so a worker told to
+    // re-score "the card after next" counts the same cards the reviewer sees.
+    // Skipping and revisiting are this reviewer's own state and stay local.
     const queue = useMemo(() => {
-        const pending = records.filter((r) => (talent || r.data.channel !== 'hold') && !skipped.includes(r.key) && (revisit || reviews(r, talent).length === 0))
-        // Preserve the existing order within each group; research cards lead on talent boards.
-        return talent ? [...pending].sort((a, b) => Number(!String(a.data.bestFitRole ?? '').startsWith('Research Scientist')) - Number(!String(b.data.bestFitRole ?? '').startsWith('Research Scientist'))) : pending
+        const board = talent ? { title: 'Talent intake' } : { columns: ['suggestedDecision', 'suggestedReason'] }
+        const pending = revisit ? [...records] : reviewQueue(records, board)
+        return pending.filter((r) => !skipped.includes(r.key) && (talent || r.data.channel !== 'hold'))
     }, [records, skipped, revisit, talent])
     const candidate = queue[0]
     const suggested = typeof candidate?.data.bestFitRole === 'string' && roles.includes(candidate.data.bestFitRole) ? candidate.data.bestFitRole : ''

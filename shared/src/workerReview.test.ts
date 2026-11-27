@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { isItemApprovalBoard, missingCardFields, reviewCategory, unfilledCards } from './workerReview'
+import { isItemApprovalBoard, missingCardFields, reviewCategory, unfilledCards, reviewQueue } from './workerReview'
 
 const approval = { columns: ['name', 'suggestedDecision', 'suggestedReason'] }
 const talent = { title: 'Talent intake' }
@@ -48,5 +48,34 @@ describe('review cards', () => {
         expect(reviewCategory({ role: 'Forward Deployment', category: 'x' })).toBe('Forward Deployment')
         expect(reviewCategory({ category: 'SoMa' })).toBe('SoMa')
         expect(reviewCategory({})).toBe('Uncategorized')
+    })
+})
+
+describe('reviewQueue', () => {
+    const card = (key: string, data: Record<string, unknown> = {}) => ({ key, data: { name: key, ...data } })
+    const approval = { columns: ['name', 'suggestedDecision', 'suggestedReason'] }
+
+    it('keeps board order, drops settled and held cards, so position 2 is the card after next', () => {
+        const rows = [
+            card('settled', { approvalReviews: [{ decision: 'yes' }] }),
+            card('next'),
+            card('held', { channel: 'hold' }),
+            card('after-next'),
+            card('later'),
+        ]
+        expect(reviewQueue(rows, approval).map((row) => row.key)).toEqual(['next', 'after-next', 'later'])
+    })
+
+    it('leads with research cards on a talent board, keeping their relative order', () => {
+        const rows = [
+            card('designer', { bestFitRole: 'Product Designer' }),
+            card('research-one', { bestFitRole: 'Research Scientist, Modeling' }),
+            card('research-two', { bestFitRole: 'Research Scientist, Evaluations' }),
+        ]
+        expect(reviewQueue(rows, { title: 'Talent intake' }).map((row) => row.key)).toEqual(['research-one', 'research-two', 'designer'])
+    })
+
+    it('is empty on a board that is not reviewed card by card', () => {
+        expect(reviewQueue([card('a')], { columns: ['name'] })).toEqual([])
     })
 })

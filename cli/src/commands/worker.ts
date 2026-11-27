@@ -3,6 +3,7 @@ import chalk from 'chalk'
 import { initializeToken } from '@/ui/tokenInit'
 import { HAPI_SESSION_ID_ENV } from '@/agent/hapiSessionEnv'
 import { nextDailyRun } from '@hapi/protocol/workerSchedule'
+import { reviewQueue } from '@hapi/protocol/workerReview'
 import { getFlag, hasFlag, parseIntervalMs, request } from './schedule'
 import type { CommandDefinition } from './types'
 
@@ -16,6 +17,19 @@ type Swarm = {
 }
 
 type PipelineEnd = { id: string; name: string; pending: number; handled: number }
+
+/**
+ * A pending card's place in the review queue. Only the first two matter to a
+ * run: the reviewer opens `reviewNext`, so re-scoring it would leave them
+ * waiting, while `reviewAfterNext` is the one card feedback should be applied
+ * to. Settled cards carry nothing.
+ */
+function reviewPosition(index: number | undefined): Record<string, unknown> {
+    if (index === undefined) return {}
+    if (index === 0) return { reviewQueuePosition: 1, reviewNext: true }
+    if (index === 1) return { reviewQueuePosition: 2, reviewAfterNext: true }
+    return { reviewQueuePosition: index + 1 }
+}
 
 const DAY_MS = 86_400_000
 
@@ -175,7 +189,11 @@ async function handleWorkerCommand(args: string[]): Promise<void> {
 
     if (sub === 'rows') {
         const { records } = await request<{ records: Row[] }>('get', `${path}/worker-records`)
-        console.log(JSON.stringify(records.map((row) => ({ key: row.key, ...row.data })), null, 2))
+        const swarm = await currentSwarm(path)
+        // Which card the reviewer opens next, and which one is yours to re-score:
+        // guessing that from board order would land on the card they are about to open.
+        const rank = new Map(reviewQueue(records, swarm?.board ?? undefined).map((row, index) => [row.key, index]))
+        console.log(JSON.stringify(records.map((row) => ({ key: row.key, ...row.data, ...reviewPosition(rank.get(row.key)) })), null, 2))
         return
     }
 
@@ -206,7 +224,8 @@ ${chalk.bold('Usage:')}
   hapi worker retire
   hapi worker record --key <id> --data '<json object>'     add a board row, or patch that row's fields
   hapi worker record --file rows.json                      many rows: [{ "key": "...", "field": ... }]
-  hapi worker rows                                         print the board as JSON
+  hapi worker rows                                         print the board as JSON (pending review cards
+                                                           carry reviewNext / reviewAfterNext)
   hapi worker remove --key <id>
 
 ${chalk.bold('Board rows:')}

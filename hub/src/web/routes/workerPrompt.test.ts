@@ -13,4 +13,10 @@ describe('workerPrompt', () => {
         expect(prompt).toContain('Item approval is enabled')
         expect(prompt).toContain('not user decisions or authorization to act')
     })
+
+    it('names the one card a scheduled run may re-score, and the one it must not touch', () => {
+        const prompt = workerPrompt({ job: 'Review leads', board: { columns: ['name', 'suggestedDecision', 'suggestedReason'] } })
+        expect(prompt).toContain('reviewAfterNext')
+        expect(prompt).toContain('Never re-score the card marked `reviewNext`')
+    })
 })
