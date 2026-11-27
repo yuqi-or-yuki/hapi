@@ -76,8 +76,18 @@ export function trainOrder<T>(workers: readonly T[], links: readonly PipelineLin
     return follows
 }
 
-/** Items waiting between one stage and the next. */
-export function pendingInto<T>(pipeline: Pipeline<T>, stage: number, idOf: (worker: T) => string): number {
+/**
+ * The links that feed a stage. Every link ends at exactly one worker, so the
+ * connectors above each stage between them account for the whole pipeline —
+ * except under a cycle, where a link can end in stage 0; `looseLinks` has those.
+ */
+export function linksInto<T>(pipeline: Pipeline<T>, stage: number, idOf: (worker: T) => string): PipelineLink[] {
     const ids = new Set(pipeline.stages[stage]?.map(idOf))
-    return pipeline.links.filter((link) => ids.has(link.to)).reduce((sum, link) => sum + link.pending, 0)
+    return pipeline.links.filter((link) => ids.has(link.to))
+}
+
+/** Links no connector shows: only a cycle can put one here. */
+export function looseLinks<T>(pipeline: Pipeline<T>, idOf: (worker: T) => string): PipelineLink[] {
+    const shown = new Set(pipeline.stages.flatMap((_, stage) => (stage > 0 ? linksInto(pipeline, stage, idOf) : [])))
+    return pipeline.links.filter((link) => !shown.has(link))
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildPipelines, pendingInto, trainOrder } from './pipeline'
+import { buildPipelines, linksInto, trainOrder } from './pipeline'
 
 const id = (worker: string) => worker
 const link = (from: string, to: string, pending = 0) => ({ from, to, pending, handled: 0 })
@@ -10,7 +10,7 @@ describe('buildPipelines', () => {
         expect(alone).toEqual(['cleaner'])
         expect(pipelines).toHaveLength(1)
         expect(pipelines[0].stages).toEqual([['intake'], ['outreach'], ['followup']])
-        expect(pendingInto(pipelines[0], 1, id)).toBe(4)
+        expect(linksInto(pipelines[0], 1, id)).toEqual([link('intake', 'outreach', 4)])
     })
 
     it('lines a pipeline up as a train: each worker follows the one before it', () => {

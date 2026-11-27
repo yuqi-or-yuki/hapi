@@ -61,11 +61,12 @@ describe('TalentReview', () => {
     it('shows the message a worker wants to send, and saves the edited version next to the original', async () => {
         const onRecord = vi.fn().mockResolvedValue(true)
         render(<TalentReview talent={false} records={[{ key: 'ann', createdAt: 1, updatedAt: 1, data: { name: 'Ann', channel: 'email', email: 'ann@example.com', subject: 'Your ChatBench paper', draft: 'Hi Ann, long pitch.', approvalQuestion: 'Send this email to ann@example.com?', suggestedDecision: 'yes', suggestedReason: 'Fits Evaluations.' } }]} onRecord={onRecord} onClose={() => {}} />)
-        expect(screen.getByText('Send this email to ann@example.com?')).toBeInTheDocument()
+        expect(screen.queryByText('Send this email to ann@example.com?')).not.toBeInTheDocument()
+        for (const name of ['Yes', 'No', 'Skip for now']) expect(screen.queryByRole('button', { name })).not.toBeInTheDocument()
         expect(screen.getByRole('textbox', { name: 'Message' })).toHaveValue('Hi Ann, long pitch.')
         fireEvent.change(screen.getByRole('textbox', { name: 'Message' }), { target: { value: 'Hi Ann, short note.' } })
-        expect(screen.getByRole('textbox', { name: 'Why?' })).toHaveValue('Fits Evaluations.')
-        fireEvent.click(screen.getByRole('button', { name: 'Save and next' }))
+        expect(screen.queryByRole('textbox', { name: 'Why?' })).not.toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: 'Approve to send' }))
         await waitFor(() => expect(onRecord).toHaveBeenCalledTimes(1))
         const fields = onRecord.mock.calls[0][1]
         expect(fields).toMatchObject({ draft: 'Hi Ann, short note.', draftOriginal: 'Hi Ann, long pitch.', subject: 'Your ChatBench paper', approvalDecision: 'yes' })
@@ -73,12 +74,14 @@ describe('TalentReview', () => {
     })
     it('records an approved message as unedited and leaves the row text alone', async () => {
         const onRecord = vi.fn().mockResolvedValue(true)
-        render(<TalentReview talent={false} records={[{ key: 'bo', createdAt: 1, updatedAt: 1, data: { name: 'Bo', channel: 'LinkedIn', draft: 'Hi Bo.', suggestedDecision: 'yes', suggestedReason: 'Good fit.' } }]} onRecord={onRecord} onClose={() => {}} />)
+        render(<TalentReview talent={false} records={[{ key: 'held', createdAt: 1, updatedAt: 1, data: { name: 'Held', channel: 'hold' } }, { key: 'bo', createdAt: 1, updatedAt: 1, data: { name: 'Bo', channel: 'LinkedIn', draft: 'Hi Bo.', suggestedDecision: 'no', suggestedReason: 'Good fit.' } }]} onRecord={onRecord} onClose={() => {}} />)
         expect(screen.queryByRole('textbox', { name: 'Subject' })).not.toBeInTheDocument()
-        fireEvent.click(screen.getByRole('button', { name: 'Save and next' }))
+        expect(screen.getByText('1 remaining')).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: 'Approve to send' }))
         await waitFor(() => expect(onRecord).toHaveBeenCalledTimes(1))
         const fields = onRecord.mock.calls[0][1]
         expect(fields.draft).toBeUndefined()
+        expect(fields.approvalDecision).toBe('yes')
         expect(fields.approvalReviews[0]).toMatchObject({ draftShown: 'Hi Bo.', draftFinal: 'Hi Bo.', draftEdited: false })
     })
     it('prefills an editable suggestion without recording it until saved', async () => {
@@ -115,6 +118,23 @@ describe('TalentReview', () => {
         expect(key).toBe('candidate-1')
         expect(fields.linkedinDecision).toBe('Would connect')
         expect(fields.linkedinReviews).toEqual([expect.objectContaining({ role: 'Forward Deployment', decision: 'yes', reason: 'Strong customer ownership', id: expect.any(String), at: expect.any(String) })])
+    })
+
+    it('hands the worker the card after next, never the card the reviewer opens next', async () => {
+        const onRecord = vi.fn().mockResolvedValue(true)
+        const card = (key: string, name: string) => ({ key, createdAt: 1, updatedAt: 1, data: { name, bestFitRole: 'Forward Deployment', suggestedDecision: 'yes', suggestedReason: `${name} reason` } })
+        const records = [card('current', 'Current'), card('next', 'Next'), card('after-next', 'After next'), card('later', 'Later')]
+        const { rerender } = render(<TalentReview records={records} onRecord={onRecord} onClose={() => {}} />)
+        fireEvent.click(screen.getByRole('button', { name: 'Save and next' }))
+        await waitFor(() => expect(onRecord).toHaveBeenCalledTimes(1))
+        expect(onRecord.mock.calls[0][0]).toBe('current')
+        expect(onRecord.mock.calls[0][2]).toBe('after-next')
+
+        // With only the reviewer's next card left, there is nothing safe to re-score.
+        rerender(<TalentReview records={[card('solo', 'Solo')]} onRecord={onRecord} onClose={() => {}} />)
+        fireEvent.click(screen.getByRole('button', { name: 'Save and next' }))
+        await waitFor(() => expect(onRecord).toHaveBeenCalledTimes(2))
+        expect(onRecord.mock.calls[1][2]).toBeNull()
     })
 
     it('keeps a saved review when the worker notification fails', async () => {

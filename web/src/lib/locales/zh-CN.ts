@@ -1270,7 +1270,6 @@ export default {
   'swarm.hitRate.reviews': '审核数',
   'swarm.hitRate.excluded': '另有 {n} 条早期审核没有保存当时的建议，无法比较，未计入',
   'swarm.toReview': '{n} 项待审核',
-  'swarm.pipeline.waiting': '{n} 个待处理',
   'swarm.pipeline.link': '{from} → {to}：{pending} 个待处理，{handled} 个已处理',
   'swarm.pipeline.unlink': '断开',
   'swarm.pipeline.connect': '连接员工：',

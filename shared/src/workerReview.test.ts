@@ -30,6 +30,20 @@ describe('review cards', () => {
         expect(unfilledCards(rows, { columns: ['name'] })).toEqual([])
     })
 
+    it('requires an HTTPS profile on product reviewer cards', () => {
+        const board = { ...approval, title: 'Product Reviewer Pool' }
+        const rows = [
+            { key: 'missing', data: full },
+            { key: 'invalid', data: { ...full, profileUrl: 'javascript:void(0)' } },
+            { key: 'valid', data: { ...full, profileUrl: 'https://example.com/candidate' } }
+        ]
+        expect(unfilledCards(rows, board)).toEqual([
+            { key: 'missing', missing: ['profileUrl'] },
+            { key: 'invalid', missing: ['profileUrl'] }
+        ])
+        expect(unfilledCards(rows, approval)).toEqual([])
+    })
+
     it('files a review under its role, then its category', () => {
         expect(reviewCategory({ role: 'Forward Deployment', category: 'x' })).toBe('Forward Deployment')
         expect(reviewCategory({ category: 'SoMa' })).toBe('SoMa')

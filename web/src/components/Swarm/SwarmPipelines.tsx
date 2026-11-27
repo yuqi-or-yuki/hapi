@@ -2,7 +2,7 @@ import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useAppContext } from '@/lib/app-context'
 import { useTranslation } from '@/lib/use-translation'
-import { buildPipelines, pendingInto, type PipelineLink } from './pipeline'
+import { buildPipelines, linksInto, looseLinks, type Pipeline, type PipelineLink } from './pipeline'
 import type { Worker } from './SwarmView'
 import { workerName } from './worker'
 
@@ -20,10 +20,37 @@ export function useSwarmLinks(): PipelineLink[] {
     return query.data ?? []
 }
 
+/** The arrow between two stages, carrying the links that cross it. */
+function Connector(props: { links: PipelineLink[]; name: (id: string) => string; disabled: boolean; onUnlink: (link: PipelineLink) => void }) {
+    const { t } = useTranslation()
+    return (
+        <div className="flex items-start gap-2 py-1.5 pl-5 text-xs text-[var(--app-hint)]">
+            <span aria-hidden="true" className="mt-px text-base leading-none">↓</span>
+            <ul className="min-w-0 space-y-0.5">
+                {props.links.map((link) => (
+                    <li key={`${link.from}>${link.to}`} className={link.pending > 0 ? 'text-amber-700 dark:text-amber-300' : ''}>
+                        {t('swarm.pipeline.link', { from: props.name(link.from), to: props.name(link.to), pending: link.pending, handled: link.handled })}
+                        <button
+                            type="button"
+                            className="ml-1.5 text-[var(--app-link)] hover:underline disabled:opacity-50"
+                            disabled={props.disabled}
+                            onClick={() => props.onUnlink(link)}
+                        >
+                            {t('swarm.pipeline.unlink')}
+                        </button>
+                    </li>
+                ))}
+            </ul>
+        </div>
+    )
+}
+
 /**
- * The swarm laid out the way work flows: linked workers side by side with an
- * arrow carrying the number of approved items waiting for the next stage, and
- * everyone else below as before.
+ * The swarm laid out the way work flows: linked workers stacked top to bottom,
+ * each full-width card separated by the arrow that carries its links, and
+ * everyone else below as before. Vertical on purpose — a wide pipeline used to
+ * divide one row between its stages, which squeezed long chains into unreadable
+ * slivers; down the page every stage gets the same room however long it grows.
  */
 export function SwarmPipelines(props: { workers: Worker[]; renderCard: (worker: Worker) => ReactNode }) {
     const { t } = useTranslation()
@@ -49,44 +76,24 @@ export function SwarmPipelines(props: { workers: Worker[]; renderCard: (worker: 
         const worker = props.workers.find((candidate) => candidate.session.id === id)
         return worker ? workerName(worker.session) : id.slice(0, 8)
     }
+    const loose = (pipeline: Pipeline<Worker>) => looseLinks(pipeline, idOf)
 
     return (
         <div className="space-y-4">
             {pipelines.map((pipeline) => (
                 <section key={pipeline.links.map((link) => `${link.from}>${link.to}`).join('|')} className="rounded-2xl border border-[var(--app-border)] p-3">
-                    <div className="flex flex-col items-stretch gap-2 lg:flex-row lg:items-center">
+                    <div className="flex flex-col items-stretch">
                         {pipeline.stages.map((stage, index) => (
                             <Fragment key={stage.map(idOf).join('|')}>
-                                {index > 0 ? (
-                                    <div className="flex shrink-0 items-center justify-center gap-1 text-xs text-[var(--app-hint)] lg:flex-col" aria-hidden="true">
-                                        <span className="text-lg leading-none lg:hidden">↓</span>
-                                        <span className="hidden text-lg leading-none lg:inline">→</span>
-                                        <span className={pendingInto(pipeline, index, idOf) > 0 ? 'font-medium text-amber-700 dark:text-amber-300' : ''}>
-                                            {t('swarm.pipeline.waiting', { n: pendingInto(pipeline, index, idOf) })}
-                                        </span>
-                                    </div>
-                                ) : null}
-                                <div className="min-w-0 flex-1 space-y-2">
+                                {index > 0 ? <Connector links={linksInto(pipeline, index, idOf)} name={name} disabled={change.isPending} onUnlink={(link) => change.mutate({ from: link.from, to: link.to, remove: true })} /> : null}
+                                <div className="min-w-0 space-y-2">
                                     {stage.map((worker) => <div key={idOf(worker)}>{props.renderCard(worker)}</div>)}
                                 </div>
                             </Fragment>
                         ))}
                     </div>
-                    <ul className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--app-hint)]">
-                        {pipeline.links.map((link) => (
-                            <li key={`${link.from}>${link.to}`}>
-                                {t('swarm.pipeline.link', { from: name(link.from), to: name(link.to), pending: link.pending, handled: link.handled })}
-                                <button
-                                    type="button"
-                                    className="ml-1.5 text-[var(--app-link)] hover:underline disabled:opacity-50"
-                                    disabled={change.isPending}
-                                    onClick={() => change.mutate({ from: link.from, to: link.to, remove: true })}
-                                >
-                                    {t('swarm.pipeline.unlink')}
-                                </button>
-                            </li>
-                        ))}
-                    </ul>
+                    {/* Only a cycle can leave a link off every connector. */}
+                    {loose(pipeline).length > 0 ? <Connector links={loose(pipeline)} name={name} disabled={change.isPending} onUnlink={(link) => change.mutate({ from: link.from, to: link.to, remove: true })} /> : null}
                 </section>
             ))}
 

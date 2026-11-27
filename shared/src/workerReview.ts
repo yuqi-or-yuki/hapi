@@ -22,6 +22,16 @@ function filled(value: unknown): value is string {
     return typeof value === 'string' && value.trim().length > 0
 }
 
+function isHttpsUrl(value: unknown): boolean {
+    if (!filled(value)) return false
+    try {
+        const url = new URL(value)
+        return url.protocol === 'https:' && Boolean(url.hostname) && !url.username && !url.password
+    } catch {
+        return false
+    }
+}
+
 function hasEvents(value: unknown): boolean {
     return Array.isArray(value) && value.length > 0
 }
@@ -52,7 +62,13 @@ export function unfilledCards(rows: readonly { key: string; data: Row }[], board
     const talent = isTalentBoard(board)
     return rows
         .filter((row) => !hasSavedReview(row.data))
-        .map((row) => ({ key: row.key, missing: missingCardFields(row.data, talent) }))
+        .map(({ key, data }) => {
+            const missing = missingCardFields(data, talent)
+            if (board?.title === 'Product Reviewer Pool' && !isHttpsUrl(data.profileUrl)) {
+                missing.push('profileUrl')
+            }
+            return { key, missing }
+        })
         .filter((card) => card.missing.length > 0)
 }
 

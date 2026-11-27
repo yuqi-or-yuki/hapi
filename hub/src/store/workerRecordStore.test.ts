@@ -48,13 +48,14 @@ describe('WorkerRecordStore', () => {
         expect(workerRecords.reviewHistory('default', 's1')[0].data.linkedinReviews).toEqual([review])
     })
 
-    it('counts rows nobody has reviewed yet, and recounts after a write', () => {
+    it('counts unreviewed rows except holds, and recounts after a write', () => {
         const { workerRecords } = new Store(':memory:')
         workerRecords.upsert('default', 's1', [
             { key: 'a', data: { name: 'Ann' } },
-            { key: 'b', data: { name: 'Bo', approvalReviews: [{ id: 'r1', decision: 'yes', reason: 'ok' }] } }
+            { key: 'b', data: { name: 'Bo', approvalReviews: [{ id: 'r1', decision: 'yes', reason: 'ok' }] } },
+            { key: 'c', data: { name: 'Casey', channel: 'hold' } }
         ])
-        expect(workerRecords.stats('default').get('s1')).toMatchObject({ count: 2, unreviewed: 1 })
+        expect(workerRecords.stats('default').get('s1')).toMatchObject({ count: 3, unreviewed: 1 })
         expect(workerRecords.stats('default').get('s1')?.newestUnreviewedAt).toBeGreaterThan(0)
 
         workerRecords.upsert('default', 's1', [{ key: 'a', data: { approvalReviews: [{ id: 'r2', decision: 'no', reason: 'no' }] } }])

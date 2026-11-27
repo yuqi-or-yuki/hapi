@@ -55,7 +55,7 @@ export function WorkerBoard(props: {
     reviewHistory?: readonly WorkerRecord[]
     isLoading: boolean
     error: string | null
-    onRecord: (key: string, fields: Record<string, unknown>) => Promise<boolean>
+    onRecord: (key: string, fields: Record<string, unknown>, rescoreKey: string | null) => Promise<boolean>
 }) {
     const { t } = useTranslation()
     const { session, records } = props

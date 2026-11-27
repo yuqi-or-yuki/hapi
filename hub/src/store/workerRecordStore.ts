@@ -156,7 +156,7 @@ export class WorkerRecordStore {
 
     /**
      * Per-board totals for the session list, including how many rows no one
-     * has reviewed yet. Counting those means reading every row's JSON, and the
+     * has reviewed yet, excluding held rows. Counting those means reading every row's JSON, and the
      * session list is requested constantly, so the result is cached and only
      * dropped when a board is written.
      */
@@ -164,7 +164,8 @@ export class WorkerRecordStore {
         const cached = this.statsCache.get(namespace)
         if (cached) return cached
         const unreviewed = `COALESCE(json_array_length(data, '$.linkedinReviews'), 0) = 0
-            AND COALESCE(json_array_length(data, '$.approvalReviews'), 0) = 0`
+            AND COALESCE(json_array_length(data, '$.approvalReviews'), 0) = 0
+            AND COALESCE(json_extract(data, '$.channel'), '') <> 'hold'`
         const rows = this.db.query<{ session_id: string; count: number; updated_at: number; unreviewed: number; newest_unreviewed: number | null }, [string]>(`
             SELECT session_id, COUNT(*) AS count, MAX(updated_at) AS updated_at,
                 SUM(CASE WHEN ${unreviewed} THEN 1 ELSE 0 END) AS unreviewed,

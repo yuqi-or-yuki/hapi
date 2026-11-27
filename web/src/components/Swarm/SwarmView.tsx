@@ -1,4 +1,5 @@
 import { useMemo, useState } from 'react'
+import { isItemApprovalBoard } from '@hapi/protocol/workerReview'
 import type { SessionSummary } from '@/types/api'
 import { formatFutureRelativeTime } from '@/lib/scheduledTime'
 import { useTranslation } from '@/lib/use-translation'
@@ -73,14 +74,15 @@ function WorkerCard(props: { worker: Worker; onOpen: () => void }) {
     const state = workerState(session)
     const line = useStateLine(session, state)
     const rows = session.workerBoard?.count ?? 0
-    const toReview = newToReview(session)
+    const toReview = isItemApprovalBoard(session.metadata?.swarm?.board) ? session.workerBoard?.unreviewed ?? 0 : 0
+    const hasNewReviews = newToReview(session) > 0
 
     return (
         <div className="relative min-w-0 rounded-2xl border border-[var(--app-border)] bg-[var(--app-subtle-bg)] p-4 transition-colors hover:border-[var(--app-hint)]">
             <div className="flex items-start gap-3">
                 <span className="relative shrink-0">
                     <WorkerAvatar seed={workerSeed(session)} size={44} flavor={session.metadata?.flavor} />
-                    {toReview > 0 ? (
+                    {hasNewReviews ? (
                         <span
                             role="status"
                             aria-label={t('swarm.toReview', { n: toReview })}

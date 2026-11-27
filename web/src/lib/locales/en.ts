@@ -1273,7 +1273,6 @@ export default {
   'swarm.hitRate.reviews': 'Reviews',
   'swarm.hitRate.excluded': '{n} earlier reviews have no saved suggestion to compare and are not counted',
   'swarm.toReview': '{n} to review',
-  'swarm.pipeline.waiting': '{n} waiting',
   'swarm.pipeline.link': '{from} → {to}: {pending} waiting, {handled} handled',
   'swarm.pipeline.unlink': 'Unlink',
   'swarm.pipeline.connect': 'Connect workers:',

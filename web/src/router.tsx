@@ -48,6 +48,7 @@ import { useSkills } from '@/hooks/queries/useSkills'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { PromoteToWorkerDialog } from '@/components/Swarm/PromoteToWorkerDialog'
 import { WorkerBoard } from '@/components/Swarm/WorkerBoard'
+import { reviewSavedMessage } from '@/components/Swarm/reviewNotice'
 import { randomId } from '@/lib/randomId'
 import { WorkerDetails } from '@/components/Swarm/WorkerDetails'
 import type { SetSessionSwarmRequest } from '@hapi/protocol/apiTypes'
@@ -743,12 +744,12 @@ function WorkerPage() {
                         reviewHistory={data?.reviewHistory}
                         isLoading={isLoading}
                         error={error instanceof Error ? error.message : null}
-                        onRecord={async (key, fields) => {
+                        onRecord={async (key, fields, rescoreKey) => {
                             await api.updateWorkerRecord(sessionId, key, fields)
                             try {
                                 await queryClient.invalidateQueries({ queryKey: ['worker-records', sessionId] })
                                 const targetId = session.active ? sessionId : await api.resumeSession(sessionId)
-                                await api.sendMessage(targetId, 'An item review was just saved on the worker board. Follow the playbook: process all unprocessed review feedback and update the relevant criteria where the evidence supports it.', randomId(), undefined, undefined, 'queue')
+                                await api.sendMessage(targetId, reviewSavedMessage(rescoreKey), randomId(), undefined, undefined, 'queue')
                                 return true
                             } catch {
                                 // The review is already durable. The playbook retries it on the next scheduled run.
