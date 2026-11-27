@@ -28,7 +28,7 @@ describe('getModelOptionsForFlavor', () => {
         expect(options.some((o) => o.value === 'opus')).toBe(true)
     })
 
-    it('keeps Claude presets when explicit options only include Sonnet models', () => {
+    it('uses the live Claude list verbatim instead of merging stale presets', () => {
         const options = getModelOptionsForFlavor('claude', null, [
             { value: null, label: 'Default' },
             { value: 'sonnet', label: 'Sonnet' },
@@ -37,28 +37,55 @@ describe('getModelOptionsForFlavor', () => {
         expect(options).toEqual([
             { value: null, label: 'Default' },
             { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
-            { value: 'opus', label: 'Opus' },
-            { value: 'opus[1m]', label: 'Opus 1M' },
-            { value: 'fable', label: 'Fable' },
-            { value: 'fable[1m]', label: 'Fable 1M' }
+            { value: 'sonnet[1m]', label: 'Sonnet 1M' }
         ])
     })
 
-    it('adds non-preset Claude options without hiding Opus presets', () => {
+    it('lists the newest Claude models the CLI reports, under their live names', () => {
+        // Shape of a real `list_models` reply: the CLI's own "default" row, then
+        // alias ids whose display names move with each release.
+        const options = getModelOptionsForFlavor('claude', null, [
+            { value: 'default', label: 'Default (recommended)' },
+            { value: 'opus', label: 'Opus 5.5' },
+            { value: 'fable[1m]', label: 'Fable 5.2' },
+            { value: 'sonnet', label: 'Sonnet 5.5' },
+            { value: 'claude-fable-5-1', label: 'Fable 5.1' }
+        ])
+        expect(options).toEqual([
+            { value: null, label: 'Default' },
+            { value: 'opus', label: 'Opus 5.5' },
+            { value: 'fable[1m]', label: 'Fable 5.2' },
+            { value: 'sonnet', label: 'Sonnet 5.5' },
+            { value: 'claude-fable-5-1', label: 'Fable 5.1' }
+        ])
+    })
+
+    it('adds non-preset Claude options reported by the CLI', () => {
         const options = getModelOptionsForFlavor('claude', null, [
             { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1' }
         ])
         expect(options).toEqual([
             { value: null, label: 'Default' },
-            { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1' },
-            { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' },
-            { value: 'opus', label: 'Opus' },
-            { value: 'opus[1m]', label: 'Opus 1M' },
-            { value: 'fable', label: 'Fable' },
-            { value: 'fable[1m]', label: 'Fable 1M' }
+            { value: 'claude-opus-4-1-20250805', label: 'Claude Opus 4.1' }
         ])
+    })
+
+    it('keeps a Claude model the CLI does not list, so the current one stays selectable', () => {
+        const options = getModelOptionsForFlavor('claude', 'claude-opus-4-6', [
+            { value: 'opus', label: 'Opus 5.5' }
+        ])
+        expect(options).toEqual([
+            { value: null, label: 'Default' },
+            { value: 'claude-opus-4-6', label: 'claude-opus-4-6' },
+            { value: 'opus', label: 'Opus 5.5' }
+        ])
+    })
+
+    it('falls back to the static Claude presets when the CLI list is unavailable', () => {
+        const options = getModelOptionsForFlavor('claude', null, [])
+        expect(options[0]).toEqual({ value: null, label: 'Default' })
+        expect(options.some((o) => o.value === 'opus')).toBe(true)
+        expect(options.some((o) => o.value === 'fable[1m]')).toBe(true)
     })
 
     it('includes custom Gemini model from env/config in options', () => {
@@ -210,12 +237,14 @@ describe('getNextModelForFlavor', () => {
         expect(next).not.toBeNull()
     })
 
-    it('cycles through Claude presets when explicit options only include Sonnet models', () => {
-        const next = getNextModelForFlavor('claude', 'sonnet[1m]', [
-            { value: 'sonnet', label: 'Sonnet' },
-            { value: 'sonnet[1m]', label: 'Sonnet 1M' }
-        ])
-        expect(next).toBe('opus')
+    it('cycles only through the models the CLI reports', () => {
+        const live = [
+            { value: 'opus', label: 'Opus 5.5' },
+            { value: 'fable[1m]', label: 'Fable 5.2' }
+        ]
+        expect(getNextModelForFlavor('claude', 'opus', live)).toBe('fable[1m]')
+        // Wraps back to Default rather than into a stale preset.
+        expect(getNextModelForFlavor('claude', 'fable[1m]', live)).toBeNull()
     })
 
     it('cycles explicit model options', () => {

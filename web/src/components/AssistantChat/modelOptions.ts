@@ -48,32 +48,27 @@ function getClaudeModelOptions(currentModel?: string | null, customOptions?: Mod
         return getClaudeComposerModelOptions(currentModel)
     }
 
-    const options = getClaudeComposerModelOptions(currentModel)
-    const nextOptions = [...options]
-    let insertIndex = Math.max(1, nextOptions.findIndex((option) => option.value !== null))
+    // Claude Code reports the models it actually supports (`list_models`), newest
+    // first, so that list is authoritative: render it as-is. It used to be merged
+    // into the static CLAUDE_MODEL_PRESETS fallback, which kept the stale preset
+    // row for every id the CLI also ships (`opus`, `sonnet`, `fable[1m]`) and so
+    // hid the live names — the newest model showed up as plain "Fable 1M", or not
+    // at all once the presets drifted behind the CLI.
+    const options: ModelOption[] = [{ value: null, label: 'Default' }]
 
     for (const option of customOptions) {
         const normalizedValue = normalizeCurrentModel(option.value)
+        // The CLI's own "default" entry is already covered by the row above.
         if (!normalizedValue) {
             continue
         }
-
-        const existingIndex = nextOptions.findIndex((nextOption) => nextOption.value === normalizedValue)
-        if (existingIndex >= 0) {
-            if (nextOptions[existingIndex]?.label === normalizedValue) {
-                nextOptions[existingIndex] = option
-            }
+        if (options.some((existing) => existing.value === normalizedValue)) {
             continue
         }
-
-        nextOptions.splice(insertIndex, 0, {
-            value: normalizedValue,
-            label: option.label
-        })
-        insertIndex += 1
+        options.push({ value: normalizedValue, label: option.label })
     }
 
-    return nextOptions
+    return withCurrentModelOption(options, currentModel)
 }
 
 function getAgyModelOptions(currentModel?: string | null): ModelOption[] {
